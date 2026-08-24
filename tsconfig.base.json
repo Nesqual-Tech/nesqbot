@@ -1,0 +1,40 @@
+{
+  // Shared TypeScript settings for every workspace in the Nesq Bot monorepo.
+  //
+  // Packages under packages/* extend this, set `outDir`/`rootDir`, and declare
+  // `references` to their workspace dependencies, so `tsc -b` builds them in
+  // dependency order. Apps under apps/* may extend it too, but they own their
+  // own `lib`/`jsx`/`types` (DOM for desktop, react-native for mobile).
+  //
+  // Deliberately NOT set here: `paths` for @nesqbot/*. Resolution goes through
+  // the npm workspace symlink and each package's "exports" field, which points
+  // at TypeScript source. Adding `paths` on top of that would pull another
+  // composite project's *sources* into this program and defeat `tsc -b`.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "useDefineForClassFields": true,
+
+    // Strictness. Everything shipped from packages/* must satisfy all of this.
+    "strict": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noPropertyAccessFromIndexSignature": false,
+    "forceConsistentCasingInFileNames": true,
+
+    // Composite project references. `declaration` is implied by `composite`
+    // but is spelled out so the intent survives a future edit.
+    "composite": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "skipLibCheck": true
+  }
+}

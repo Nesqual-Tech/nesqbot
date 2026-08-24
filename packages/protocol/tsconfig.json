@@ -1,0 +1,13 @@
+{
+  // Leaf of the package graph — no workspace dependencies.
+  //
+  // `tsc -b` is both the build and the typecheck: composite projects emit
+  // declarations into dist/ so dependent projects can resolve them. dist/ is
+  // build output only; consumers import ./src (see package.json "exports").
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src"]
+}

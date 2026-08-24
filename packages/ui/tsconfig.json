@@ -1,0 +1,11 @@
+{
+  // Design tokens. No workspace dependencies and no DOM lib on purpose:
+  // this package is consumed by React Native as well, so nothing here may
+  // touch `window`, `document` or any DOM type.
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src"]
+}

@@ -1,0 +1,319 @@
+# Bot Desktop pod template - one desktop per bot.
+#
+# This is a TEMPLATE, not an applyable manifest. The API/worker substitutes
+# the placeholders before applying:
+#
+#   BOT_SLUG            bot slug, must be a valid DNS-1123 label
+#   ACR_LOGIN_SERVER    e.g. YOUR_ACR.azurecr.io
+#   IMAGE_TAG           pinned image tag - never `latest`
+#   NAMESPACE           target namespace (default: nesq-desktops)
+#   STORAGE_CLASS       RWO storage class (azurefile-csi / managed-csi)
+#
+#   sed -e "s/BOT_SLUG/sales/g" -e "s|ACR_LOGIN_SERVER|$ACR|g" \
+#       -e "s/IMAGE_TAG/v0.1.0/g" -e "s/NAMESPACE/nesq-desktops/g" \
+#       -e "s/STORAGE_CLASS/managed-csi/g" \
+#       infra/bot-desktop/k8s/desktop-template.yaml | kubectl apply -f -
+#
+# Prerequisite Secret in the target namespace (create once, out of band):
+#
+#   kubectl -n nesq-desktops create secret generic nesq-desktop-secrets \
+#     --from-literal=vnc-password="$(openssl rand -base64 24)" \
+#     --from-literal=sidecar-token="$(openssl rand -base64 32)"
+#
+# Threat model: a Bot Desktop runs a real browser driven by an LLM. Assume the
+# content it renders is hostile. Hence: non-root, no privilege escalation, all
+# capabilities dropped, seccomp RuntimeDefault, and a NetworkPolicy that only
+# lets the API reach it and only lets it reach DNS + the internet (never the
+# rest of the cluster).
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nesq-bot-home-BOT_SLUG
+  namespace: NAMESPACE
+  labels:
+    app.kubernetes.io/name: nesq-bot-desktop
+    app.kubernetes.io/instance: BOT_SLUG
+    app.kubernetes.io/part-of: nesqbot
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: STORAGE_CLASS
+  resources:
+    requests:
+      # Browser profile + downloads + a working directory. Grow per bot as
+      # needed; PVCs can be expanded, not shrunk.
+      storage: 10Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nesq-bot-desktop-BOT_SLUG
+  namespace: NAMESPACE
+  labels:
+    app.kubernetes.io/name: nesq-bot-desktop
+    app.kubernetes.io/instance: BOT_SLUG
+    app.kubernetes.io/part-of: nesqbot
+    bot: BOT_SLUG
+spec:
+  replicas: 1
+  # A desktop owns a single RWO volume and a stateful X session. Two of them
+  # overlapping during a rollout would corrupt the browser profile.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nesq-bot-desktop
+      bot: BOT_SLUG
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nesq-bot-desktop
+        app.kubernetes.io/instance: BOT_SLUG
+        app.kubernetes.io/part-of: nesqbot
+        bot: BOT_SLUG
+    spec:
+      automountServiceAccountToken: false
+      # A desktop has no business talking to the Kubernetes API.
+      serviceAccountName: nesq-bot-desktop
+      terminationGracePeriodSeconds: 45
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      nodeSelector:
+        # Keep desktops off the general workload pool - they are memory-hungry
+        # and untrusted. Label the pool: kubectl label node <n> workload=bot-desktop
+        workload: bot-desktop
+      tolerations:
+        - key: workload
+          operator: Equal
+          value: bot-desktop
+          effect: NoSchedule
+      containers:
+        - name: desktop
+          image: ACR_LOGIN_SERVER/nesqbot/bot-desktop:IMAGE_TAG
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: BOT_SLUG
+              value: BOT_SLUG
+            - name: DESKTOP_PROFILE
+              value: icewm
+            - name: DESKTOP_RESOLUTION
+              value: 1440x900x24
+            - name: NESQ_SIDECAR_PORT
+              value: "7910"
+            - name: NESQ_STREAM_PORT
+              value: "6901"
+            - name: LOG_LEVEL
+              value: INFO
+            - name: VNC_PW
+              valueFrom:
+                secretKeyRef:
+                  name: nesq-desktop-secrets
+                  key: vnc-password
+            # Without this the control plane on 7910 is open to the whole
+            # namespace. The sidecar warns loudly if it is empty.
+            - name: NESQ_SIDECAR_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: nesq-desktop-secrets
+                  key: sidecar-token
+          ports:
+            - containerPort: 6901
+              name: stream
+              protocol: TCP
+            - containerPort: 7910
+              name: control
+              protocol: TCP
+            # 9222 (Chromium DevTools) is deliberately absent. It is
+            # unauthenticated and equivalent to full control of the browser and
+            # of every session logged into it. The entrypoint binds it to
+            # 127.0.0.1, so it is unreachable from the pod network even without
+            # this list - not listing it keeps that true if the binding ever
+            # regresses, and keeps it out of the Service and the NetworkPolicy.
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+              ephemeral-storage: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "3Gi"
+              ephemeral-storage: "4Gi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: false # X sockets, dbus and apt-free tmp writes
+            capabilities:
+              drop: ["ALL"]
+            # allowPrivilegeEscalation:false stops Chromium's setuid sandbox
+            # helper from elevating, so the entrypoint probes for unprivileged
+            # user namespaces and only falls back to --no-sandbox when the
+            # kernel refuses them (it logs a WARN when it does). The pod is the
+            # isolation boundary either way; do not add SYS_ADMIN to "fix" it.
+          startupProbe:
+            # Xvfb + WM + x11vnc + websockify + uvicorn is 20-40s cold.
+            # 30 x 5s = 150s before the liveness probe takes over.
+            httpGet:
+              path: /health
+              port: control
+            periodSeconds: 5
+            failureThreshold: 30
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: control
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: control
+            periodSeconds: 20
+            timeoutSeconds: 5
+            # Generous: the entrypoint supervises and restarts individual
+            # components itself, so only a wedged sidecar should recycle a pod.
+            failureThreshold: 6
+          volumeMounts:
+            - name: home
+              mountPath: /home/nesq
+            - name: tmp
+              mountPath: /tmp
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: home
+          persistentVolumeClaim:
+            claimName: nesq-bot-home-BOT_SLUG
+        - name: tmp
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi
+        - name: dshm
+          # Chromium crashes with the default 64Mi /dev/shm.
+          emptyDir:
+            medium: Memory
+            sizeLimit: 512Mi
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nesq-bot-desktop
+  namespace: NAMESPACE
+automountServiceAccountToken: false
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nesq-desktop-BOT_SLUG
+  namespace: NAMESPACE
+  labels:
+    app.kubernetes.io/name: nesq-bot-desktop
+    bot: BOT_SLUG
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: nesq-bot-desktop
+    bot: BOT_SLUG
+  ports:
+    - name: stream
+      port: 6901
+      targetPort: stream
+      protocol: TCP
+    - name: control
+      port: 7910
+      targetPort: control
+      protocol: TCP
+
+---
+# Default-deny plus the two flows a desktop actually needs.
+# Requires a NetworkPolicy-capable CNI (AKS: Azure CNI Overlay + Calico, or
+# Cilium). Without one this object applies cleanly and enforces nothing, which
+# is a silent failure - verify with a deny test after rollout.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nesq-desktop-BOT_SLUG
+  namespace: NAMESPACE
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nesq-bot-desktop
+      bot: BOT_SLUG
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Only the control plane may reach the stream and the sidecar. Nothing
+    # else in the namespace, and no other desktop.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: nesq-system
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: nesqbot
+              app.kubernetes.io/component: control-plane
+      ports:
+        - port: 6901
+          protocol: TCP
+        - port: 7910
+          protocol: TCP
+  egress:
+    # DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # The public internet on 80/443 - the whole point of a browsing bot -
+    # while every RFC1918 range stays blocked. That closes the path from a
+    # prompt-injected page to Postgres, Redis, the API's internal port, or the
+    # cloud metadata endpoint (169.254.169.254).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 169.254.0.0/16
+              - 127.0.0.0/8
+      ports:
+        - port: 443
+          protocol: TCP
+        - port: 80
+          protocol: TCP
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: nesq-desktop-BOT_SLUG
+  namespace: NAMESPACE
+spec:
+  # Single-replica stateful pod: never voluntarily evict it mid-task. Node
+  # drains still win after the grace period.
+  maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nesq-bot-desktop
+      bot: BOT_SLUG

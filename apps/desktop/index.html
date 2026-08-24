@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Nesq Bot — Nesqual Tech</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!--
+      Two faces, because the design system asks for two. Inter is the workhorse
+      (`typography.fontSans`); Poppins is the geometric display face named first
+      in `fontDisplay` / `fontBrand`, which is what the SVG lockup's wordmark
+      resolves to and what makes the eyebrow caps read like the artwork. Both
+      degrade to the system stack if the fonts do not load — the lockup pins its
+      text with `textLength`, so its proportions survive the fallback.
+    -->
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Poppins:wght@300;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <!--
+      The pre-paint background, as a linked stylesheet.
+
+      It is a file rather than an inline STYLE element on purpose, and the
+      reason is load-bearing. Tauri stamps nonce="__TAURI_STYLE_NONCE__" onto
+      every STYLE element it finds in this document, substitutes a real nonce
+      per load, and appends it to the `style-src` directive. Under CSP Level 3
+      a directive carrying a nonce stops honouring `unsafe-inline` — for STYLE
+      elements and for style="…" ATTRIBUTES alike, since a nonce cannot be
+      attached to an attribute. Four lines of anti-flash colour here therefore
+      switched off every inline style in the product: GSAP writes its tweens as
+      inline styles, the shell writes the desktop pane grid track as one, and
+      the bot avatars, usage bars, skeleton dimensions and desktop stage
+      geometry are all style attributes. Measured in Chromium (the WebView2
+      engine): with the nonce present, none of the 27 style attributes on the
+      page applied. See public/boot.css. Do not inline this again.
+    -->
+    <link rel="stylesheet" href="/boot.css" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

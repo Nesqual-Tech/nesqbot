@@ -1,0 +1,41 @@
+fastapi==0.115.12
+uvicorn[standard]==0.34.0
+sqlalchemy[asyncio]==2.0.40
+asyncpg==0.30.0
+alembic==1.15.2
+pydantic==2.11.1
+pydantic-settings==2.8.1
+redis==5.2.1
+httpx==0.28.1
+python-jose[cryptography]==3.4.0
+passlib[bcrypt]==1.7.4
+docker==7.1.0
+temporalio==1.9.0
+openai==1.70.0
+pyyaml==6.0.2
+python-multipart==0.0.20
+orjson==3.10.16
+tenacity==9.0.0
+azure-identity==1.21.0
+# The async transport `azure.identity.aio` needs. Not a transitive dependency of
+# azure-identity (azure-core only requires `requests`, for the sync path), and
+# without it `ManagedIdentityCredential` fails to construct with "aiohttp package
+# is not installed" — which used to mean the production API silently served mock
+# replies. services/model_router.py falls back to the blocking sync credential if
+# this ever goes missing again, but the async one is the correct path.
+aiohttp==3.11.16
+# Bot Desktop on Azure Container Instances (BOT_DESKTOP_MODE=aci). Imported
+# lazily inside app/services/desktop.py, so mock/docker deployments never load
+# it; pinned because the container group model shape is version-sensitive
+# (subnet_ids and identity-based ACR pull both need 2021-09-01 or newer).
+azure-mgmt-containerinstance==10.1.0
+azure-keyvault-secrets==4.9.0
+sse-starlette==2.2.1
+# The Bot Desktop stream proxy dials websockify over RFC 6455 as a *client*
+# (app/routers/desktop.py). uvicorn[standard] already drags this in for the
+# server side, but an implicit floor of ">=10.4" is not a contract: the proxy
+# uses `websockets.asyncio.client`, which only exists from 13.0. Pinned so the
+# import path cannot move under us, and kept below 15 because uvicorn 0.34 still
+# reaches for `websockets.legacy` for its own server implementation.
+websockets==14.2
+pgvector==0.3.6

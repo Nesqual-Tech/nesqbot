@@ -1,0 +1,64 @@
+{
+  "name": "nesqbot",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Nesq Bot — internal always-on agent team (Nesqual Tech)",
+  "license": "SEE LICENSE IN LICENSE",
+  "workspaces": [
+    "apps/desktop",
+    "packages/*"
+  ],
+  "//workspaces": [
+    "apps/api and apps/worker are Python and have no package.json; npm skips them.",
+    "",
+    "apps/mobile is DELIBERATELY NOT A WORKSPACE. It installs on its own (npm run",
+    "install:mobile) and depends on the shared packages through file:../../packages/*",
+    "specifiers, which .npmrc install-links=false resolves to SYMLINKS — so it still",
+    "consumes the same TypeScript source the desktop app does, with no copy, no drift.",
+    "",
+    "WHY: apps/desktop needs React 19; React Native 0.76 needs React 18.3.1. With",
+    "mobile in the workspace array npm hoists React 19 to the root and is then forced",
+    "to nest the whole Expo tree under apps/mobile/node_modules to keep React 18 beside",
+    "it — but it STILL hoists babel-preset-expo and @expo/metro-config to the root,",
+    "where they can no longer resolve 'expo'. Metro dies with 'Cannot find module",
+    "expo/config' and nothing bundles, locally or on EAS. A separate install gives the",
+    "Expo toolchain one self-consistent tree. Revisit if desktop moves to React 18 or",
+    "mobile to React 19."
+  ],
+  "scripts": {
+    "dev": "npm run desktop",
+    "desktop": "npm run dev --workspace @nesqbot/desktop",
+    "mobile": "npm --prefix apps/mobile run start",
+    "api": "cd apps/api && python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8080",
+    "worker": "cd apps/worker && python -m worker.main",
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present && npm run typecheck:mobile",
+    "typecheck:mobile": "npm --prefix apps/mobile run typecheck",
+    "lint": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\" --ignore-path .gitignore --ignore-path .prettierignore",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\" --ignore-path .gitignore --ignore-path .prettierignore",
+    "clean": "npm run clean --workspaces --if-present",
+    "install:desktop": "npm install --workspace @nesqbot/desktop",
+    "install:mobile": "npm --prefix apps/mobile install"
+  },
+  "devDependencies": {
+    "prettier": "^3.5.3",
+    "typescript": "^5.8.2"
+  },
+  "//prettier": [
+    "House style, matching the code that was already here: no semicolons,",
+    "double quotes, 120 columns. Both scripts pass --ignore-path twice:",
+    "naming .gitignore alone would drop prettier's default .prettierignore",
+    "lookup, which is what keeps docs/API.md and the lockfiles unformatted."
+  ],
+  "prettier": {
+    "semi": false,
+    "singleQuote": false,
+    "printWidth": 120,
+    "trailingComma": "all",
+    "arrowParens": "always"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "npm@10.9.2"
+}

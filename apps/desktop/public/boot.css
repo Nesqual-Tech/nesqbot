@@ -1,0 +1,43 @@
+/*
+ * The pre-paint background, and the reason it is a file rather than a
+ * `<style>` block in `index.html`.
+ *
+ * Tauri's asset pipeline puts `nonce="__TAURI_STYLE_NONCE__"` on **every**
+ * `<style>` element it finds in the frontend HTML (`inject_nonce_token` in
+ * `tauri-utils/src/html.rs`), substitutes a real per-load nonce at runtime, and
+ * then appends that nonce to the `style-src` directive
+ * (`replace_csp_nonce` in `tauri/src/manager/mod.rs`).
+ *
+ * Under CSP Level 3, a directive that contains a nonce-source stops honouring
+ * `'unsafe-inline'` — for inline `<style>` elements *and* for `style="…"`
+ * attributes, since a nonce cannot be attached to an attribute. So one inline
+ * `<style>` in `index.html`, worth four lines of anti-flash colour, silently
+ * switched off every inline style in the product: GSAP writes its tweens as
+ * inline styles, the shell writes the desktop pane's grid track as one, and the
+ * bot avatars, the usage bars, the skeleton dimensions and the desktop stage's
+ * geometry are all `style` attributes. Verified in Chromium (the WebView2
+ * engine): with a nonce present, `document.querySelectorAll("[style]")` returns
+ * 27 elements and not one of their declarations is applied.
+ *
+ * A linked stylesheet is a `'self'` resource, so it needs no nonce and takes no
+ * directive with it. It is also render-blocking, which is exactly what the
+ * inline block was for.
+ *
+ * Keep this file free of anything but the flash guard. The real design tokens
+ * are emitted at build time by the `nesq-design-tokens` plugin in
+ * `vite.config.ts` and land in the bundled stylesheet.
+ */
+html,
+body {
+  margin: 0;
+  /* brandNavy / lightPalette.bg. The only two literals outside the token
+     system, because they have to exist before any JavaScript runs. */
+  background: #0b0d1a;
+}
+
+@media (prefers-color-scheme: light) {
+  html,
+  body {
+    background: #f5f6fb;
+  }
+}

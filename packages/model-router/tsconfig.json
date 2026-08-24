@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src"],
+  // Project references make `tsc -b` build @nesqbot/protocol first.
+  "references": [{ "path": "../protocol" }]
+}

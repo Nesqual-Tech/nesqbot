@@ -1,0 +1,93 @@
+# Production-ish overlay for a single-host deployment (a VM, not Azure).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# On Azure the API and worker run on Container Apps and Postgres/Redis are
+# managed services - see infra/azure/main.bicep. This file is for the
+# in-between case: one box, real images, no source tree, nothing but the API
+# published to the network.
+#
+# Requires a real .env (see .env.production.example). Every service pulls a
+# pinned image; nothing is built here.
+
+services:
+  postgres:
+    # Not reachable from outside the compose network.
+    ports: !reset []
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required in production}
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 4g
+
+  redis:
+    ports: !reset []
+    command:
+      - redis-server
+      - --save
+      - "300"
+      - "10"
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-1gb}
+      - --maxmemory-policy
+      - noeviction
+      - --requirepass
+      - ${REDIS_PASSWORD:?REDIS_PASSWORD is required in production}
+    healthcheck:
+      test: ["CMD-SHELL", 'redis-cli -a "$$REDIS_PASSWORD" ping | grep -q PONG']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+
+  temporal:
+    ports: !reset []
+    environment:
+      DEFAULT_NAMESPACE_RETENTION: ${TEMPORAL_RETENTION:-168h}
+
+  temporal-ui:
+    # Bind to loopback only; put it behind the reverse proxy / SSH tunnel.
+    ports:
+      - "127.0.0.1:${TEMPORAL_UI_HOST_PORT:-8088}:8080"
+
+  api:
+    build: !reset null
+    image: ${API_IMAGE:?API_IMAGE must be a pinned registry tag in production}
+    restart: always
+    environment:
+      NESQ_ENV: production
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required in production}
+    volumes: !reset
+      - bot_homes:/data/bot-homes
+      - ./bots:/bots:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 2g
+
+  worker:
+    build: !reset null
+    image: ${WORKER_IMAGE:?WORKER_IMAGE must be a pinned registry tag in production}
+    restart: always
+    environment:
+      NESQ_ENV: production
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      # Dev header auth is refused in production; the worker needs a real token.
+      WORKER_API_TOKEN: ${WORKER_API_TOKEN:?WORKER_API_TOKEN is required in production}
+      API_DEV_HEADER: "false"
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 2g
+
+volumes:
+  bot_homes:
+    name: nesqbot_bot_homes

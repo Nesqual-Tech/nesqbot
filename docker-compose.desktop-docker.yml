@@ -1,0 +1,27 @@
+# Opt-in overlay: let the API drive real Bot Desktop containers on this host.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.desktop-docker.yml up -d
+#
+# Deliberately NOT named docker-compose.override.yml: an override file is
+# loaded automatically, and mounting the host Docker socket into a web-facing
+# service is root-equivalent access to the host. It must be a conscious act.
+#
+# Prerequisite: build the image the API launches first.
+#   docker compose --profile desktop build bot-desktop
+#
+# Linux/macOS use the unix socket below as-is. On Docker Desktop for Windows
+# the same path works inside the VM. If you would rather not mount the socket,
+# expose the daemon over TLS and set BOT_DESKTOP_DOCKER_HOST instead.
+
+services:
+  api:
+    environment:
+      BOT_DESKTOP_MODE: docker
+      BOT_DESKTOP_DOCKER_HOST: ${BOT_DESKTOP_DOCKER_HOST:-unix:///var/run/docker.sock}
+      # Desktops spawned by the API publish on the host, so the browser-facing
+      # stream URL has to be a host address, not a compose service name.
+      BOT_DESKTOP_STREAM_BASE: ${BOT_DESKTOP_STREAM_BASE:-http://localhost:6901}
+      # Sidecar shared secret. The API must send it as X-Nesq-Sidecar-Token.
+      NESQ_SIDECAR_TOKEN: ${NESQ_SIDECAR_TOKEN:-}
+    volumes:
+      - ${DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock

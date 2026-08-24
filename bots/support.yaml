@@ -1,0 +1,105 @@
+# See bots/chief_of_staff.yaml for the field-by-field schema notes.
+
+name: Support
+slug: support
+role: Tickets and KB
+desktop_profile: xfce
+daily_budget_usd: 5
+system_prompt: |
+  You classify tickets, draft KB-grounded replies with citations,
+  escalate with context packs, and send close-the-loop reminders.
+  Prefer ticketing connector + knowledge base.
+
+  Do the classification and the drafting in this turn rather than describing
+  them. Cite the article id behind every drafted reply, and when the knowledge
+  base does not answer a question say so plainly instead of inventing a
+  procedure. Sending is gated and stops for a human by itself.
+
+connectors:
+  - id: ticketing
+    status: disconnected
+  - id: microsoft_graph
+    status: disconnected
+
+mcp:
+  - name: filesystem
+    transport: stdio
+    command: npx -y @modelcontextprotocol/server-filesystem /home/nesq/support
+    enabled: false
+    tool_allowlist:
+      - read_file
+      - list_directory
+
+routines:
+  - name: Ticket triage
+    description: >-
+      Hourly during office hours: classify, prioritise and draft a grounded
+      first reply for everything new.
+    schedule_cron: "0 8-17 * * 1-5"
+    enabled: true
+    steps:
+      - type: connector
+        connector: ticketing
+        action: list_open
+        args: {}
+      - type: connector
+        connector: ticketing
+        action: draft_reply
+        args:
+          body: "KB-grounded reply with article citations"
+      - type: message
+        text: >-
+          For each new ticket: category, severity, and whether the KB already
+          answers it. Cite the article id in every drafted reply. When the KB
+          does not answer it, say so plainly instead of inventing a procedure.
+          send_reply is risk send and always becomes an approval.
+
+  - name: KB gap harvest
+    description: >-
+      Turn the week's answers into articles, so the same question is not
+      answered from scratch twice.
+    schedule_cron: "0 15 * * 5"
+    enabled: true
+    steps:
+      - type: connector
+        connector: ticketing
+        action: list_open
+        args: {}
+      - type: message
+        text: >-
+          Find question clusters with no KB article and questions where the
+          existing article was insufficient. Draft one article per gap with a
+          title, symptoms, cause and resolution. Queue each for review.
+
+  - name: Close-the-loop reminders
+    description: Chase tickets waiting on a customer before they go stale.
+    schedule_cron: "0 10 * * 1-5"
+    enabled: true
+    steps:
+      - type: connector
+        connector: ticketing
+        action: list_open
+        args: {}
+      - type: connector
+        connector: ticketing
+        action: draft_reply
+        args:
+          body: "gentle check-in referencing the last message"
+      - type: message
+        text: >-
+          List tickets in "waiting on customer" for more than 3 days with a
+          drafted check-in each. Anything past 10 days: propose closing it and
+          say why.
+
+  - name: Escalation context packs
+    description: >-
+      When Support hands a ticket to engineering, hand over a pack, not a
+      link.
+    schedule_cron: null
+    enabled: false
+    steps:
+      - type: message
+        text: >-
+          Build the pack: reproduction steps, affected accounts and versions,
+          what has already been tried, the customer's actual business impact,
+          and the KB articles already ruled out.

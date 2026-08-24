@@ -1,0 +1,36 @@
+{
+  "name": "@nesqbot/model-router",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tier table, routing rules and cost estimation mirrored from the Python model router",
+  "license": "SEE LICENSE IN LICENSE",
+  "type": "module",
+  "sideEffects": false,
+  "//": [
+    "SOURCE-ONLY PACKAGE — see the note in packages/protocol/package.json.",
+    "Numbers here mirror apps/api/app/services/model_router.py. Change both."
+  ],
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "clean": "tsc -b --clean"
+  },
+  "dependencies": {
+    "@nesqbot/protocol": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2"
+  }
+}

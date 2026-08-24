@@ -1,0 +1,99 @@
+# dependencies
+node_modules/
+.npm/
+.pnpm-store/
+
+# build output
+dist/
+build/
+.target/
+*.tsbuildinfo
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+apps/mobile/.expo/
+apps/mobile/dist/
+apps/mobile/android/
+apps/mobile/ios/
+
+# python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# -----------------------------------------------------------------------------
+# env + secrets
+# -----------------------------------------------------------------------------
+# Only `*.example` files belong in the repository. Everything below is either a
+# real credential or one keystroke away from becoming one. If you need a new
+# variable, add it to `.env.example` with a placeholder — never to a file here.
+.env
+.env.*
+!.env.example
+!.env.production.example
+!apps/mobile/.env.example
+!apps/desktop/.env.development
+
+# credentials and keys of every shape
+*.pem
+*.key
+*.p12
+*.pfx
+*.cer
+*.crt
+*.jks
+*.keystore
+*.mobileprovision
+*.p8
+id_rsa*
+credentials.json
+service-account*.json
+.azure/
+.aws/
+.kube/
+azureauth.json
+metadata.json
+
+# Expo / EAS local state — carries account and project identifiers
+.easignore
+apps/mobile/.easrc
+apps/mobile/google-services.json
+apps/mobile/GoogleService-Info.plist
+
+# -----------------------------------------------------------------------------
+# local data volumes and runtime state
+# -----------------------------------------------------------------------------
+data/postgres/
+data/redis/
+# The directory itself is tracked (compose bind-mounts it and the API writes
+# per-bot home directories into it); its contents never are.
+data/bot-homes/*
+!data/bot-homes/.gitkeep
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.sql.gz
+
+# tooling / editors / os
+coverage/
+*.log
+logs/
+tmp/
+.tmp/
+*.bak
+*.orig
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json

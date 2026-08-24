@@ -1,0 +1,106 @@
+# See bots/chief_of_staff.yaml for the field-by-field schema notes.
+
+name: Ops
+slug: ops
+role: Inbox invoices onboarding
+desktop_profile: xfce
+daily_budget_usd: 5
+system_prompt: |
+  You triage shared inbox, extract invoices into bookkeeping packets,
+  orchestrate new-hire checklists, and flag calendar conflicts.
+
+  Do the work when asked rather than explaining how you would. Anything that
+  spends money is gated and stops for a human on its own, so you never have to
+  refuse a task in order to be safe. Report figures you actually extracted, and
+  flag a total that does not add up instead of guessing at it.
+
+connectors:
+  - id: microsoft_graph
+    status: disconnected
+  - id: ticketing
+    status: disconnected
+
+mcp:
+  - name: filesystem
+    transport: stdio
+    command: npx -y @modelcontextprotocol/server-filesystem /home/nesq/ops
+    enabled: false
+    tool_allowlist:
+      - read_file
+      - write_file
+      - list_directory
+
+routines:
+  - name: Inbox triage
+    description: >-
+      Three passes a day over the shared inbox: classify, extract, route.
+      Nothing is answered without a human.
+    schedule_cron: "0 8,12,16 * * 1-5"
+    enabled: true
+    steps:
+      - type: connector
+        connector: microsoft_graph
+        action: list_inbox
+        args:
+          top: 50
+      - type: message
+        text: >-
+          Classify each message as invoice, customer, vendor, internal or
+          noise. Route customer mail to Support and anything sales-shaped to
+          Sales. Draft replies for the rest; send nothing.
+
+  - name: Invoice extraction
+    description: >-
+      Turn invoice mail into a structured bookkeeping packet the finance person
+      can approve in one pass.
+    schedule_cron: "0 9 * * 1-5"
+    enabled: true
+    steps:
+      - type: connector
+        connector: microsoft_graph
+        action: list_inbox
+        args:
+          top: 50
+      - type: desktop
+        action: open_chromium
+        args:
+          text: about:blank
+      - type: message
+        text: >-
+          For each invoice: vendor, invoice number, date, due date, net, VAT,
+          gross, currency, PO reference. Write one packet per invoice to
+          /home/nesq/ops/invoices. Flag any total that does not add up rather
+          than guessing. Payment is a spend action and always needs approval.
+
+  - name: Calendar conflict check
+    description: Catch double-bookings and no-agenda meetings the evening before.
+    schedule_cron: "0 17 * * 0-4"
+    enabled: true
+    steps:
+      - type: connector
+        connector: microsoft_graph
+        action: list_inbox
+        args:
+          top: 20
+      - type: message
+        text: >-
+          Report tomorrow's overlaps, back-to-backs with no travel gap, and
+          meetings with no agenda or no owner. Propose a fix for each; do not
+          move anything yourself.
+
+  - name: Onboarding checklist
+    description: >-
+      Run the new-hire checklist. Triggered by hand from a thread rather than
+      on a clock.
+    schedule_cron: null
+    enabled: false
+    steps:
+      - type: message
+        text: >-
+          Collect the new hire's start date, role and manager. Then work the
+          checklist: accounts, hardware, access groups, buddy, first-week
+          calendar. Open a ticket per item and report what is blocked.
+      - type: connector
+        connector: ticketing
+        action: list_open
+        args: {}

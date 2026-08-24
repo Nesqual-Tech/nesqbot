@@ -1,0 +1,6089 @@
+/*
+ * Nesq Bot desktop styles.
+ *
+ * Built entirely on the custom properties `@nesqbot/ui` emits (installed by
+ * `state/theme.tsx` before first paint). The rules here are:
+ *
+ *   1. No hex. No rgb(). No hsl(). Every colour is a `var(--…)` from the
+ *      design system, so the 478-pair AA audit in `packages/ui/src/audit.ts`
+ *      describes what is actually on screen. `alpha()`-style washes are
+ *      derived once, in `theme.tsx`, from palette roles — never here.
+ *   2. No magic spacing. Gaps and padding come from `--space-*`; the only bare
+ *      pixel values left are hairlines (1px, 2px) and a handful of intrinsic
+ *      control sizes.
+ *   3. Type comes from the scale. `--text-<step>-size|line|weight|tracking|
+ *      transform` — including the wide uppercase tracking measured off the
+ *      logo's tagline, which is the most recognisably Nesqual thing here.
+ *   4. Elevation means something. Flat surfaces are separated by a border and
+ *      one step of the surface ramp; a shadow means the thing is genuinely
+ *      floating above the page (toast, popover, overlay). Cards do not float.
+ *   5. Motion comes from `--duration-*` / `--ease-*`, which the emitted
+ *      reduced-motion block zeroes for us.
+ */
+
+/* ---------------------------------------------------------------- reset */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  font-family: var(--font-sans);
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line);
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Focus rings belong on keyboard focus, not on every click of a pane. */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+code,
+pre {
+  font-family: var(--font-mono);
+  font-size: var(--text-mono-size);
+  line-height: var(--text-mono-line);
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+/* Scrollbars, so the panes do not stop looking designed at the edges. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--radius-pill);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ----------------------------------------------------------------- type */
+
+/*
+ * The scale, applied by role. Grouped selectors instead of utility classes so
+ * that components keep the semantic class names they already have.
+ */
+
+.eyebrow,
+.sidebar__section-label,
+.field__label,
+.subpanel__title,
+.approval__detail-label,
+legend,
+.table thead th {
+  font-family: var(--font-display);
+  font-size: var(--text-eyebrow-size);
+  line-height: var(--text-eyebrow-line);
+  font-weight: var(--text-eyebrow-weight);
+  letter-spacing: var(--text-eyebrow-tracking);
+  text-transform: var(--text-eyebrow-transform);
+  color: var(--text-dim);
+}
+
+.state-pill,
+.brand__product {
+  font-size: var(--text-label-caps-size);
+  line-height: var(--text-label-caps-line);
+  font-weight: var(--text-label-caps-weight);
+  letter-spacing: var(--text-label-caps-tracking);
+  text-transform: var(--text-label-caps-transform);
+}
+
+.panel__title,
+.chat__title,
+.pane__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-heading-size);
+  line-height: var(--text-heading-line);
+  font-weight: var(--text-heading-weight);
+  letter-spacing: var(--text-heading-tracking);
+  color: var(--text);
+}
+
+.muted {
+  color: var(--text-muted);
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line);
+}
+
+/* ------------------------------------------------------------- the mark */
+
+.mark {
+  display: inline-flex;
+  align-items: center;
+  line-height: 0;
+}
+
+.mark .nesq-svg {
+  display: block;
+}
+
+.mark--watermark {
+  color: var(--text);
+  opacity: 0.07;
+}
+
+.icon {
+  flex: 0 0 auto;
+}
+
+/* ---------------------------------------------------------------- layout */
+
+/*
+ * Four tracks, not three: sidebar, chat, the drag handle, the Bot Desktop.
+ *
+ * The desktop track is a custom property rather than a fixed value because it
+ * is now draggable, and because a pointer drag writes that property directly on
+ * this element (see `hooks/useDesktopLayout`) instead of re-rendering the shell
+ * once a frame. The fallback is the same 440px the pane used to be nailed to.
+ */
+.app {
+  --sidebar-width: 272px;
+  --desktop-pane-width: 440px;
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) auto var(--desktop-pane-width);
+  height: 100%;
+  position: relative;
+  isolation: isolate;
+  background: var(--bg);
+}
+
+/* Maximised: the pane leaves the grid entirely and covers the window. */
+.app--desktop-expanded {
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+}
+
+/*
+ * Nothing should be selectable or hoverable mid-drag — a splitter that
+ * highlights the chat transcript as it passes over it feels broken.
+ */
+.app--resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.app--resizing * {
+  pointer-events: none;
+}
+
+.app--resizing .pane-splitter {
+  pointer-events: auto;
+}
+
+/*
+ * The ground. One soft bloom of the brand accent in the top-left corner, and
+ * the mark's own 60.3-degree diagonal repeated as a hairline texture at a few
+ * percent alpha. It is meant to be felt rather than seen — the previous
+ * violet-and-fuchsia pair of blobs was reading as a third and fourth brand
+ * colour, which the identity does not have.
+ */
+.app::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(60.3deg, transparent 0, transparent 27px, var(--hairline) 27px, var(--hairline) 28px),
+    radial-gradient(ellipse 70% 55% at 8% -12%, var(--glow), transparent 70%);
+}
+
+/*
+ * Only the sidebar narrows at these breakpoints now. The desktop pane's own
+ * width is a stored preference clamped against the window in JS, so overriding
+ * the whole template here would silently undo a drag every time the window
+ * crossed 1280px.
+ */
+@media (max-width: 1280px) {
+  .app {
+    --sidebar-width: 248px;
+  }
+}
+
+@media (max-width: 1080px) {
+  .app {
+    --sidebar-width: 224px;
+  }
+}
+
+/* ------------------------------------------------------------- splitter */
+
+.pane-splitter {
+  position: relative;
+  width: 7px;
+  cursor: col-resize;
+  background: transparent;
+  border-left: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  touch-action: none;
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+
+.pane-splitter:hover,
+.pane-splitter:focus-visible {
+  background: var(--accent-wash);
+}
+
+.pane-splitter:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* The grip only shows up when the handle is worth aiming at. */
+.pane-splitter__grip {
+  width: 2px;
+  height: 26px;
+  border-radius: var(--radius-pill);
+  background: var(--border-strong);
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+.pane-splitter:hover .pane-splitter__grip,
+.pane-splitter:focus-visible .pane-splitter__grip,
+.app--resizing .pane-splitter__grip {
+  opacity: 1;
+}
+
+.sidebar,
+.main,
+.desktop-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+.sidebar {
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.desktop-pane {
+  position: relative;
+  background: var(--surface);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+/*
+ * Maximised. The pane leaves the grid and covers the window, which is the only
+ * honest way to show a 1440×900 desktop on a laptop: at 440px it rendered at
+ * 30% and you could not read a URL bar, let alone finish a sign-in.
+ *
+ * Above the floating hint (40) and below toasts (50), so a raised approval is
+ * still visible over the top of it.
+ */
+.desktop-pane--expanded {
+  position: fixed;
+  inset: 0;
+  z-index: 45;
+  overflow: auto;
+  background: var(--bg);
+  box-shadow: var(--shadow-modal);
+  animation: desktop-pane-grow var(--duration-base) var(--ease-entrance) both;
+}
+
+/*
+ * Opacity only. This used to also scale the pane from 0.99, which put a
+ * transform on an ancestor of the desktop canvas for the length of every
+ * maximise. The canvas is the one element here whose box is load-bearing --
+ * pointToDesktop maps a click through getBoundingClientRect on it -- so a
+ * transform there is the single change that could silently un-verify the
+ * pane's measured 0px click accuracy. The sense of the pane re-forming is now
+ * carried by its chrome, which reflows nothing (see the mode-change timeline
+ * in components/DesktopPane.tsx).
+ */
+@keyframes desktop-pane-grow {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/*
+ * The handoff ring: control changing hands, as one event.
+ * Distinct from .desktop-pane--takeover, which is the persistent state.
+ */
+.desktop-pane__arm {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 2px var(--status-warning);
+  opacity: 0;
+  visibility: hidden;
+}
+
+/* The takeover ring is on the pane, not just the canvas: at a glance, from the
+   other side of the room, this pane is either live or it is not. */
+.desktop-pane--takeover {
+  box-shadow: inset 0 0 0 1px var(--status-warning-border);
+}
+
+.desktop-pane--keys {
+  box-shadow: inset 0 0 0 2px var(--status-danger-border);
+}
+
+.main {
+  overflow: hidden;
+}
+
+/* ----------------------------------------------------------------- brand */
+
+.brand {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-xl) var(--space-lg) var(--space-lg);
+}
+
+.brand__lockup {
+  display: inline-flex;
+  margin: 0;
+  color: var(--text);
+}
+
+.brand__product {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  color: var(--text-muted);
+}
+
+/*
+ * A short accent rule between the lockup and the product name. It is the one
+ * place the mark's diagonal shows up as a deliberate graphic element.
+ */
+.brand__product::before {
+  content: "";
+  width: 14px;
+  height: 2px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  flex: 0 0 auto;
+}
+
+/* ------------------------------------------------------------------- nav */
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0 var(--space-md) var(--space-md);
+}
+
+.nav__item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  text-align: left;
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line);
+  transition:
+    background var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+/* The active marker: a short accent bar in the gutter, not a full border. */
+.nav__item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 2px;
+  height: 0;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  transform: translateY(-50%);
+  transition:
+    height var(--duration-base) var(--ease-entrance),
+    opacity var(--duration-fast) var(--ease-standard);
+  opacity: 0;
+}
+
+.nav__item:hover {
+  background: var(--surface-alt);
+  color: var(--text);
+}
+
+.nav__item--active {
+  background: var(--surface-alt);
+  color: var(--text);
+  font-weight: var(--text-body-strong-weight);
+}
+
+.nav__item--active::before {
+  height: 18px;
+  opacity: 1;
+}
+
+.nav__item--active .nav__glyph {
+  color: var(--accent);
+}
+
+.nav__glyph {
+  display: inline-flex;
+  color: var(--text-dim);
+  transition: color var(--duration-fast) var(--ease-standard);
+}
+
+.nav__item:hover .nav__glyph {
+  color: var(--text-muted);
+}
+
+.nav__label {
+  flex: 1;
+}
+
+.badge {
+  min-width: 20px;
+  padding: 0 var(--space-xs);
+  border-radius: var(--radius-pill);
+  background: var(--status-warning);
+  color: var(--brand-navy);
+  font-size: var(--text-caption-size);
+  line-height: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.sidebar__section-label {
+  padding: var(--space-md) var(--space-lg) var(--space-sm);
+}
+
+.sidebar__footer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  border-top: 1px solid var(--border);
+  flex-wrap: wrap;
+  background: var(--bg);
+}
+
+.status-line {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  color: var(--text-muted);
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-pill);
+  background: var(--status-success);
+  box-shadow: 0 0 0 3px var(--success-soft);
+}
+
+.status-line--warn .status-dot {
+  background: var(--status-warning);
+  box-shadow: 0 0 0 3px var(--warning-soft);
+}
+
+.status-line--error .status-dot {
+  background: var(--status-danger);
+  box-shadow: 0 0 0 3px var(--danger-soft);
+}
+
+/* -------------------------------------------------------------- bot list */
+
+.bot-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 var(--space-md) var(--space-lg);
+  overflow: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.bot-item {
+  position: relative;
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+  width: 100%;
+  padding: var(--space-sm) var(--space-md) var(--space-sm) var(--space-sm);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+
+.bot-item:hover {
+  background: var(--surface-alt);
+}
+
+.bot-item--active {
+  background: var(--surface-alt);
+}
+
+.bot-item--active::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 2px;
+  height: 20px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  transform: translateY(-50%);
+}
+
+.avatar {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
+  font-size: var(--text-caption-size);
+  font-weight: 700;
+  letter-spacing: 0;
+  color: var(--brand-navy);
+  background: var(--avatar-bg, var(--accent));
+}
+
+.avatar--xs {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  font-size: 9px;
+}
+
+.bot-item__meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+  gap: 1px;
+}
+
+.bot-item__name {
+  font-weight: var(--text-body-strong-weight);
+  font-size: var(--text-body-size);
+  line-height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bot-item__role {
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bot-item__spend {
+  font-size: var(--text-caption-size);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.bot-item__spend--warn {
+  color: var(--status-warning-fg);
+}
+
+/* ------------------------------------------------------- headers (shared) */
+
+.chat__header,
+.pane__header,
+.panel__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-lg);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.main .chat__header,
+.main .panel__header {
+  background: var(--bg);
+}
+
+.chat__subtitle,
+.pane__subtitle,
+.panel__subtitle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  margin: var(--space-xs) 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+}
+
+.panel__subtitle code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--surface-alt);
+  color: var(--text-muted);
+}
+
+.chat__identity {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chat__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
+/* Eyebrow / title / subtitle stack in a panel header. */
+.panel__header > div:first-child,
+.pane__header > div:first-child {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.chat__header-actions,
+.panel__header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+/* ------------------------------------------------------------------ chat */
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.live-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 1px var(--space-sm) 1px var(--space-xs);
+  border-radius: var(--radius-pill);
+  background: var(--status-success-bg);
+  border: 1px solid var(--status-success-border);
+  font-size: var(--text-caption-size);
+  font-weight: 600;
+  color: var(--status-success-fg);
+}
+
+.live-dot--warn {
+  background: var(--status-warning-bg);
+  border-color: var(--status-warning-border);
+  color: var(--status-warning-fg);
+}
+
+.live-dot__pip {
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-pill);
+  background: currentColor;
+  animation: pulse 2s var(--ease-standard) infinite;
+}
+
+/*
+ * `overscroll-behavior: contain` on both scrollers.
+ *
+ * The shell is two independently scrolling columns side by side. Without this,
+ * reaching the end of the transcript hands the rest of the wheel gesture to
+ * whatever is behind it, so a flick in chat scrolls the Bot Desktop pane. Each
+ * column now absorbs its own overscroll.
+ */
+.chat__messages {
+  flex: 1;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-xl) var(--space-xl) var(--space-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+/*
+ * A short thread used to sit pinned to the top of a tall pane with a screen's
+ * worth of nothing between it and the composer, which reads as a page that
+ * failed to load rather than as a conversation that has just started.
+ *
+ * `margin-top: auto` on the first child rather than `justify-content: flex-end`
+ * on the container: the latter clips the top of the content once the transcript
+ * is taller than the pane, and a transcript is exactly the thing that gets
+ * taller than its pane.
+ */
+.chat__messages > *:first-child {
+  margin-top: auto;
+}
+
+/* ------------------------------------------------------------- run rail */
+
+/*
+ * The agent working. See components/AgentActivity.tsx for what it replaced and
+ * why.
+ *
+ * Deliberately not a card. A card would say "this is a message"; this is
+ * instrumentation attached to the transcript, so it is a rail with rows hung
+ * off it, sharing the transcript's ground rather than floating above it.
+ * Every number is set in the mono face with tabular figures, because a clock
+ * that changes width as it counts is the cheapest way to look unfinished.
+ */
+
+.agent-run {
+  align-self: flex-start;
+  max-width: 78%;
+  min-width: min(340px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-sm) 0 var(--space-xs);
+}
+
+.agent-run__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-height: 20px;
+}
+
+/* The node the rail hangs from. Shares the 20px centre with every step below. */
+.agent-run__marker {
+  position: relative;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.agent-run[data-status="done"] .agent-run__marker {
+  color: var(--status-success-fg);
+  border-color: var(--status-success-border);
+  background: var(--status-success-bg);
+}
+
+.agent-run[data-status="failed"] .agent-run__marker {
+  color: var(--status-danger-fg);
+  border-color: var(--status-danger-border);
+  background: var(--status-danger-bg);
+}
+
+.agent-run[data-status="parked"] .agent-run__marker {
+  color: var(--status-warning-fg);
+  border-color: var(--status-warning-border);
+  background: var(--status-warning-bg);
+}
+
+.agent-run--live .agent-run__marker {
+  border-color: var(--accent);
+  background: var(--accent-wash);
+}
+
+/* The one infinite loop in the product. GSAP drives it; this is its rest state. */
+.agent-run__pip {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+}
+
+.agent-run__who {
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  color: var(--text-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-run__who strong {
+  color: var(--text);
+  font-weight: var(--text-body-strong-weight);
+}
+
+.agent-run__verb {
+  margin-left: var(--space-xs);
+  color: var(--text-muted);
+}
+
+.agent-run__clock {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-caption-size);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+.agent-run--live .agent-run__clock {
+  color: var(--accent);
+}
+
+/*
+ * The rail. A hairline down the 20px gutter, drawn behind the nodes, which
+ * carry their own background so the line stops cleanly at each one.
+ */
+/*
+ * The rhythm here is load-bearing, not taste. At the original 2px gap the 20px
+ * nodes very nearly touched, so the hairline behind them had no visible
+ * segment to show and the rail read as a plain list with circles on it. The
+ * rows need roughly half a node of air between them for the line to exist.
+ */
+.agent-run__steps {
+  position: relative;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.agent-run__steps::before {
+  content: "";
+  position: absolute;
+  left: 9.5px;
+  top: -14px;
+  bottom: 14px;
+  width: 1px;
+  background: var(--border);
+}
+
+.agent-run__step {
+  position: relative;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 3px 0;
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  color: var(--text-muted);
+}
+
+.agent-run__node {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-pill);
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.agent-run__step[data-kind="tool"][data-ok="true"] .agent-run__node {
+  color: var(--status-success-fg);
+  border-color: var(--status-success-border);
+  background: var(--status-success-bg);
+}
+
+.agent-run__step[data-kind="tool"][data-ok="false"] .agent-run__node,
+.agent-run__step[data-kind="error"] .agent-run__node {
+  color: var(--status-danger-fg);
+  border-color: var(--status-danger-border);
+  background: var(--status-danger-bg);
+}
+
+.agent-run__step[data-kind="approval"] .agent-run__node,
+.agent-run__step[data-kind="takeover"] .agent-run__node {
+  color: var(--status-warning-fg);
+  border-color: var(--status-warning-border);
+  background: var(--status-warning-bg);
+}
+
+.agent-run__step[data-kind="handoff"] .agent-run__node {
+  color: var(--accent);
+  border-color: var(--accent-soft);
+  background: var(--accent-wash);
+}
+
+.agent-run__body {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The connector is the noun and the action is the verb; they read as one. */
+.agent-run__connector {
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+
+.agent-run__action {
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+}
+
+.agent-run__failed {
+  font-size: var(--text-eyebrow-size);
+  font-weight: var(--text-eyebrow-weight);
+  letter-spacing: var(--text-eyebrow-tracking);
+  text-transform: var(--text-eyebrow-transform);
+  color: var(--status-danger-fg);
+}
+
+.agent-run__step[data-kind="approval"] .agent-run__body,
+.agent-run__step[data-kind="takeover"] .agent-run__body {
+  color: var(--status-warning-fg);
+}
+
+.agent-run__step[data-kind="error"] .agent-run__body {
+  color: var(--status-danger-fg);
+}
+
+.agent-run__gap {
+  font-family: var(--font-mono);
+  font-size: var(--text-eyebrow-size);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+/*
+ * The verdict. Facts separated by hairlines rather than middle dots, so each
+ * one reads as a discrete thing instead of a run-on string.
+ */
+.agent-run__summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-left: 28px;
+  padding: var(--space-sm) var(--space-md) var(--space-xs) 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.agent-run__verdict {
+  font-size: var(--text-eyebrow-size);
+  font-weight: var(--text-eyebrow-weight);
+  letter-spacing: var(--text-eyebrow-tracking);
+  text-transform: var(--text-eyebrow-transform);
+  color: var(--text-dim);
+}
+
+.agent-run[data-status="done"] .agent-run__verdict {
+  color: var(--status-success-fg);
+}
+
+.agent-run[data-status="failed"] .agent-run__verdict {
+  color: var(--status-danger-fg);
+}
+
+.agent-run[data-status="parked"] .agent-run__verdict {
+  color: var(--status-warning-fg);
+}
+
+.agent-run__fact {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-xs);
+  padding-left: var(--space-sm);
+  border-left: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--text-caption-size);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.agent-run__fact-label {
+  font-family: var(--font-sans);
+  font-size: var(--text-eyebrow-size);
+  letter-spacing: var(--text-eyebrow-tracking);
+  text-transform: var(--text-eyebrow-transform);
+  color: var(--text-dim);
+}
+
+/* Spend is the number people are actually looking for. */
+.agent-run__fact--cost {
+  color: var(--accent);
+}
+
+/* --------------------------------------------------------------- bubbles */
+
+.bubble {
+  position: relative;
+  max-width: 78%;
+  padding: var(--space-md) var(--space-lg);
+  border-radius: var(--radius-lg);
+  line-height: var(--text-body-line);
+  font-size: var(--text-body-size);
+  animation: rise var(--duration-base) var(--ease-entrance) both;
+}
+
+/*
+ * The person, quietly.
+ *
+ * This was a full-strength `--accent` slab, and at 78% pane width it was the
+ * loudest object in a transcript whose job is to show what the *bots* did.
+ * A tinted surface with an accent rule says "you said this" just as clearly
+ * and stops competing with the bot messages, the handoff markers and the
+ * approval chips that are the actual content.
+ *
+ * The rule is on the right because the bubble is right-aligned: the accent
+ * edge always faces the margin the speaker sits against, which is the same
+ * rule the bot bubbles follow on the left.
+ */
+.bubble--user {
+  align-self: flex-end;
+  background: var(--accent-wash);
+  border: 1px solid var(--accent-soft);
+  border-right: 2px solid var(--accent);
+  color: var(--text);
+  border-bottom-right-radius: var(--radius-sm);
+}
+
+/*
+ * The speaker's own colour down the leading edge.
+ *
+ * `--bot-accent` is published per bubble by `MessageBubble` from the design
+ * system's `botColors`. In a thread where Ada, Pike and Vesna take turns, the
+ * column now tells you who is talking before you read a word — which is the
+ * point of giving bots identities in the first place.
+ */
+.bubble--assistant,
+.bubble--tool {
+  align-self: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--bot-accent, var(--accent));
+  border-bottom-left-radius: var(--radius-sm);
+}
+
+.bubble--tool {
+  font-family: var(--font-mono);
+  font-size: var(--text-mono-size);
+  background: var(--surface-alt);
+}
+
+.bubble--streaming {
+  border-color: var(--accent-soft);
+  box-shadow: 0 0 0 1px var(--accent-soft);
+}
+
+.bubble__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
+  font-size: var(--text-caption-size);
+  color: var(--text-muted);
+}
+
+.bubble__author {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.bubble__time {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.bubble__content {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Markdown does its own line breaking, so the pre-wrap that keeps plain user
+   text honest has to come back off. `min-width: 0` is what lets a wide code
+   block or table scroll inside the bubble instead of stretching it. */
+.bubble__content--md {
+  white-space: normal;
+  min-width: 0;
+}
+
+.bubble__copy {
+  position: absolute;
+  top: var(--space-sm);
+  right: var(--space-sm);
+  padding: 2px var(--space-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--text-muted);
+  font-size: var(--text-caption-size);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+.bubble:hover .bubble__copy,
+.bubble__copy:focus-visible {
+  opacity: 1;
+}
+
+/* ---------------------------------------------------------------- handoff */
+
+/*
+ * One bot handing work to another. See `HandoffRail` in MessageBubble.tsx for
+ * why this deserves to be an object rather than a sentence.
+ *
+ * Centred in the column and hairline-ruled to both margins, so it reads as a
+ * divider in the conversation — a change of hands — rather than as another
+ * message. Quiet on purpose: it happens often, and something that happens
+ * often must not shout.
+ */
+.handoff {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  align-self: center;
+  max-width: 78%;
+  padding: var(--space-xs) 0;
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  color: var(--text-muted);
+  animation: rise var(--duration-base) var(--ease-entrance) both;
+}
+
+.handoff::before,
+.handoff::after {
+  content: "";
+  flex: 1 1 var(--space-xxl);
+  height: 1px;
+  background: var(--border);
+}
+
+.handoff__party {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex: 0 0 auto;
+}
+
+.handoff__name {
+  font-weight: 600;
+  color: var(--text);
+}
+
+/*
+ * The connector: a rule with a head on it, so the direction of the handover is
+ * unmistakable.
+ *
+ * The first cut was a single diagonal at the mark's own 60.3-degree slope, on
+ * the theory that reusing the logo's geometry was the tasteful move. On screen
+ * it read as a stray backslash between two names and said nothing about which
+ * way the work went — a decorative reference that cost the element its meaning.
+ * The brand angle survives in the arrowhead, which is skewed onto it; the shaft
+ * is horizontal because "from here to there" is a horizontal idea.
+ */
+.handoff__link {
+  position: relative;
+  display: inline-block;
+  width: 26px;
+  height: 10px;
+  flex: 0 0 auto;
+}
+
+.handoff__slash {
+  position: absolute;
+  left: 0;
+  right: 5px;
+  top: 50%;
+  height: 1px;
+  background: var(--text-dim);
+}
+
+.handoff__link::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  border-top: 1px solid var(--text-dim);
+  border-right: 1px solid var(--text-dim);
+  /* 45deg turns the corner into a chevron; the skew puts it on the mark's slope. */
+  transform: translateY(-50%) rotate(45deg) skewX(-8deg);
+}
+
+.handoff__caption {
+  flex: 0 0 auto;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  font-size: var(--text-caption-size);
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.handoff__ledger {
+  flex: 0 0 auto;
+  padding: 1px var(--space-sm);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-alt);
+  color: var(--text-dim);
+}
+
+.caret {
+  display: inline-block;
+  width: 2px;
+  height: 15px;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  animation: blink 1s steps(2, start) infinite;
+}
+
+/*
+ * The streaming caret, in a Markdown bubble.
+ *
+ * A sibling `<span class="caret">` after a `<p>` or a `<ul>` lands on its own
+ * line under the text, which reads as a stray dash rather than a cursor. As a
+ * `::after` on whatever the last block turned out to be, it sits at the end of
+ * the last line the way it does in a plain bubble — and it costs no JS, so
+ * nothing has to know which block is last.
+ */
+.bubble--streaming .bubble__content--md .md > *:last-child:not(.md__codeblock)::after,
+.bubble--streaming .bubble__content--md .md > .md__codeblock:last-child .md__pre code::after {
+  content: "";
+  display: inline-block;
+  width: 2px;
+  height: 0.95em;
+  margin-left: 3px;
+  vertical-align: text-bottom;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  animation: blink 1s steps(2, start) infinite;
+}
+
+/* --------------------------------------------------------------- markdown */
+
+/*
+ * Rendered model output. Every value here is a design-system token: this is
+ * the same product, not an embedded document, and a default user-agent
+ * stylesheet inside a chat bubble looks exactly like what it is.
+ *
+ * `.md` is the block renderer, `.md--inline` the one-line variant used by the
+ * takeover card and the routines list. Both come out of `components/Markdown
+ * .tsx`, which builds React elements — there is no HTML string in the pipeline
+ * and nothing here is styling markup that came from the model.
+ */
+.md {
+  min-width: 0;
+}
+
+.md--inline {
+  display: inline;
+}
+
+.md > *:first-child {
+  margin-top: 0;
+}
+
+.md > *:last-child {
+  margin-bottom: 0;
+}
+
+.md p {
+  margin: 0 0 var(--space-md);
+  overflow-wrap: anywhere;
+}
+
+.md > p:last-child {
+  margin-bottom: 0;
+}
+
+.md__h {
+  margin: var(--space-lg) 0 var(--space-sm);
+  color: var(--text);
+  font-family: var(--font-display);
+  line-height: 1.25;
+}
+
+.md__h--1,
+.md__h--2 {
+  font-size: var(--text-heading-size);
+  font-weight: var(--text-heading-weight);
+  letter-spacing: var(--text-heading-tracking);
+}
+
+.md__h--3,
+.md__h--4 {
+  font-size: var(--text-subheading-size);
+  font-weight: var(--text-subheading-weight);
+}
+
+/* h5/h6 stop being sizes and become labels — below the body size a heading
+   reads as small print, not as structure. */
+.md__h--5,
+.md__h--6 {
+  font-size: var(--text-label-size);
+  font-weight: var(--text-label-weight);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.md ul,
+.md ol {
+  margin: 0 0 var(--space-md);
+  padding-left: var(--space-xl);
+}
+
+.md li {
+  margin: 0 0 var(--space-xs);
+  overflow-wrap: anywhere;
+}
+
+.md li:last-child {
+  margin-bottom: 0;
+}
+
+.md li > ul,
+.md li > ol {
+  margin-top: var(--space-xs);
+  margin-bottom: 0;
+}
+
+.md__ul {
+  list-style: disc;
+}
+
+.md__ul .md__ul {
+  list-style: circle;
+}
+
+.md__ol {
+  list-style: decimal;
+}
+
+.md__ol::marker,
+.md__ul::marker {
+  color: var(--text-dim);
+}
+
+.md li::marker {
+  color: var(--text-dim);
+}
+
+/* Inline code. Same treatment as `.panel__subtitle code`, so a backticked
+   symbol looks the same wherever it appears in the product. */
+.md__code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border-subtle);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  overflow-wrap: anywhere;
+}
+
+/*
+ * Fenced code. The surface matches `.code-block`, which approval payloads and
+ * raw JSON already use — one code surface in the app, not two.
+ *
+ * The frame is on the wrapper and only the `<pre>` scrolls. That split is what
+ * keeps the language chip out of the first line of code and stops it sliding
+ * away when a wide block is scrolled sideways.
+ */
+.md__codeblock {
+  position: relative;
+  margin: 0 0 var(--space-md);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.md__pre {
+  margin: 0;
+  padding: var(--space-md);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-mono-size);
+  line-height: var(--text-mono-line);
+  overflow-x: auto;
+  white-space: pre;
+  tab-size: 2;
+}
+
+.md__pre code {
+  font: inherit;
+  color: inherit;
+  background: none;
+  padding: 0;
+  border: 0;
+}
+
+/* Room for the chip, so the first line never runs under it. The chip is one
+   `--text-eyebrow-line` plus 4px of padding tall; this clears it. */
+.md__codeblock--labelled .md__pre {
+  padding-top: calc(var(--space-md) + 16px);
+}
+
+.md__lang {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 1;
+  padding: 2px var(--space-sm);
+  border-left: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  border-bottom-left-radius: var(--radius-sm);
+  background: var(--surface-alt);
+  color: var(--text-dim);
+  font-family: var(--font-sans);
+  font-size: var(--text-eyebrow-size);
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+/* A fence whose closing partner has not streamed in yet. Dashed, so a block
+   that is still filling up does not read as one that ended oddly. */
+.md__codeblock--open {
+  border-style: dashed;
+}
+
+.md__quote {
+  margin: 0 0 var(--space-md);
+  padding: var(--space-xs) 0 var(--space-xs) var(--space-md);
+  border-left: 2px solid var(--accent-soft);
+  color: var(--text-muted);
+}
+
+.md__hr {
+  margin: var(--space-lg) 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+.md__table-scroll {
+  margin: 0 0 var(--space-md);
+  overflow-x: auto;
+}
+
+.md__table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: var(--text-caption-size);
+}
+
+.md__table th,
+.md__table td {
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.md__table th {
+  background: var(--surface-alt);
+  color: var(--text);
+  font-weight: 600;
+}
+
+/*
+ * Links.
+ *
+ * These open in the system browser — `openExternal` in `lib/tauri.ts`, because
+ * a plain navigation would replace the app with the page. The underline is
+ * `--accent` rather than the link colour so it stays visible in both schemes
+ * without repainting the text.
+ */
+.md__link {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: var(--accent-soft);
+  text-underline-offset: 2px;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.md__link:hover {
+  text-decoration-color: var(--accent);
+}
+
+/*
+ * A link whose target did not survive `safeHref` — a `javascript:` or `data:`
+ * URL, or one with no scheme at all. The text is kept and struck through
+ * rather than deleted: a bot's output should not quietly lose words, and a
+ * reader is better served knowing something was refused than wondering why a
+ * sentence has a hole in it.
+ */
+.md__link--blocked {
+  color: var(--text-dim);
+  text-decoration: line-through;
+  text-decoration-color: var(--text-dim);
+  cursor: not-allowed;
+}
+
+.md__image-mark {
+  color: var(--text-dim);
+  font-size: 0.9em;
+}
+
+.md--inline p,
+.md--inline > p {
+  display: inline;
+  margin: 0;
+}
+
+/* -------------------------------------------------------------- composer */
+
+.composer {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--space-sm);
+  padding: var(--space-lg) var(--space-xl) var(--space-lg);
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.composer__input {
+  min-height: 48px;
+  max-height: 220px;
+  resize: none;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  padding: var(--space-md) var(--space-lg);
+  overflow-y: auto;
+  transition:
+    border-color var(--duration-fast) var(--ease-standard),
+    box-shadow var(--duration-fast) var(--ease-standard);
+}
+
+.composer__input::placeholder {
+  color: var(--text-dim);
+}
+
+.composer__input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-wash);
+}
+
+.composer__actions {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+}
+
+.composer__hint {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: var(--text-caption-size);
+  color: var(--text-dim);
+}
+
+/* --------------------------------------------------------------- buttons */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-sm) var(--space-lg);
+  font-weight: 600;
+  font-size: var(--text-label-size);
+  line-height: 18px;
+  cursor: pointer;
+  background: var(--surface-alt);
+  color: var(--text);
+  white-space: nowrap;
+  transition:
+    background var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--surface-raised);
+  border-color: var(--border-strong);
+}
+
+.btn:active:not(:disabled) {
+  background: var(--surface-pressed);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--brand-mark-300);
+  border-color: var(--brand-mark-300);
+  color: var(--brand-navy);
+}
+
+:root[data-theme="light"] .btn--primary:hover:not(:disabled) {
+  background: var(--brand-mark-700);
+  border-color: var(--brand-mark-700);
+  color: var(--on-accent);
+}
+
+.btn--ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-muted);
+}
+
+.btn--ghost:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-strong);
+  background: var(--surface-alt);
+}
+
+.btn--danger {
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+  border-color: var(--status-danger-border);
+}
+
+.btn--danger:hover:not(:disabled) {
+  background: var(--status-danger);
+  border-color: var(--status-danger);
+  color: var(--brand-navy);
+}
+
+/*
+ * Destructive, but not shouting.
+ *
+ * `--btn-danger` is a filled tint and it is right for a destructive action the
+ * user has deliberately navigated to. It is wrong for one that sits on a rail
+ * visible on every tab all day — see the note on the lifecycle row in
+ * DesktopPane.tsx. This carries the danger in the word and the border, saves
+ * the fill for hover, and keeps the confirmation dialog as the real guard.
+ */
+.btn--quiet-danger {
+  background: transparent;
+  color: var(--status-danger-fg);
+  border-color: transparent;
+}
+
+.btn--quiet-danger:hover:not(:disabled) {
+  background: var(--status-danger-bg);
+  border-color: var(--status-danger-border);
+}
+
+.btn--sm {
+  padding: var(--space-xs) var(--space-md);
+  font-size: var(--text-label-size);
+}
+
+.btn--xs {
+  padding: 2px var(--space-sm);
+  font-size: var(--text-caption-size);
+  border-radius: var(--radius-sm);
+}
+
+.btn--icon {
+  padding: var(--space-xs);
+  width: 30px;
+  height: 30px;
+}
+
+/* ---------------------------------------------------------------- inputs */
+
+.input,
+.select {
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--text-body-size);
+  transition:
+    border-color var(--duration-fast) var(--ease-standard),
+    box-shadow var(--duration-fast) var(--ease-standard);
+}
+
+.input::placeholder {
+  color: var(--text-dim);
+}
+
+.input:focus,
+.select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-wash);
+}
+
+.select {
+  width: auto;
+  min-width: 120px;
+  cursor: pointer;
+  padding-right: var(--space-xl);
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position:
+    calc(100% - 15px) calc(50% + 1px),
+    calc(100% - 11px) calc(50% + 1px);
+  background-size:
+    4px 4px,
+    4px 4px;
+  background-repeat: no-repeat;
+}
+
+.input--tiny {
+  max-width: 110px;
+}
+
+.input--code {
+  font-family: var(--font-mono);
+  font-size: var(--text-mono-size);
+  resize: vertical;
+}
+
+.input--flush {
+  border-color: transparent;
+  background: transparent;
+  padding: var(--space-xs) var(--space-sm);
+}
+
+.input--flush:hover {
+  border-color: var(--border);
+}
+
+.input--invalid,
+.input--invalid:focus {
+  border-color: var(--status-danger);
+  box-shadow: 0 0 0 3px var(--status-danger-bg);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  margin-bottom: var(--space-md);
+  min-width: 0;
+}
+
+.field--inline {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-sm);
+  margin-bottom: 0;
+}
+
+.field__help {
+  font-size: var(--text-caption-size);
+  color: var(--text-dim);
+}
+
+.field__row {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+/*
+ * `min(180px, 100%)` rather than a bare 180px, and that is a real bug fix.
+ *
+ * `auto-fit` with `minmax(180px, 1fr)` never lets a column go below 180px, so
+ * once two columns are laid the grid demands 360px plus the gap whatever the
+ * container is. Inside the Builder’s two-column split the form track is
+ * narrower than that on a 1180px window, and the grid simply overflowed its
+ * track and painted underneath the card beside it.
+ */
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
+  gap: var(--space-md);
+}
+
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: var(--text-caption-size);
+  color: var(--text-muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.switch input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
+fieldset {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+  margin: 0 0 var(--space-md);
+}
+
+legend {
+  padding: 0 var(--space-xs);
+}
+
+/* ---------------------------------------------------------------- panels */
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.panel__body {
+  flex: 1;
+  overflow: auto;
+  padding: var(--space-xl);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+/*
+ * Catalogue panels lay their cards out in columns.
+ *
+ * Routines and Usage are lists of independent, similarly-shaped objects, and a
+ * single full-width column gave each one about 300px of vertical space to say
+ * one number in. Five bots was 1,650px of scrolling for what is a five-row
+ * table. `auto-fill` rather than a fixed count so the same rule survives the
+ * Bot Desktop pane being dragged wider, maximised, or a small window — below
+ * about 700px of column it collapses to one and nothing has to know.
+ *
+ * Approvals deliberately does NOT get this. Those cards are decisions, not
+ * catalogue entries: they are read one at a time, they carry a note field and
+ * two buttons, and side-by-side risk bands would invite the eye to compare
+ * colours instead of reading consequences.
+ */
+.panel__body--grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  align-content: start;
+  /*
+   * Natural height per card, not the tallest in the row.
+   *
+   * Grid items stretch by default, so opening one usage cards ledger stretched
+   * the card beside it to match and left a screenful of empty surface with a
+   * border round it. These are independent objects in a catalogue; a card
+   * should be as tall as what is in it.
+   */
+  align-items: start;
+  gap: var(--space-md);
+}
+
+/*
+ * Anything that is not one of the repeated cards spans the full width — an
+ * empty state, an error, or the loading skeleton has no business sitting in
+ * a single column with dead space beside it.
+ */
+.panel__body--grid > .empty-state,
+.panel__body--grid > .skeleton-cards,
+.panel__body--grid > .notice,
+.panel__body--grid > .subpanel {
+  grid-column: 1 / -1;
+}
+
+.subpanel {
+  margin-bottom: var(--space-xxl);
+}
+
+/* Same grid, for a catalogue that lives inside a subpanel rather than a body. */
+.subpanel--grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  align-content: start;
+  align-items: start;
+  gap: var(--space-md);
+}
+
+.subpanel--grid > .subpanel__title,
+.subpanel--grid > .empty-state,
+.subpanel--grid > .skeleton-cards,
+.subpanel--grid > .notice {
+  grid-column: 1 / -1;
+}
+
+.subpanel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-md);
+}
+
+.subpanel__title {
+  margin: 0 0 var(--space-md);
+}
+
+.subpanel__header .subpanel__title {
+  margin: 0;
+}
+
+/* ----------------------------------------------------------------- cards */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-lg);
+  margin: 0;
+  transition:
+    border-color var(--duration-fast) var(--ease-standard),
+    background var(--duration-fast) var(--ease-standard);
+}
+
+/* Panels lay cards out with a flex gap; anything else keeps a bottom margin. */
+.panel__body > .card {
+  margin-bottom: 0;
+}
+
+/*
+ * Do not let a scrolling column squash its children.
+ *
+ * `.panel__body` and `.chat__messages` are both `display: flex;
+ * flex-direction: column; overflow: auto`, and a flex item defaults to
+ * `flex-shrink: 1`. So the moment the content is taller than the pane — which
+ * is the normal state of a queue or a transcript — every card and every bubble
+ * gets compressed below its own content height and the overflow spills out of
+ * the bottom of the box.
+ *
+ * It was invisible while nothing clipped: the spilled content still painted,
+ * just over whatever came next. The approval card's risk band needs
+ * `overflow: hidden` to stay inside its rounded corner, and that turned a
+ * long-standing layout bug into a missing Approve button.
+ *
+ * `flex-shrink: 0` is the fix and it is the correct behaviour regardless:
+ * a scroll container should scroll, not compress.
+ */
+.panel__body > *,
+.chat__messages > * {
+  flex-shrink: 0;
+}
+
+.card:hover {
+  border-color: var(--border-strong);
+}
+
+.card__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin: 0 0 var(--space-xs);
+  font-size: var(--text-subheading-size);
+  line-height: var(--text-subheading-line);
+  font-weight: var(--text-subheading-weight);
+  color: var(--text);
+}
+
+.card__body {
+  margin: 0 0 var(--space-sm);
+  color: var(--text-muted);
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line);
+}
+
+.row-actions {
+  display: flex;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* ----------------------------------------------------------------- chips */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 2px var(--space-sm);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-caption-size);
+  line-height: 16px;
+  font-weight: 600;
+  background: var(--surface-alt);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.chip--ok {
+  background: var(--status-success-bg);
+  color: var(--status-success-fg);
+  border-color: var(--status-success-border);
+}
+
+.chip--warn {
+  background: var(--status-warning-bg);
+  color: var(--status-warning-fg);
+  border-color: var(--status-warning-border);
+}
+
+.chip--error {
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+  border-color: var(--status-danger-border);
+}
+
+.chip--muted,
+.chip--idle {
+  background: var(--surface-alt);
+  color: var(--text-muted);
+  border-color: var(--border);
+}
+
+/*
+ * Risk chips.
+ *
+ * These carry the governance story, so they get the design system's risk
+ * roles rather than a three-way ok/warn/error squash: `observe` → `delete`
+ * runs cool-to-warm, cool being what a bot may do unattended and warm being
+ * what always stops at a human. `-fg` is the role colour re-derived for text
+ * against every ground in the scheme, so the label clears AA on a card and on
+ * the page alike; `-solid` is the dot, which only has to clear 3:1 as a
+ * non-text element.
+ */
+.chip--risk {
+  text-transform: capitalize;
+  letter-spacing: var(--tracking-tight);
+}
+
+.chip--risk::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-pill);
+  background: currentColor;
+}
+
+.chip--risk[data-risk="observe"] {
+  color: var(--risk-observe-fg);
+  background: var(--risk-observe-bg);
+  border-color: var(--risk-observe-border);
+}
+
+.chip--risk[data-risk="observe"]::before {
+  background: var(--risk-observe);
+}
+
+.chip--risk[data-risk="draft"] {
+  color: var(--risk-draft-fg);
+  background: var(--risk-draft-bg);
+  border-color: var(--risk-draft-border);
+}
+
+.chip--risk[data-risk="draft"]::before {
+  background: var(--risk-draft);
+}
+
+.chip--risk[data-risk="mutate"] {
+  color: var(--risk-mutate-fg);
+  background: var(--risk-mutate-bg);
+  border-color: var(--risk-mutate-border);
+}
+
+.chip--risk[data-risk="mutate"]::before {
+  background: var(--risk-mutate);
+}
+
+.chip--risk[data-risk="send"] {
+  color: var(--risk-send-fg);
+  background: var(--risk-send-bg);
+  border-color: var(--risk-send-border);
+}
+
+.chip--risk[data-risk="send"]::before {
+  background: var(--risk-send);
+}
+
+.chip--risk[data-risk="spend"] {
+  color: var(--risk-spend-fg);
+  background: var(--risk-spend-bg);
+  border-color: var(--risk-spend-border);
+}
+
+.chip--risk[data-risk="spend"]::before {
+  background: var(--risk-spend);
+}
+
+.chip--risk[data-risk="delete"] {
+  color: var(--risk-delete-fg);
+  background: var(--risk-delete-bg);
+  border-color: var(--risk-delete-border);
+}
+
+.chip--risk[data-risk="delete"]::before {
+  background: var(--risk-delete);
+}
+
+/* ------------------------------------------------------- notices & code */
+
+.notice {
+  padding: var(--space-md) var(--space-lg);
+  border-radius: var(--radius-md);
+  border: 1px dashed var(--border-strong);
+  color: var(--text-muted);
+  font-size: var(--text-body-size);
+  margin-bottom: var(--space-md);
+}
+
+.inline-error {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  margin: var(--space-sm) var(--space-lg);
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  background: var(--status-danger-bg);
+  border: 1px solid var(--status-danger-border);
+  color: var(--status-danger-fg);
+  font-size: var(--text-caption-size);
+}
+
+.inline-error pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.code-block {
+  margin: var(--space-sm) 0;
+  padding: var(--space-md);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.code-block--scroll {
+  max-height: 240px;
+  overflow: auto;
+}
+
+.kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-xs) var(--space-lg);
+  margin: var(--space-sm) 0;
+  font-size: var(--text-body-size);
+}
+
+.kv dt {
+  color: var(--text-dim);
+}
+
+.kv dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.kv--wrap {
+  display: block;
+}
+
+.kv__pair {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-xs) var(--space-lg);
+  padding: var(--space-xs) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-caption-size);
+  margin-top: var(--space-md);
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: var(--space-xs) var(--space-sm);
+  border-bottom: 1px solid var(--border);
+}
+
+.table tbody tr:last-child th,
+.table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.table thead th {
+  border-bottom-color: var(--border-strong);
+  padding-bottom: var(--space-sm);
+}
+
+.table td {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+/* ------------------------------------------------------------- approvals */
+
+/*
+ * The governance surface.
+ *
+ * This is the screen the product is sold on, so it is the one place where the
+ * design system's risk roles are allowed to shout. Everything below hangs off
+ * one attribute — `data-risk` on the card — which is why a `delete` and a
+ * `draft` no longer look like the same object with a different word in it.
+ *
+ * The rule the palette gives us and this section keeps: cool for the three
+ * classes a bot may run unattended, warm for the three that always stop at a
+ * human. Nothing safe is ever warm.
+ */
+
+/* The queue, before you read any of it. */
+.queue-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  flex-wrap: wrap;
+  padding: var(--space-md) var(--space-xl);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.main .queue-summary {
+  background: var(--bg);
+}
+
+.queue-summary__count {
+  font-size: var(--text-body-size);
+  color: var(--text-muted);
+}
+
+.queue-summary__count strong {
+  font-family: var(--font-display);
+  font-size: var(--text-title-size);
+  line-height: 1;
+  font-weight: var(--text-title-weight);
+  letter-spacing: var(--text-title-tracking);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  margin-right: var(--space-xs);
+}
+
+.queue-summary__tally {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.queue-summary__item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-xs);
+  font-size: var(--text-caption-size);
+  color: var(--text-muted);
+}
+
+.queue-summary__pip {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  align-self: center;
+  background: var(--risk-observe);
+}
+
+.queue-summary__n {
+  font-family: var(--font-mono);
+  font-size: var(--text-body-size);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.queue-summary__label {
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  font-size: var(--text-caption-size);
+  font-weight: 600;
+}
+
+.queue-summary__item[data-risk="observe"] .queue-summary__pip { background: var(--risk-observe); }
+.queue-summary__item[data-risk="draft"] .queue-summary__pip { background: var(--risk-draft); }
+.queue-summary__item[data-risk="mutate"] .queue-summary__pip { background: var(--risk-mutate); }
+.queue-summary__item[data-risk="send"] .queue-summary__pip { background: var(--risk-send); }
+.queue-summary__item[data-risk="spend"] .queue-summary__pip { background: var(--risk-spend); }
+.queue-summary__item[data-risk="delete"] .queue-summary__pip { background: var(--risk-delete); }
+
+.queue-summary__item[data-risk="send"] .queue-summary__label { color: var(--risk-send-fg); }
+.queue-summary__item[data-risk="spend"] .queue-summary__label { color: var(--risk-spend-fg); }
+.queue-summary__item[data-risk="delete"] .queue-summary__label { color: var(--risk-delete-fg); }
+
+/*
+ * The card. A 3px band down the leading edge in the risk role, which is the
+ * cheapest possible way to make a list scannable by danger — no icon to learn,
+ * no legend to read, and it survives being seen out of the corner of an eye.
+ */
+.approval {
+  position: relative;
+  overflow: hidden;
+  padding-left: calc(var(--space-lg) + 3px);
+}
+
+.approval::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--risk-observe);
+}
+
+.approval[data-risk="observe"]::before { background: var(--risk-observe); }
+.approval[data-risk="draft"]::before { background: var(--risk-draft); }
+.approval[data-risk="mutate"]::before { background: var(--risk-mutate); }
+.approval[data-risk="send"]::before { background: var(--risk-send); }
+.approval[data-risk="spend"]::before { background: var(--risk-spend); }
+.approval[data-risk="delete"]::before { background: var(--risk-delete); }
+
+.approval__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-lg);
+}
+
+.approval__lead {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/*
+ * The risk class as a word, in the eyebrow step, above the title.
+ *
+ * It used to be a chip in a row of three chips of identical weight — the bot
+ * name and the literal string "pending" competed with the one fact that
+ * decides whether this is a five-second decision or a careful one.
+ */
+.approval__risk-word {
+  font-family: var(--font-display);
+  font-size: var(--text-eyebrow-size);
+  line-height: var(--text-eyebrow-line);
+  font-weight: var(--text-eyebrow-weight);
+  letter-spacing: var(--text-eyebrow-tracking);
+  text-transform: var(--text-eyebrow-transform);
+  color: var(--risk-observe-fg);
+}
+
+.approval[data-risk="observe"] .approval__risk-word { color: var(--risk-observe-fg); }
+.approval[data-risk="draft"] .approval__risk-word { color: var(--risk-draft-fg); }
+.approval[data-risk="mutate"] .approval__risk-word { color: var(--risk-mutate-fg); }
+.approval[data-risk="send"] .approval__risk-word { color: var(--risk-send-fg); }
+.approval[data-risk="spend"] .approval__risk-word { color: var(--risk-spend-fg); }
+.approval[data-risk="delete"] .approval__risk-word { color: var(--risk-delete-fg); }
+
+.approval__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-subheading-size);
+  line-height: var(--text-subheading-line);
+  font-weight: var(--text-subheading-weight);
+  color: var(--text);
+}
+
+.approval__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  flex: 0 0 auto;
+  font-size: var(--text-caption-size);
+  color: var(--text-dim);
+}
+
+.approval__age {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* What approving does, and whether it can be taken back. */
+.approval__consequence {
+  margin-top: var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.approval__effect {
+  margin: 0;
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line);
+  font-weight: var(--text-body-strong-weight);
+  color: var(--text);
+}
+
+.approval__undo {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+  margin: 0;
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  color: var(--text-muted);
+}
+
+.approval__undo--reversible {
+  color: var(--status-success-fg);
+}
+
+.approval__undo--hard-to-undo {
+  color: var(--status-warning-fg);
+}
+
+.approval__undo--permanent {
+  color: var(--status-danger-fg);
+  font-weight: 600;
+}
+
+.approval__external {
+  padding: 1px var(--space-sm);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--surface-alt);
+  color: var(--text-muted);
+  font-weight: 600;
+  letter-spacing: var(--tracking-wide);
+  text-transform: uppercase;
+  font-size: var(--text-caption-size);
+}
+
+.approval__summary {
+  margin-top: var(--space-md);
+  color: var(--text-muted);
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line);
+}
+
+/*
+ * Progressive disclosure. The payload is the second question, not the first.
+ *
+ * `.disclosure` is the same control, unqualified, because three other panels
+ * needed it the moment they got the same treatment: the usage ledger, a
+ * connector’s action list and the manifest editor are all second questions.
+ * One class, so a fold looks like a fold everywhere in the product.
+ */
+.approval__disclosure,
+.disclosure {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin-top: var(--space-md);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: var(--text-caption-size);
+  font-weight: 600;
+  letter-spacing: var(--tracking-tight);
+  transition: color var(--duration-fast) var(--ease-standard);
+}
+
+.approval__disclosure:hover,
+.disclosure:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.approval__reveal,
+.reveal {
+  margin-top: var(--space-sm);
+  padding-top: var(--space-sm);
+  border-top: 1px solid var(--border-subtle);
+  animation: reveal var(--duration-base) var(--ease-entrance) both;
+}
+
+.approval__detail {
+  margin: var(--space-md) 0;
+}
+
+.approval__detail-label {
+  margin-top: var(--space-md);
+  margin-bottom: var(--space-xs);
+}
+
+.approval__steps {
+  margin: var(--space-sm) 0 0 var(--space-lg);
+  padding: 0;
+  font-size: var(--text-caption-size);
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/*
+ * The decision bar.
+ *
+ * Note and buttons on one row rather than stacked, because the note is
+ * optional and stacking it put an empty text field between the person and the
+ * only two controls that matter. It wraps below 520px of card width.
+ */
+.approval__decide {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+  margin-top: var(--space-lg);
+  padding-top: var(--space-md);
+  border-top: 1px solid var(--border);
+}
+
+.approval__note {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.approval__buttons {
+  display: flex;
+  gap: var(--space-sm);
+  flex: 0 0 auto;
+}
+
+/*
+ * Approve wears the risk.
+ *
+ * `--risk-*` is the solid, and `--risk-*-on` is the ink the design system
+ * measured as readable on it, so every one of the six clears contrast without
+ * a per-class exception here. The default is `observe` so a class this file
+ * has never heard of still gets a legible button rather than a transparent one.
+ */
+.btn--risk {
+  background: var(--risk-observe);
+  color: var(--risk-observe-on);
+  border-color: transparent;
+  font-weight: 700;
+}
+
+.btn--risk:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.btn--risk:active:not(:disabled) {
+  filter: brightness(0.94);
+}
+
+[data-risk="observe"] .btn--risk { background: var(--risk-observe); color: var(--risk-observe-on); }
+[data-risk="draft"] .btn--risk { background: var(--risk-draft); color: var(--risk-draft-on); }
+[data-risk="mutate"] .btn--risk { background: var(--risk-mutate); color: var(--risk-mutate-on); }
+[data-risk="send"] .btn--risk { background: var(--risk-send); color: var(--risk-send-on); }
+[data-risk="spend"] .btn--risk { background: var(--risk-spend); color: var(--risk-spend-on); }
+[data-risk="delete"] .btn--risk { background: var(--risk-delete); color: var(--risk-delete-on); }
+
+/*
+ * The one approval the app has navigated you to. A left accent rule plus a
+ * ring — loud enough to find in a scrolled list, quiet enough not to read as
+ * an error.
+ */
+.approval--highlight {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-wash);
+}
+
+.approval--decided {
+  opacity: 0.7;
+}
+
+.execution {
+  margin-top: var(--space-md);
+  padding: var(--space-md);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+}
+
+.execution--ok {
+  background: var(--status-success-bg);
+  border-color: var(--status-success-border);
+}
+
+.execution--error {
+  background: var(--status-danger-bg);
+  border-color: var(--status-danger-border);
+}
+
+.execution__title {
+  font-size: var(--text-label-size);
+  font-weight: 700;
+  margin-bottom: var(--space-xs);
+}
+
+.execution--ok .execution__title {
+  color: var(--status-success-fg);
+}
+
+.execution--error .execution__title {
+  color: var(--status-danger-fg);
+}
+
+/* ------------------------------------------------------------ connectors */
+
+.connector__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-md);
+}
+
+.connector__actions {
+  list-style: none;
+  margin: var(--space-md) 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  font-size: var(--text-caption-size);
+}
+
+.connector__actions li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  padding: var(--space-xs) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.connector__actions li:last-child {
+  border-bottom: 0;
+}
+
+.connector__bind {
+  margin-top: var(--space-md);
+  padding-top: var(--space-md);
+  border-top: 1px solid var(--border);
+}
+
+.mcp__tools {
+  margin-top: var(--space-md);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-sm);
+}
+
+.mcp__tool-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  font-size: var(--text-caption-size);
+}
+
+.validation {
+  list-style: none;
+  margin: var(--space-sm) 0;
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  font-size: var(--text-caption-size);
+  border: 1px solid var(--border);
+}
+
+.validation--error {
+  background: var(--status-danger-bg);
+  border-color: var(--status-danger-border);
+  color: var(--status-danger-fg);
+}
+
+.validation--ok {
+  background: var(--status-success-bg);
+  border-color: var(--status-success-border);
+  color: var(--status-success-fg);
+}
+
+.validation__warn {
+  color: var(--status-warning-fg);
+}
+
+/* ----------------------------------------------------------------- usage */
+
+.usage__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-md);
+}
+
+.usage--warn {
+  border-color: var(--status-warning-border);
+}
+
+.usage--over {
+  border-color: var(--status-danger-border);
+}
+
+.usage-bar {
+  height: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-alt);
+  overflow: hidden;
+  margin: var(--space-md) 0;
+  border: 1px solid var(--border);
+}
+
+/*
+ * The fill is a two-step of the brand ramp, not the violet→fuchsia→cyan sweep.
+ * The sweep is a per-bot identity device; a budget meter appears once per row
+ * and would turn it into wallpaper.
+ */
+.usage-bar__fill {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--brand-mark-600), var(--accent));
+  transition: width var(--duration-slow) var(--ease-standard);
+}
+
+.usage-bar__fill--warn {
+  background: var(--status-warning);
+}
+
+.usage-bar__fill--over {
+  background: var(--status-danger);
+}
+
+.budget-editor {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-sm);
+  margin: var(--space-md) 0;
+}
+
+/* -------------------------------------------------------------- routines */
+
+.routine__runs {
+  margin-top: var(--space-md);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-sm);
+}
+
+.routine__steps summary {
+  cursor: pointer;
+  font-size: var(--text-caption-size);
+  color: var(--text-muted);
+}
+
+/* ---------------------------------------------------------- desktop pane */
+
+.pane__meta {
+  font-family: var(--font-mono);
+  font-size: var(--text-caption-size);
+  color: var(--text-dim);
+}
+
+/*
+ * The bot's lifecycle, wearing the design system's bot-state roles. The dot is
+ * `--bot-<state>` (a fill, 3:1) and the label is `--bot-<state>-fg` (text,
+ * 4.5:1). These used to be the same value, which is why the old pill was
+ * either shouting or illegible depending on the state.
+ */
+.state-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 2px var(--space-sm);
+  border-radius: var(--radius-pill);
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.state-pill::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-pill);
+  background: currentColor;
+}
+
+.state-pill[data-state="running"] {
+  color: var(--bot-running-fg);
+  background: var(--bot-running-bg);
+  border-color: var(--bot-running);
+}
+
+.state-pill[data-state="running"]::before {
+  background: var(--bot-running);
+}
+
+.state-pill[data-state="starting"] {
+  color: var(--bot-starting-fg);
+  background: var(--bot-starting-bg);
+  border-color: var(--bot-starting);
+}
+
+.state-pill[data-state="starting"]::before {
+  background: var(--bot-starting);
+  animation: pulse 1.4s var(--ease-standard) infinite;
+}
+
+.state-pill[data-state="stopping"] {
+  color: var(--bot-stopping-fg);
+  background: var(--bot-stopping-bg);
+  border-color: var(--bot-stopping);
+}
+
+.state-pill[data-state="stopping"]::before {
+  background: var(--bot-stopping);
+  animation: pulse 1.4s var(--ease-standard) infinite;
+}
+
+.state-pill[data-state="suspended"] {
+  color: var(--bot-suspended-fg);
+  background: var(--bot-suspended-bg);
+  border-color: var(--bot-suspended);
+}
+
+.state-pill[data-state="suspended"]::before {
+  background: var(--bot-suspended);
+}
+
+.state-pill[data-state="error"] {
+  color: var(--bot-error-fg);
+  background: var(--bot-error-bg);
+  border-color: var(--bot-error);
+}
+
+.state-pill[data-state="error"]::before {
+  background: var(--bot-error);
+}
+
+.state-pill[data-state="absent"] {
+  color: var(--bot-absent-fg);
+  background: var(--bot-absent-bg);
+  border-color: var(--border);
+}
+
+.state-pill[data-state="absent"]::before {
+  background: var(--bot-absent);
+}
+
+/* Kept so the tone classes still work if a caller has not moved to data-state. */
+.state-pill--ok {
+  color: var(--status-success-fg);
+  background: var(--status-success-bg);
+  border-color: var(--status-success-border);
+}
+
+.state-pill--warn {
+  color: var(--status-warning-fg);
+  background: var(--status-warning-bg);
+  border-color: var(--status-warning-border);
+}
+
+.state-pill--error {
+  color: var(--status-danger-fg);
+  background: var(--status-danger-bg);
+  border-color: var(--status-danger-border);
+}
+
+.desktop-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+/* Pushed to the far end, away from the actions somebody means to press. */
+.desktop-controls__wipe {
+  margin-left: auto;
+}
+
+/*
+ * The viewport is the box the desktop is fitted into; the stage is the fitted
+ * desktop itself, sized in JS to whole pixels with the screenshot's own aspect
+ * ratio (`lib/desktopGeometry`). Everything between the two is letterbox.
+ *
+ * `place-items: safe center` rather than plain `center`: at 1:1 the stage is
+ * larger than the viewport, and centred overflow in grid (like flex) puts the
+ * top-left corner out of reach of the scrollbars. `safe` falls back to `start`
+ * exactly when that would happen.
+ *
+ * Docked, the viewport takes the desktop's own proportions from
+ * `--desktop-aspect`, so the common case has no bars at all. `max-height` can
+ * still win on a short window and leave the stage pillarboxed — which is fine,
+ * because the click mapping is computed from the contain geometry rather than
+ * assumed from the element box.
+ */
+.desktop-viewport {
+  position: relative;
+  display: grid;
+  place-items: safe center;
+  overflow: hidden;
+  background: var(--surface-alt);
+  aspect-ratio: var(--desktop-aspect, 16 / 10);
+  /* Hold the aspect height even when the chrome below wants the room; the pane
+     scrolls instead of squashing the one thing people came here to look at. */
+  flex: 0 0 auto;
+  min-height: 200px;
+  max-height: 60vh;
+}
+
+.desktop-viewport--scroll {
+  overflow: auto;
+}
+
+.desktop-pane--expanded .desktop-viewport {
+  flex: 1 1 auto;
+  aspect-ratio: auto;
+  min-height: 260px;
+  max-height: none;
+  background: var(--brand-navy);
+}
+
+/*
+ * Maximised, every row of chrome is height the desktop does not get. Measured
+ * on a 1366×768 window the stock padding left the desktop 422px tall (47% of
+ * 1:1); tightening the four bands recovers ~70px, which is another 8 points of
+ * scale on a laptop and free on a big monitor.
+ */
+.desktop-pane--expanded .pane__header,
+.desktop-pane--expanded .desktop-controls,
+.desktop-pane--expanded .desktop-footer {
+  padding-top: var(--space-sm);
+  padding-bottom: var(--space-sm);
+}
+
+.desktop-pane--expanded .recorder__toggle {
+  padding-top: var(--space-sm);
+  padding-bottom: var(--space-sm);
+}
+
+.desktop-stage {
+  position: relative;
+  display: block;
+  line-height: 0;
+  flex: 0 0 auto;
+}
+
+/*
+ * An empty canvas is chrome, not a screen: painting it brand navy put a slab of
+ * near-black behind the light theme's "no screenshot" overlay, which the scrim
+ * then turned mid-grey. Navy is for the canvas that is actually mirroring a
+ * desktop.
+ *
+ * `object-fit: contain` is belt and braces. The element is already sized to the
+ * fitted box, so it does nothing in the steady state — but during the frame
+ * between a drag and the ResizeObserver, or when a screenshot arrives at a new
+ * resolution, it letterboxes instead of stretching, and `pointToDesktop` maps
+ * through the identical contain geometry. The two cannot drift apart.
+ */
+.desktop-canvas {
+  display: block;
+  object-fit: contain;
+  background: var(--surface-alt);
+  cursor: default;
+}
+
+.desktop-canvas--live {
+  cursor: crosshair;
+  background: var(--brand-navy);
+  outline: 2px solid var(--status-warning-border);
+  outline-offset: -2px;
+}
+
+/* Focused *and* live: this outline is the promise that keystrokes land there. */
+.desktop-canvas--live:focus,
+.desktop-canvas--live:focus-visible {
+  outline: 3px solid var(--status-danger);
+  outline-offset: -3px;
+}
+
+/*
+ * Where the last click was sent. At one frame a second there is otherwise no
+ * evidence a click happened at all until the desktop repaints, and the first
+ * thing anyone does about that is click again.
+ */
+/*
+ * Where the click landed.
+ *
+ * Two parts, because a single expanding circle reads as a ripple and a contact
+ * point reads as a click: the ring travels outward and the dot stays put and
+ * fades. Mounted permanently and parked invisible -- GSAP positions and plays
+ * it (see components/DesktopPane.tsx), so a click costs no React render.
+ *
+ * pointer-events: none, and it is a sibling of the canvas rather than a
+ * wrapper, so nothing here can affect the click mapping.
+ */
+.desktop-marker {
+  position: absolute;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.desktop-marker__ring,
+.desktop-marker__dot {
+  position: absolute;
+  border-radius: var(--radius-pill);
+  opacity: 0;
+  visibility: hidden;
+}
+
+.desktop-marker__ring {
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  border: 2px solid var(--accent);
+}
+
+.desktop-marker__dot {
+  width: 8px;
+  height: 8px;
+  margin: -4px 0 0 -4px;
+  background: var(--accent);
+}
+
+.canvas-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--scrim);
+  backdrop-filter: blur(2px);
+  text-align: center;
+  padding: var(--space-lg);
+  line-height: var(--text-body-line);
+}
+
+.stream-frame {
+  display: block;
+  border: 0;
+  background: var(--brand-navy);
+}
+
+/* ------------------------------------------------- desktop pane controls */
+
+.desktop-pane__tools {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex: 0 0 auto;
+}
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  background: var(--surface-alt);
+}
+
+.segmented__option {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  padding: var(--space-xs) var(--space-sm);
+  font-size: var(--text-caption-size);
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+.segmented__option:hover {
+  color: var(--text);
+  background: var(--surface-raised);
+}
+
+.segmented__option--on {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.btn--on {
+  border-color: var(--accent);
+  color: var(--text);
+  background: var(--accent-wash);
+}
+
+/*
+ * Which machine the next keystroke reaches. Three states, three colour roles,
+ * a sentence each — "am I typing into chat or into the bot's browser" is the
+ * question a takeover UI has to answer without being asked.
+ */
+.desktop-inputbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-lg);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-alt);
+  color: var(--text-muted);
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  transition:
+    background var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+.desktop-inputbar--takeover {
+  background: var(--status-warning-bg);
+  color: var(--status-warning-fg);
+  border-bottom-color: var(--status-warning-border);
+}
+
+.desktop-inputbar--live {
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+  border-bottom-color: var(--status-danger-border);
+}
+
+.desktop-inputbar__dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-pill);
+  background: var(--text-dim);
+}
+
+.desktop-inputbar--takeover .desktop-inputbar__dot {
+  background: var(--status-warning);
+}
+
+.desktop-inputbar--live .desktop-inputbar__dot {
+  background: var(--status-danger);
+  animation: desktop-live-pulse 1.6s var(--ease-standard) infinite;
+}
+
+@keyframes desktop-live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/*
+ * Reduced motion.
+ *
+ * The blanket rule at the bottom of this file already clamps every duration and
+ * iteration count, so the transitions and the two token-timed keyframes above
+ * are covered. These two are still switched off by name: a 1µs infinite pulse
+ * is a flicker rather than an animation, and the click marker has to stay
+ * *visible* for its timeout rather than being animated to nothing instantly —
+ * it is feedback, not decoration.
+ *
+ * Note the emitted `@media (prefers-reduced-motion: reduce) { :root { … } }`
+ * token block is not what saves us here: `state/theme` always stamps
+ * `data-theme`, and `:root[data-theme="dark"]` outranks a bare `:root` whatever
+ * media query it sits in, so `--duration-*` never actually reaches 0ms.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .desktop-inputbar--live .desktop-inputbar__dot {
+    animation: none;
+  }
+
+  /*
+   * The marker is feedback, not decoration, so reduced motion keeps it and
+   * loses only the travel. That is handled in JS (it has to be: the element is
+   * shown and hidden by a timeline, not by a keyframe), so there is nothing to
+   * override here beyond making sure no stray animation is left on it.
+   */
+  .desktop-marker__ring,
+  .desktop-marker__dot {
+    animation: none;
+  }
+}
+
+.desktop-inputbar__text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.desktop-inputbar__hint {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  white-space: nowrap;
+}
+
+.desktop-inputbar__hint kbd {
+  font-family: var(--font-mono);
+  font-size: var(--text-mono-size);
+  padding: 0 var(--space-xs);
+  border: 1px solid currentColor;
+  border-radius: var(--radius-sm);
+}
+
+.desktop-footer {
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.desktop-footer__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+.desktop-footer__meta {
+  font-size: var(--text-caption-size);
+  color: var(--text-dim);
+  margin-left: auto;
+  font-family: var(--font-mono);
+}
+
+/* -------------------------------------------------------------- recorder */
+
+.recorder {
+  border-top: 1px solid var(--border);
+}
+
+.recorder--live {
+  box-shadow: inset 2px 0 0 var(--status-danger);
+}
+
+.recorder__toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  padding: var(--space-md) var(--space-lg);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+
+.recorder__toggle:hover {
+  background: var(--surface-alt);
+}
+
+.recorder__title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-weight: 600;
+  font-size: var(--text-label-size);
+  flex: 1;
+}
+
+.recorder__count {
+  font-size: var(--text-caption-size);
+  color: var(--text-dim);
+}
+
+.rec-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--status-danger);
+  animation: pulse 1.4s var(--ease-standard) infinite;
+}
+
+.recorder__body {
+  padding: 0 var(--space-lg) var(--space-lg);
+}
+
+.recorder__row {
+  display: flex;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-sm);
+}
+
+.recorder__hint {
+  margin: var(--space-xs) 0 var(--space-md);
+  font-size: var(--text-caption-size);
+  color: var(--text-muted);
+}
+
+/* Recording is armed but deliberately not capturing — a takeover is in
+   progress and those keystrokes are a sign-in. Warning, not error: nothing
+   is broken and nothing was lost. */
+.recorder__hint--paused {
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-sm);
+  background: var(--status-warning-bg);
+  border: 1px solid var(--status-warning-border);
+  color: var(--status-warning-fg);
+}
+
+.recorder__steps {
+  list-style: none;
+  margin: 0 0 var(--space-md);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.recorder__step {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: var(--space-xs);
+  border-radius: var(--radius-sm);
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+}
+
+.recorder__step-index {
+  width: 20px;
+  text-align: center;
+  font-size: var(--text-caption-size);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.recorder__step-action {
+  font-size: var(--text-caption-size);
+  color: var(--text-dim);
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+
+.recorder__step-actions {
+  display: flex;
+  gap: 2px;
+}
+
+.recorder__manual {
+  display: flex;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.recorder__save {
+  margin-top: var(--space-md);
+}
+
+/* ---------------------------------------------------------------- toasts */
+
+.toast-viewport {
+  position: fixed;
+  right: var(--space-xl);
+  bottom: var(--space-xl);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  max-width: 380px;
+}
+
+/*
+ * The stack's rhythm is a margin on each slot rather than a flex gap, because
+ * a departing toast collapses its own slot to nothing and a gap is not a
+ * property of the item that could collapse with it.
+ */
+.toast-slot {
+  margin-bottom: var(--space-sm);
+}
+
+.toast-slot:last-child {
+  margin-bottom: 0;
+}
+
+/* A toast genuinely floats above everything, so it genuinely gets a shadow. */
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  padding: var(--space-md) var(--space-lg);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-popover);
+}
+
+.toast--success {
+  border-left: 2px solid var(--status-success);
+}
+
+.toast--error {
+  border-left: 2px solid var(--status-danger);
+}
+
+.toast--warning {
+  border-left: 2px solid var(--status-warning);
+}
+
+.toast--info {
+  border-left: 2px solid var(--status-info);
+}
+
+/* An icon on a 24px grid, not a text character: the old `⚠` rendered as a
+   full-colour emoji on Windows and ignored the palette in both themes. */
+.toast__glyph {
+  display: flex;
+  align-items: center;
+  height: var(--text-body-line);
+}
+
+.toast--success .toast__glyph {
+  color: var(--status-success-fg);
+}
+
+.toast--error .toast__glyph {
+  color: var(--status-danger-fg);
+}
+
+.toast--warning .toast__glyph {
+  color: var(--status-warning-fg);
+}
+
+.toast--info .toast__glyph {
+  color: var(--status-info-fg);
+}
+
+.toast__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.toast__title {
+  font-size: var(--text-body-size);
+  font-weight: var(--text-body-strong-weight);
+}
+
+.toast__description {
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.toast__close {
+  display: flex;
+  align-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: var(--space-xs);
+  margin: calc(var(--space-xs) * -1);
+  border-radius: var(--radius-sm);
+  transition:
+    color var(--duration-fast) var(--ease-standard),
+    background var(--duration-fast) var(--ease-standard);
+}
+
+.toast__close:hover {
+  color: var(--text);
+  background: var(--surface-pressed);
+}
+
+.floating-hint {
+  position: fixed;
+  left: 50%;
+  bottom: var(--space-xl);
+  transform: translateX(-50%);
+  z-index: 40;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-lg);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--status-warning-border);
+  background: var(--surface-raised);
+  color: var(--status-warning-fg);
+  font-size: var(--text-label-size);
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--shadow-popover);
+  animation: rise var(--duration-base) var(--ease-entrance) both;
+}
+
+.floating-hint:hover {
+  background: var(--status-warning-bg);
+}
+
+/* ------------------------------------------------- empty / error states */
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  padding: var(--space-xxl) var(--space-xl);
+  text-align: center;
+  color: var(--text-muted);
+  flex: 1;
+  min-height: 0;
+}
+
+.empty-state--compact {
+  padding: var(--space-lg) var(--space-md);
+  flex: 0 0 auto;
+}
+
+.empty-state__glyph {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  margin-bottom: var(--space-xs);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-dim);
+}
+
+.empty-state--compact .empty-state__glyph {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+}
+
+.empty-state--error .empty-state__glyph {
+  color: var(--status-danger-fg);
+  border-color: var(--status-danger-border);
+  background: var(--status-danger-bg);
+}
+
+.empty-state--warning .empty-state__glyph {
+  color: var(--status-warning-fg);
+  border-color: var(--status-warning-border);
+  background: var(--status-warning-bg);
+}
+
+.empty-state__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-subheading-size);
+  line-height: var(--text-subheading-line);
+  font-weight: var(--text-subheading-weight);
+  color: var(--text);
+}
+
+.empty-state__body {
+  margin: 0;
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line);
+  max-width: 44ch;
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+}
+
+.empty-state--error .empty-state__title {
+  color: var(--status-danger-fg);
+}
+
+.empty-state--warning .empty-state__title {
+  color: var(--status-warning-fg);
+}
+
+/* The mark, once, behind the biggest empty state on the screen. */
+.empty-state__watermark {
+  position: relative;
+  display: grid;
+  place-items: center;
+  margin-bottom: var(--space-sm);
+}
+
+/* ------------------------------------------------------------ crash screen */
+
+/*
+ * The floor.
+ *
+ * Rendered two ways and both have to work: by the root `ErrorBoundary` when
+ * React caught a throw, and by `paintFatal()` in `main.tsx` with raw DOM calls
+ * when React never got as far as mounting. The second one is why there is not
+ * a single inline style involved — Tauri substitutes a nonce into `style-src`,
+ * which under CSP Level 3 makes `'unsafe-inline'` be ignored, so a `style="…"`
+ * attribute would simply be refused and the emergency screen would arrive
+ * unstyled. Everything here rides in on `styles.css`, which is `'self'` and
+ * always allowed.
+ *
+ * It is deliberately calm. Someone reading this has just lost their window;
+ * the job is to say what happened, promise their bots are still running, and
+ * hand them something they can paste into a support message.
+ */
+.crash {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: var(--space-xl);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+}
+
+.crash__card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-md);
+  width: 100%;
+  max-width: 560px;
+  padding: var(--space-xxl);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--surface);
+  box-shadow: var(--shadow-modal);
+}
+
+.crash__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-title-size);
+  line-height: var(--text-title-line);
+  font-weight: var(--text-title-weight);
+  letter-spacing: var(--text-title-tracking);
+  color: var(--text);
+}
+
+.crash__body {
+  margin: 0;
+  max-width: 52ch;
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line);
+  color: var(--text-muted);
+}
+
+.crash__detail {
+  margin: 0;
+  width: 100%;
+  max-height: 180px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-alt);
+  color: var(--status-danger-fg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.crash__actions {
+  display: flex;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  margin-top: var(--space-xs);
+}
+
+.crash__hint {
+  margin: 0;
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  color: var(--text-dim);
+}
+
+/* ------------------------------------------------- spinners / skeletons */
+
+.spinner-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.spinner-wrap--inline {
+  vertical-align: middle;
+}
+
+.spinner {
+  display: inline-block;
+  border-radius: var(--radius-pill);
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  animation: spin 700ms linear infinite;
+}
+
+.spinner--sm {
+  width: 13px;
+  height: 13px;
+}
+
+.spinner--md {
+  width: 20px;
+  height: 20px;
+}
+
+.spinner-label {
+  font-size: var(--text-caption-size);
+  color: var(--text-muted);
+}
+
+.skeleton {
+  display: block;
+  background: linear-gradient(90deg, var(--skeleton), var(--skeleton-shine), var(--skeleton));
+  background-size: 200% 100%;
+  animation: shimmer 1.4s var(--ease-standard) infinite;
+}
+
+.skeleton--sm {
+  border-radius: var(--radius-sm);
+}
+
+.skeleton--md {
+  border-radius: var(--radius-md);
+}
+
+.skeleton--lg {
+  border-radius: var(--radius-lg);
+}
+
+.skeleton--pill {
+  border-radius: var(--radius-pill);
+}
+
+.skeleton-list {
+  display: flex;
+  flex-direction: column;
+  padding: var(--space-sm);
+}
+
+.skeleton-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-xs) 2px;
+}
+
+.skeleton-row__lines {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  flex: 1;
+}
+
+.skeleton-cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.skeleton-cards .card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+/* ----------------------------------------------------------- account box */
+
+.account {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-width: 0;
+  margin-left: auto;
+}
+
+.account__name {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: var(--text-caption-size);
+  color: var(--text-muted);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * The signed-out screen.
+ *
+ * The one surface where the mark is allowed to be large — it is the first thing
+ * anyone sees, and it is the moment the product should say whose it is. It sits
+ * on the same ground as the app (accent bloom, the mark's diagonal as texture)
+ * so signing in feels like entering the product rather than leaving a login
+ * page.
+ */
+.signin-screen {
+  position: relative;
+  display: grid;
+  place-items: center;
+  height: 100%;
+  padding: var(--space-xl);
+  background: var(--bg);
+  isolation: isolate;
+}
+
+.signin-screen::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(60.3deg, transparent 0, transparent 27px, var(--hairline) 27px, var(--hairline) 28px),
+    radial-gradient(ellipse 60% 50% at 50% -10%, var(--glow), transparent 70%);
+}
+
+.signin-screen__card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-lg);
+  width: min(440px, 100%);
+  padding: var(--space-xxl);
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  /* A dialog genuinely floats above the page, so it genuinely gets a shadow. */
+  box-shadow: var(--shadow-modal);
+  text-align: center;
+  color: var(--text);
+  animation: rise var(--duration-slow) var(--ease-entrance) both;
+}
+
+.signin-screen__eyebrow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-size: var(--text-label-caps-size);
+  line-height: var(--text-label-caps-line);
+  font-weight: var(--text-label-caps-weight);
+  letter-spacing: var(--text-label-caps-tracking);
+  text-transform: var(--text-label-caps-transform);
+  color: var(--text-muted);
+}
+
+.signin-screen__eyebrow::before,
+.signin-screen__eyebrow::after {
+  content: "";
+  width: 14px;
+  height: 1px;
+  background: var(--border-strong);
+}
+
+.signin-screen__headline {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-title-size);
+  line-height: var(--text-title-line);
+  font-weight: var(--text-title-weight);
+  letter-spacing: var(--text-title-tracking);
+  color: var(--text);
+  text-wrap: balance;
+}
+
+.signin-screen__body {
+  margin: 0;
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line);
+  color: var(--text-muted);
+  max-width: 42ch;
+}
+
+.signin-screen__action {
+  width: 100%;
+  padding: var(--space-md) var(--space-lg);
+  font-size: var(--text-subheading-size);
+}
+
+.signin-screen__error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  background: var(--status-danger-bg);
+  border: 1px solid var(--status-danger-border);
+  color: var(--status-danger-fg);
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  text-align: left;
+}
+
+.signin-screen__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  width: 100%;
+  padding-top: var(--space-lg);
+  border-top: 1px solid var(--border);
+  font-size: var(--text-caption-size);
+  color: var(--text-dim);
+}
+
+/* Which API this build talks to. Small, dim, and the first thing worth knowing
+   when someone reports that nothing loads. */
+.signin-screen__api {
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 24ch;
+}
+
+.signin-screen__boot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-lg);
+  color: var(--text);
+}
+
+/* ------------------------------------------------------------ animations */
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+/*
+ * Progressive disclosure opening. Fades and settles; deliberately does not
+ * animate `height`, which cannot be done from `auto` without measuring and
+ * would jank a card that contains a code block.
+ */
+@keyframes reveal {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Arrivals only. Nothing overshoots — `emphasized` is reserved and unused. */
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .skeleton {
+    background: var(--skeleton);
+  }
+
+  .caret,
+  .bubble--streaming .bubble__content--md .md > *:last-child:not(.md__codeblock)::after,
+  .bubble--streaming .bubble__content--md .md > .md__codeblock:last-child .md__pre code::after {
+    opacity: 1;
+  }
+
+  .bubble,
+  .floating-hint {
+    animation: none;
+  }
+}
+
+/* ------------------------------------------------------- human handoff */
+
+/*
+ * "I need you for a second."
+ *
+ * This is the loudest thing in the product, and deliberately so: an agent that
+ * stopped halfway through a task because it hit a login is either a moment of
+ * magic or a dead end, and the difference is entirely whether the person
+ * notices. It sits at the top of the Bot Desktop pane, immediately above the
+ * screen it is asking them to sign in on.
+ *
+ * The colour is the warning role, not danger. Nothing has gone wrong — the bot
+ * did exactly what it should have done and stopped at the wall. Danger is
+ * reserved for the live-keyboard state, where a keystroke really does leave the
+ * machine.
+ *
+ * Every value is a token. The accent bar is the brand sweep, which is the one
+ * place in the pane it appears, and it is what makes this read as *the* thing
+ * to look at rather than another notice.
+ */
+.takeover {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  /*
+   * Never shrink.
+   *
+   * The pane is a flex column, so the default `flex-shrink: 1` let this get
+   * compressed against the viewport below it — in the docked 440px pane that
+   * clipped the Continue button in half. The pane already scrolls
+   * (`overflow: auto`), so refusing to shrink is the correct trade: the card is
+   * the one thing here that must be whole.
+   */
+  flex: 0 0 auto;
+  margin: var(--space-md) var(--space-lg) 0;
+  padding: var(--space-md) var(--space-lg);
+  border: 1px solid var(--status-warning-border);
+  border-radius: var(--radius-lg);
+  background: var(--status-warning-bg);
+  color: var(--text);
+  box-shadow: var(--shadow-raised);
+  /*
+   * No CSS entrance here. GSAP owns this card's arrival
+   * (components/TakeoverCard.tsx) and the two must never both animate it.
+   *
+   * There used to be `animation: takeover-in ... both`, and layering a GSAP
+   * `from()` on top of it is a genuinely nasty bug rather than merely
+   * redundant. `from()` reads the element's *current* computed value and uses
+   * it as the tween's END value. `useGSAP` runs in a layout effect, before the
+   * first frame of the CSS animation, and `both` means the fill is already
+   * applied -- so GSAP sampled the keyframe's `from` state and dutifully
+   * animated the card to `translateY(-6px); opacity: 0`. The handoff, the one
+   * thing in this product that must never be missable, rendered as a 235px
+   * tall invisible block.
+   *
+   * The rule, for anything animated from JavaScript: one animation system per
+   * element per property. If GSAP drives it, the stylesheet does not.
+   */
+}
+
+/*
+ * A 3px rule along the top edge, in the same warning role as the pane's
+ * takeover ring and the input bar. Deliberately *not* `--accent-sweep`: that
+ * token is the violet/fuchsia/cyan gradient the brand pass took out of this
+ * pane for reading as two colours the identity does not have, and putting it
+ * back on the loudest element in the app would undo exactly that.
+ *
+ * Rounded rather than clipped by `overflow: hidden` on the card — hiding
+ * overflow was the other half of the clipping bug above.
+ */
+.takeover::before {
+  content: "";
+  position: absolute;
+  inset: -1px -1px auto -1px;
+  height: 3px;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  background: var(--status-warning);
+}
+
+/*
+ * Maximised, the pane is as wide as the display, and a card that grows with it
+ * stops being a card. At 1600px the ask ran as a single 1500px line and the
+ * whole thing read as a system banner -- which is exactly the register this
+ * moment is not meant to be in. Capped to a comfortable measure and centred
+ * over the screen it is talking about. Docked, the pane is narrower than the
+ * cap and nothing changes.
+ */
+.desktop-pane--expanded .takeover {
+  width: min(760px, calc(100% - var(--space-xxl)));
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.takeover--pending {
+  border-color: var(--accent);
+}
+
+.takeover__head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+}
+
+/*
+ * Tinted surface plus the role's text colour, never the solid fill.
+ *
+ * `statusColors` carries an `onSolid` for drawing on top of `solid`, but
+ * `packages/ui/src/css.ts` only emits it for the risk classes — there is no
+ * `--status-warning-on`. Guessing one breaks in a theme: the dark warning is
+ * amber (#f59e0b) and wants near-black on it, the light one is a dark ochre
+ * (#b45309) and wants white. The `bg`/`fg` pair is audited AA in both, so it
+ * is what anything carrying a glyph uses. Bare `solid` is kept for the dots,
+ * which are non-text and only owe 3:1.
+ */
+.takeover__badge {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-pill);
+  background: var(--status-warning-bg);
+  border: 1px solid var(--status-warning-border);
+  color: var(--status-warning-fg);
+}
+
+.takeover__headings {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.takeover__title {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-heading-size);
+  line-height: var(--text-heading-line);
+  font-weight: var(--text-heading-weight);
+  letter-spacing: var(--text-heading-tracking);
+  color: var(--text);
+}
+
+/* The bot's own sentence for why it stopped. Never paraphrased, never clipped. */
+.takeover__reason {
+  margin: 0;
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line);
+  color: var(--status-warning-fg);
+  overflow-wrap: anywhere;
+}
+
+.takeover__age {
+  flex: 0 0 auto;
+  font-size: var(--text-caption-size);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/*
+ * What it wants from the person.
+ *
+ * A left rule, not a filled box. The first cut gave this a surface fill and a
+ * hairline border, and next to a real text input two rows down it read as a
+ * second text input — people were being shown an instruction dressed as a
+ * field to type the instruction into.
+ */
+.takeover__ask {
+  margin: 0;
+  padding: 2px 0 2px var(--space-md);
+  border-left: 3px solid var(--status-warning);
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line);
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+/*
+ * Where the keyboard is, restated on the card. The input bar under the screen
+ * says the same thing; somebody reading "sign in, then press continue" needs
+ * the answer to "sign in where?" in the same breath.
+ */
+.takeover__where {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+  padding: var(--space-xs) var(--space-md);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  /* 12px/600, not 11px/400: "which machine gets my password" is not caption
+     material, and this line is the answer. */
+  font-size: var(--text-label-size);
+  line-height: var(--text-label-line);
+  letter-spacing: var(--text-label-tracking);
+  font-weight: var(--text-label-weight);
+  color: var(--text-muted);
+}
+
+/*
+ * Keep the icon on the sentence's first line in the 340px docked pane. Without
+ * a flex basis the text is treated as unshrinkable at its widest word run and
+ * wraps to its own row, leaving a lone glyph floating above it.
+ */
+.takeover__where > .icon {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.takeover__where > span {
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.takeover__where--live {
+  background: var(--status-danger-bg);
+  border-color: var(--status-danger-border);
+  color: var(--status-danger-fg);
+}
+
+.takeover__where-action {
+  margin-left: auto;
+}
+
+.takeover__warning {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+  padding: var(--space-xs) var(--space-md);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--status-danger-border);
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+}
+
+.takeover__note .input {
+  width: 100%;
+}
+
+.takeover__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+/* The one button this whole feature exists for. It is allowed to be big. */
+.takeover__continue {
+  min-height: 40px;
+  padding-inline: var(--space-lg);
+  font-weight: 600;
+}
+
+.takeover__fineprint {
+  margin: 0;
+  flex: 1 1 240px;
+  min-width: 0;
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  color: var(--text-dim);
+}
+
+.takeover__error {
+  margin: 0;
+}
+
+/* Docked, the pane is narrow; the card must not force it wider. */
+.takeover__title,
+.takeover__ask,
+.takeover__reason {
+  overflow-wrap: anywhere;
+}
+
+/*
+ * The way back.
+ *
+ * Above the maximised desktop pane (45) and above the approvals hint (40), so a
+ * parked run is reachable from wherever the person ended up — including a cold
+ * start, where the run came back from `GET /runs?status=awaiting_human` rather
+ * than from any stream.
+ */
+/*
+ * Centred over the *main column*, and lifted clear of the composer.
+ *
+ * It used to be `left: 50%` of the viewport, which centres it over the whole
+ * window — sidebar and Bot Desktop pane included — so it drifted right of the
+ * column it belongs to and, at `bottom: var(--space-xl)`, landed squarely on
+ * top of the chat composer's Send button. A pill that says a bot needs you
+ * must not be the thing stopping you replying to it.
+ *
+ * The two track widths are custom properties on `.app`, and this is a child of
+ * `.app`, so the centre of the main column is arithmetic rather than a
+ * measurement. When the desktop pane is maximised it leaves the grid, and the
+ * override below drops its width out of the sum.
+ */
+.takeover-beacon {
+  position: fixed;
+  left: calc(var(--sidebar-width) + (100vw - var(--sidebar-width) - var(--desktop-pane-width)) / 2);
+  bottom: calc(var(--space-xl) + 84px);
+  transform: translateX(-50%);
+  z-index: 46;
+  max-width: min(680px, calc(100vw - 2 * var(--space-xl)));
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-lg);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--status-warning-border);
+  background: var(--surface-raised);
+  color: var(--status-warning-fg);
+  font-size: var(--text-label-size);
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: var(--shadow-popover);
+  animation: rise var(--duration-base) var(--ease-entrance) both;
+}
+
+/* Clears the approvals hint when both are outstanding. */
+.takeover-beacon--stacked {
+  bottom: calc(var(--space-xl) + 84px + 52px);
+}
+
+/* Maximised: the desktop pane is out of the grid, so the column is wider. */
+.app--desktop-expanded .takeover-beacon {
+  left: calc(var(--sidebar-width) + (100vw - var(--sidebar-width)) / 2);
+}
+
+.takeover-beacon:hover {
+  background: var(--status-warning-bg);
+}
+
+.takeover-beacon:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.takeover-beacon__pip {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--status-warning);
+  animation: desktop-live-pulse 1.6s var(--ease-standard) infinite;
+}
+
+.takeover-beacon__text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.takeover-beacon__count {
+  flex: 0 0 auto;
+  padding: 0 var(--space-xs);
+  border-radius: var(--radius-pill);
+  background: var(--status-warning-bg);
+  border: 1px solid var(--status-warning-border);
+  color: var(--status-warning-fg);
+  font-size: var(--text-caption-size);
+}
+
+/* The transcript marker for a turn that stopped and asked for a person. */
+.activity__item--takeover {
+  color: var(--status-warning-fg);
+}
+
+/*
+ * Reduced motion.
+ *
+ * The blanket rule at the foot of this file clamps durations, but an infinite
+ * pulse clamped to 1µs is a flicker rather than an animation — the same reason
+ * the input bar's dot is switched off by name above. The card's entrance is
+ * removed outright: it is the most abrupt movement in the app and it fires
+ * without the person having done anything.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .takeover-beacon {
+    animation: none;
+  }
+
+  .takeover-beacon__pip {
+    animation: none;
+  }
+}
+
+/* ================================================================== *
+ * Perceived latency
+ *
+ * Everything below belongs to one idea: the app should show the person's
+ * action landing at the moment they take it, and should say honestly what is
+ * happening during the waits it cannot remove. Grouped rather than filed
+ * beside their neighbours so the pass is legible as a pass.
+ * ================================================================== */
+
+/* --------------------------------------------------- optimistic approvals */
+
+/*
+ * The decision has landed; the work has not.
+ *
+ * The card is deliberately NOT dimmed or disabled. Dimming says "this is
+ * unavailable", and the decision is the opposite of unavailable — it is done.
+ * Only the strip moves.
+ */
+.approval--settling {
+  border-color: var(--accent-soft);
+}
+
+.approval__settling {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin: 0 var(--space-lg) var(--space-lg);
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  background: var(--accent-wash);
+  border: 1px solid var(--accent-soft);
+  color: var(--text);
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+}
+
+.approval__settling-pip {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  animation: nesq-settle 1.4s var(--ease-standard) infinite;
+}
+
+@keyframes nesq-settle {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(1.6);
+  }
+}
+
+/*
+ * The task carried on. Quieter than the execution block above it: this is
+ * confirmation that the agent is moving again, not a result to read.
+ */
+.approval__continuation {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin: 0 var(--space-lg) var(--space-lg);
+  color: var(--text-muted);
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+}
+
+.approval__continuation--error {
+  color: var(--status-warning-fg);
+}
+
+.approval__continuation-outcome {
+  padding: 1px var(--space-sm);
+  border-radius: var(--radius-pill);
+  background: var(--surface-alt);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--text-mono-size);
+}
+
+/*
+ * Losing the decide race.
+ *
+ * A 409 is not this app failing, it is this app telling the truth about
+ * something that happened elsewhere — so it wears the warning role rather than
+ * the danger one. Red here would train people to read "somebody else already
+ * answered that" as a bug in the product.
+ */
+.inline-error--conflict {
+  background: var(--status-warning-bg);
+  border-color: var(--status-warning-border);
+  /*
+   * The warning role colours the surround; the sentence itself is body text.
+   *
+   * `--status-warning-fg` on `--status-warning-bg` measures 4.38:1 in the light
+   * scheme — under AA, and this is two lines of prose explaining that somebody
+   * else answered an approval before you, which is exactly the message a person
+   * has to be able to read. The role still does its job in the border and the
+   * fill; the words get the contrast they need.
+   */
+  color: var(--text);
+}
+
+/* ----------------------------------------------------------- the boot bar */
+
+/*
+ * The one measured progress bar in the app. See `lib/desktopBoot` for why a
+ * container start earns one and the agent's own progress does not.
+ *
+ * `--boot-fill` is how far along and `--boot-tick` is where a typical boot
+ * ends. Both are supplied per element; the geometry lives here.
+ */
+.boot-bar {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-alt);
+  overflow: hidden;
+}
+
+.boot-bar--lg {
+  height: 6px;
+}
+
+.boot-bar__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--boot-fill, 0%);
+  border-radius: var(--radius-pill);
+  background: var(--bot-starting);
+  transition: width var(--duration-slow) var(--ease-standard);
+}
+
+/*
+ * Where a normal boot finishes. Past it the fill is saying "longer than
+ * usual", which is information rather than an error.
+ */
+.boot-bar__tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--boot-tick, 50%);
+  width: 1px;
+  background: var(--border-strong);
+}
+
+/* ------------------------------------------- new rows in the activity rail */
+
+.agent-run__boot {
+  display: grid;
+  gap: 4px;
+  margin-top: 4px;
+  width: 100%;
+  max-width: 340px;
+}
+
+.agent-run__boot-line {
+  color: var(--text-muted);
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+}
+
+.agent-run__boot-eta {
+  color: var(--text-dim);
+  font-size: var(--text-caption-size);
+}
+
+/*
+ * The delegation path. Monospace because it is a chain of slugs and the
+ * arrows should line up between one row and the next.
+ */
+.agent-run__chain {
+  display: inline-block;
+  margin-left: var(--space-sm);
+  padding: 1px var(--space-sm);
+  border-radius: var(--radius-pill);
+  background: var(--surface-alt);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--text-mono-size);
+}
+
+/* Today's spend against today's cap, on the live cost row. */
+.agent-run__budget {
+  margin-left: var(--space-sm);
+  color: var(--text-dim);
+  font-size: var(--text-caption-size);
+}
+
+.agent-run__step[data-kind="cost"] .agent-run__node,
+.agent-run__step[data-kind="desktop"] .agent-run__node {
+  color: var(--text-muted);
+}
+
+.agent-run__step[data-phase="unavailable"] .agent-run__node {
+  color: var(--status-danger-fg);
+}
+
+.agent-run__step[data-phase="ready"] .agent-run__node {
+  color: var(--bot-running);
+}
+
+/* -------------------------------------------------- the desktop boot panel */
+
+.desktop-boot {
+  display: grid;
+  gap: var(--space-md);
+  align-content: center;
+  justify-items: start;
+  width: 100%;
+  max-width: 420px;
+  margin: auto;
+  padding: var(--space-xl);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.desktop-boot__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  color: var(--bot-starting-fg);
+}
+
+.desktop-boot__title {
+  margin: 0;
+  flex: 1;
+  font-family: var(--font-display);
+  font-size: var(--text-subheading-size);
+  line-height: var(--text-subheading-line);
+  font-weight: var(--text-subheading-weight);
+  color: var(--text);
+}
+
+/* Tabular figures, so a ticking clock does not shuffle the heading beside it. */
+.desktop-boot__clock {
+  font-family: var(--font-mono);
+  font-size: var(--text-mono-size);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.desktop-boot__stage {
+  margin: 0;
+  color: var(--text);
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line);
+}
+
+.desktop-boot__facts {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+}
+
+.desktop-boot__eta {
+  color: var(--text-muted);
+  font-size: var(--text-caption-size);
+}
+
+.desktop-boot__note {
+  color: var(--text-dim);
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+}
+
+/* --------------------------------------------------------- the palette cue */
+
+/*
+ * Reads as a search field, behaves as a button. It is the only advertisement
+ * the palette gets, and it is what turns a power-user shortcut into something
+ * everybody finds on the first day.
+ */
+.palette-cue {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  margin-bottom: var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    background var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+.palette-cue:hover {
+  background: var(--surface-raised);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.palette-cue__label {
+  flex: 1;
+  font-size: var(--text-label-size);
+}
+
+.palette-cue__kbd,
+.command-palette__kbd,
+.command-palette__esc {
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--text-mono-size);
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------- command palette */
+
+.command-palette {
+  position: fixed;
+  inset: 0;
+  /*
+   * Above the toast viewport (45) and the takeover beacon (46). A palette that
+   * opens behind a toast is a palette nobody trusts.
+   */
+  z-index: 60;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 12vh;
+}
+
+.command-palette__scrim {
+  position: absolute;
+  inset: 0;
+  background: var(--scrim);
+}
+
+.command-palette__panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(620px, calc(100vw - 2 * var(--space-xl)));
+  max-height: 62vh;
+  border-radius: var(--radius-lg);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-modal);
+  overflow: hidden;
+}
+
+.command-palette__search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.command-palette__input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  outline: none;
+  color: var(--text);
+  font-size: var(--text-subheading-size);
+  line-height: var(--text-subheading-line);
+}
+
+.command-palette__input::placeholder {
+  color: var(--text-dim);
+}
+
+.command-palette__list {
+  margin: 0;
+  padding: var(--space-sm) 0;
+  list-style: none;
+  overflow-y: auto;
+}
+
+.command-palette__group {
+  display: block;
+  padding: var(--space-sm) var(--space-lg) 4px;
+  color: var(--text-dim);
+  font-size: var(--text-eyebrow-size);
+  line-height: var(--text-eyebrow-line);
+  font-weight: var(--text-eyebrow-weight);
+  letter-spacing: var(--text-eyebrow-tracking);
+  text-transform: var(--text-eyebrow-transform);
+}
+
+.command-palette__item {
+  cursor: pointer;
+}
+
+.command-palette__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin: 0 var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  color: var(--text);
+}
+
+/*
+ * The highlighted row is a filled band rather than a border.
+ *
+ * A border is easy to lose against a list whose rows all carry borders of
+ * their own; a fill is unambiguous at a glance while the keyboard is moving
+ * quickly, which is the only way this list ever gets used.
+ */
+.command-palette__item--active .command-palette__row {
+  background: var(--accent-soft);
+}
+
+.command-palette__glyph {
+  display: flex;
+  color: var(--text-muted);
+}
+
+.command-palette__item--active .command-palette__glyph {
+  color: var(--accent);
+}
+
+/*
+ * The selected row lifts its secondary text too.
+ *
+ * `--text-muted` reads 4.49:1 against the accent wash the active row wears —
+ * a rounding error away from AA, and on the one row a person is actually
+ * looking at. Everything on the highlighted row is promoted a step.
+ */
+.command-palette__item--active .command-palette__detail {
+  color: var(--text);
+}
+
+.command-palette__label {
+  font-size: var(--text-label-size);
+  font-weight: var(--text-body-strong-weight);
+}
+
+.command-palette__detail {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: var(--text-caption-size);
+}
+
+.command-palette__label + .command-palette__kbd {
+  margin-left: auto;
+}
+
+.command-palette__empty {
+  margin: 0;
+  padding: var(--space-xl) var(--space-lg);
+  color: var(--text-muted);
+  font-size: var(--text-body-size);
+  text-align: center;
+}
+
+.command-palette__footer {
+  display: flex;
+  gap: var(--space-lg);
+  padding: var(--space-sm) var(--space-lg);
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-dim);
+  font-size: var(--text-caption-size);
+}
+
+.command-palette__footer kbd {
+  margin-right: 4px;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: var(--text-mono-size);
+}
+
+/*
+ * Reduced motion.
+ *
+ * The blanket clamp at the foot of this file zeroes durations, and a
+ * zero-length infinite pulse is a flicker rather than an animation — the same
+ * reason the takeover beacon switches its own off by name. The boot bar's
+ * width transition goes with it.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .approval__settling-pip {
+    animation: none;
+  }
+
+  .boot-bar__fill {
+    transition: none;
+  }
+}
+
+/*
+ * The boot row breaks the rail's one-line rule, and has to.
+ *
+ * Every other step is a single ellipsised line — that is what keeps a rail of
+ * twenty rows readable. A cold start is the one row that is not a fact already
+ * settled: it is a stage, a bar and an estimate, all of which change while you
+ * read them. So this row alone wraps, aligns to the top, and lets its content
+ * out of the `overflow: hidden` the others need.
+ */
+.agent-run__step[data-phase="starting"] {
+  align-items: start;
+}
+
+.agent-run__step[data-phase="starting"] .agent-run__body {
+  display: block;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+
+.agent-run__step[data-phase="starting"] .agent-run__gap {
+  align-self: start;
+}
+
+/* ================================================================== *
+ *  Pass 3 — the three panels that never got the approvals treatment
+ *
+ *  Approvals was rebuilt around one idea: rank the facts, let the most
+ *  consequential one be the object's appearance, and fold everything else.
+ *  Integrations, Usage and Builder were left as they were, and next to the
+ *  queue they read as a different, older product — three screens of
+ *  permanently-unfolded forms with the destructive action always visible and
+ *  the governance story nowhere on them.
+ *
+ *  Everything below applies the same three rules to those three panels. No new
+ *  hue is introduced: the risk roles, the status roles and the brand ramp are
+ *  the ones `packages/ui` already audited, which is what keeps the AA report a
+ *  true description of the app.
+ * ================================================================== */
+
+/* --------------------------------------------------- shared: summary strip */
+
+/*
+ * The queue summary, generalised.
+ *
+ * `.queue-summary` already owned "the shape of what is in front of you, before
+ * you read any of it" and it was doing that job for exactly one panel. Usage
+ * and Integrations have the same first question — how bad is it, and what
+ * should I look at first — so they wear the same strip. `summary-strip` adds
+ * only what those two need on top: a `data-tone` pip for facts that are not a
+ * risk class, and the aggregate meter.
+ */
+.summary-strip {
+  row-gap: var(--space-sm);
+}
+
+.queue-summary__item[data-tone="danger"] .queue-summary__pip { background: var(--status-danger); }
+.queue-summary__item[data-tone="warning"] .queue-summary__pip { background: var(--status-warning); }
+.queue-summary__item[data-tone="ok"] .queue-summary__pip { background: var(--status-success); }
+
+.queue-summary__item[data-tone="danger"] .queue-summary__label { color: var(--status-danger-fg); }
+.queue-summary__item[data-tone="warning"] .queue-summary__label { color: var(--status-warning-fg); }
+.queue-summary__item[data-tone="ok"] .queue-summary__label { color: var(--status-success-fg); }
+
+/*
+ * The day against the day's cap, full width under the tally.
+ *
+ * Deliberately 3px and unlabelled. It is the panel's one piece of chrome that
+ * is not a number, and its whole job is to be readable from the far side of a
+ * desk: is that bar near the end, or is it not.
+ */
+.summary-strip__meter {
+  flex: 1 0 100%;
+  height: 3px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-alt);
+  overflow: hidden;
+}
+
+.summary-strip__fill {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, var(--brand-mark-600), var(--accent));
+  transition: width var(--duration-slow) var(--ease-standard);
+}
+
+/* ---------------------------------------------- shared: inline confirmation */
+
+/*
+ * Two presses, with the consequence in between.
+ *
+ * This replaces `window.confirm()` in the Builder and the connector catalogue.
+ * A native modal in a packaged desktop app is a browser artefact — it is
+ * unstyled, it steals the whole window, it says "localhost:1420 says", and it
+ * asks the question somewhere other than where the thing being destroyed is.
+ * The product's entire argument is that a consequential action stops and says
+ * what it will do, in place. Its own destructive buttons should behave the
+ * same way.
+ *
+ * Danger stays in the word and in this sentence, never in a permanent block of
+ * red on a resting card — the rule the Bot Desktop's "Stop + wipe" already
+ * follows.
+ */
+.danger-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--status-danger-border);
+  background: var(--status-danger-bg);
+  border-radius: var(--radius-md);
+  animation: reveal var(--duration-fast) var(--ease-entrance) both;
+}
+
+/*
+ * The sentence is set in --text, not in the danger role, and that is a
+ * measurement rather than a preference.
+ *
+ * Every semantic *-fg token is contrast-corrected against the *page* ground.
+ * This sentence does not sit on the page ground — it sits on --status-danger-bg,
+ * a 12% wash, which in the light theme lifts the ground to rgb(251, 229, 229)
+ * and drops --status-danger-fg from a comfortable pass to 4.26:1. Under AA for
+ * 11px text that is a fail, and it is the only pair in the 260 measured that
+ * was one.
+ *
+ * Setting it in --text fixes it at ~15:1 and is the better design anyway: the
+ * approval card already established that the consequence line is ordinary text
+ * at strong weight and the *button* is what wears the risk colour. The red is
+ * still here — in the border, in the wash, and in the button being pressed.
+ */
+.danger-confirm__text {
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  color: var(--text);
+  font-weight: var(--text-body-strong-weight);
+}
+
+/* ------------------------------------------------------ shared: field hints */
+
+/*
+ * The sentence under a field.
+ *
+ * Every form in this app labelled its inputs and explained none of them.
+ * "Desktop profile: xfce" is a choice between two things a non-engineer has no
+ * way to rank, and "Daily budget" does not say what happens when it is
+ * reached. One line each, at caption weight, is the difference between a form
+ * and an interface that knows what it is asking for.
+ */
+.field__hint {
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  color: var(--text-dim);
+  max-width: 62ch;
+}
+
+.disclosure:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* A fold that opens a whole section rather than a detail inside a card. */
+.disclosure--section {
+  margin-top: 0;
+  margin-bottom: var(--space-md);
+  font-size: var(--text-body-size);
+  color: var(--text);
+}
+
+/* ------------------------------------------------------------------ usage */
+
+/*
+ * Spend, as a governance surface.
+ *
+ * The panel used to be five cards each carrying an always-open budget form and
+ * an always-open five-column ledger table, in arbitrary order, with the day's
+ * total in muted grey in the subtitle. So the two questions people open it for
+ * — am I about to blow a cap, and what did today cost — were the two things it
+ * did not answer, while the rare one (change a cap) had a text input and a
+ * dead Save button on every row.
+ *
+ * `data-spend` is now what the card wears, exactly as `data-risk` is what an
+ * approval wears. Same edge band, same eyebrow slot, same worst-first order.
+ */
+.usage {
+  position: relative;
+  overflow: hidden;
+  padding-left: calc(var(--space-lg) + 3px);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.usage::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--border-strong);
+}
+
+.usage[data-spend="over"]::before,
+.usage[data-spend="uncapped"]::before { background: var(--status-danger); }
+.usage[data-spend="near"]::before { background: var(--status-warning); }
+.usage[data-spend="ok"]::before { background: var(--accent); }
+
+.usage[data-spend="over"],
+.usage[data-spend="uncapped"] { border-color: var(--status-danger-border); }
+.usage[data-spend="near"] { border-color: var(--status-warning-border); }
+
+/* A row that moved while you were looking at it. Decays with the delta. */
+.usage--ticked {
+  border-color: var(--accent);
+  background: var(--accent-wash);
+}
+
+.usage__lead {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* The same eyebrow step the approval card gives the risk word. */
+.usage__state-word {
+  font-family: var(--font-display);
+  font-size: var(--text-eyebrow-size);
+  line-height: var(--text-eyebrow-line);
+  font-weight: var(--text-eyebrow-weight);
+  letter-spacing: var(--text-eyebrow-tracking);
+  text-transform: var(--text-eyebrow-transform);
+  color: var(--text-muted);
+}
+
+.usage[data-spend="over"] .usage__state-word,
+.usage[data-spend="uncapped"] .usage__state-word { color: var(--status-danger-fg); }
+.usage[data-spend="near"] .usage__state-word { color: var(--status-warning-fg); }
+
+.usage__name {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-subheading-size);
+  line-height: var(--text-subheading-line);
+  font-weight: var(--text-subheading-weight);
+  color: var(--text);
+}
+
+/*
+ * The money, in the position the eye goes to second.
+ *
+ * Tabular figures and the mono face, because five of these sit in a grid and a
+ * column of numbers that will not line up is not a column.
+ */
+.usage__figures {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  flex: 0 0 auto;
+  gap: 1px;
+}
+
+.usage__spent {
+  font-family: var(--font-mono);
+  font-size: var(--text-body-size);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.usage__cap {
+  font-size: var(--text-caption-size);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-bar {
+  margin: var(--space-xs) 0 0;
+}
+
+/* The fill follows the card's state, so the bar and the band always agree. */
+.usage[data-spend="near"] .usage-bar__fill { background: var(--status-warning); }
+.usage[data-spend="over"] .usage-bar__fill,
+.usage[data-spend="uncapped"] .usage-bar__fill { background: var(--status-danger); }
+
+/*
+ * How much room is left, said in money.
+ *
+ * The panel used to print "$17.95 of $18.00" and leave the subtraction to the
+ * reader. "$0.05 left today" is the same two numbers and the actual answer.
+ */
+.usage__headroom {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin: 0;
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  color: var(--text-muted);
+}
+
+.usage[data-spend="near"] .usage__headroom { color: var(--status-warning-fg); }
+.usage[data-spend="over"] .usage__headroom,
+.usage[data-spend="uncapped"] .usage__headroom {
+  color: var(--status-danger-fg);
+  font-weight: 600;
+}
+
+.usage__percent {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+}
+
+/*
+ * What the last turn cost, next to the bot that spent it.
+ *
+ * The one genuinely new piece of information on this panel, and the one thing
+ * on it that moves. GSAP brings it in through `dur()`, so reduced motion makes
+ * it appear rather than arrive — it is never animated *away*, because a person
+ * who asked for less movement did not ask to be told less about their money.
+ */
+.usage__delta {
+  padding: 0 var(--space-sm);
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--text-caption-size);
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.usage__more {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  flex-wrap: wrap;
+}
+
+.usage__more .disclosure {
+  margin-top: 0;
+}
+
+.usage .budget-editor {
+  margin: var(--space-sm) 0 0;
+  flex-wrap: wrap;
+}
+
+.usage .budget-editor .field {
+  margin-bottom: 0;
+}
+
+.usage .table {
+  margin-top: 0;
+}
+
+/* ------------------------------------------------------- connector catalog */
+
+/*
+ * A connector card is a *grant*, and it now looks like one.
+ *
+ * Binding Stripe to a bot is the moment that bot becomes able to issue
+ * refunds. The card described that as `c-stripe · auth api_key · 2 actions` in
+ * muted grey, with the risk classes hidden behind "Show actions" — so the one
+ * screen in the product where a capability is handed over was the one screen
+ * that never mentioned risk. It borrows the approval card's whole apparatus:
+ * edge band, eyebrow word, and the promise stated out loud.
+ */
+.connector {
+  position: relative;
+  overflow: hidden;
+  padding-left: calc(var(--space-lg) + 3px);
+}
+
+.connector::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--risk-observe);
+}
+
+.connector[data-risk="observe"]::before { background: var(--risk-observe); }
+.connector[data-risk="draft"]::before { background: var(--risk-draft); }
+.connector[data-risk="mutate"]::before { background: var(--risk-mutate); }
+.connector[data-risk="send"]::before { background: var(--risk-send); }
+.connector[data-risk="spend"]::before { background: var(--risk-spend); }
+.connector[data-risk="delete"]::before { background: var(--risk-delete); }
+
+.connector__lead {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.connector__risk-word {
+  font-family: var(--font-display);
+  font-size: var(--text-eyebrow-size);
+  line-height: var(--text-eyebrow-line);
+  font-weight: var(--text-eyebrow-weight);
+  letter-spacing: var(--text-eyebrow-tracking);
+  text-transform: var(--text-eyebrow-transform);
+  color: var(--risk-observe-fg);
+}
+
+.connector[data-risk="observe"] .connector__risk-word { color: var(--risk-observe-fg); }
+.connector[data-risk="draft"] .connector__risk-word { color: var(--risk-draft-fg); }
+.connector[data-risk="mutate"] .connector__risk-word { color: var(--risk-mutate-fg); }
+.connector[data-risk="send"] .connector__risk-word { color: var(--risk-send-fg); }
+.connector[data-risk="spend"] .connector__risk-word { color: var(--risk-spend-fg); }
+.connector[data-risk="delete"] .connector__risk-word { color: var(--risk-delete-fg); }
+
+.connector__name {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-subheading-size);
+  line-height: var(--text-subheading-line);
+  font-weight: var(--text-subheading-weight);
+  color: var(--text);
+}
+
+.connector__facts {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+  margin: var(--space-sm) 0 var(--space-md);
+  font-size: var(--text-caption-size);
+  color: var(--text-dim);
+}
+
+/*
+ * What it can do, counted, most dangerous first.
+ *
+ * The same ordering the approval queue's tally uses, so the eye lands on
+ * `spend` before `observe` on every surface in the product.
+ */
+.connector__tally {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+  list-style: none;
+  margin: 0 0 var(--space-sm);
+  padding: 0;
+}
+
+.connector__tally-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: var(--text-caption-size);
+  color: var(--text-muted);
+}
+
+.connector__tally-pip {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--risk-observe);
+}
+
+.connector__tally-item[data-risk="observe"] .connector__tally-pip { background: var(--risk-observe); }
+.connector__tally-item[data-risk="draft"] .connector__tally-pip { background: var(--risk-draft); }
+.connector__tally-item[data-risk="mutate"] .connector__tally-pip { background: var(--risk-mutate); }
+.connector__tally-item[data-risk="send"] .connector__tally-pip { background: var(--risk-send); }
+.connector__tally-item[data-risk="spend"] .connector__tally-pip { background: var(--risk-spend); }
+.connector__tally-item[data-risk="delete"] .connector__tally-pip { background: var(--risk-delete); }
+
+.connector__tally-item[data-risk="send"] .connector__tally-label { color: var(--risk-send-fg); }
+.connector__tally-item[data-risk="spend"] .connector__tally-label { color: var(--risk-spend-fg); }
+.connector__tally-item[data-risk="delete"] .connector__tally-label { color: var(--risk-delete-fg); }
+
+.connector__tally-n {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+/*
+ * The promise, on the surface where the capability is granted.
+ *
+ * "2 of these stop for your approval" is the entire safety argument, and until
+ * now it was only ever visible after something had already been held. Saying
+ * it here is the difference between a governance feature and a governance
+ * story.
+ */
+.connector__gate {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin: 0 0 var(--space-sm);
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  font-weight: 600;
+  color: var(--status-warning-fg);
+}
+
+.connector__gate--free {
+  color: var(--status-success-fg);
+  font-weight: 400;
+}
+
+.connector__resting {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.connector__resting .row-actions {
+  margin-top: var(--space-xs);
+}
+
+.connector__bound-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin: 0;
+  font-size: var(--text-caption-size);
+  color: var(--text-muted);
+  min-width: 0;
+}
+
+.connector__bound-line code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connector__form .field {
+  margin-bottom: var(--space-xs);
+}
+
+.connector__hint {
+  margin: 0;
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  color: var(--text-dim);
+}
+
+/* Third-party removal sits at the far end of the fold, away from Bind. */
+.connector__delete {
+  margin-left: auto;
+  color: var(--text-dim);
+}
+
+.connector__delete:hover:not(:disabled) {
+  color: var(--status-danger-fg);
+  border-color: var(--status-danger-border);
+}
+
+/* ---------------------------------------------------------------- builder */
+
+/*
+ * Making a colleague, rendered as making a colleague.
+ *
+ * This panel was two stacked CRUD forms — four inputs, a textarea, a Create
+ * button — with no indication anywhere on it of what the thing being created
+ * *is*. Every claim the product makes about a teammate (its own isolated Linux
+ * desktop, a hard daily cap, and a bot that stops before anything
+ * consequential) was absent from the one screen where somebody decides to make
+ * one. The preview is that, and it needs no API field: the profile and the cap
+ * are in the form already, and the approval policy is fixed.
+ */
+/*
+ * Flex-wrap rather than a grid with a media query.
+ *
+ * The thing that decides whether the preview fits beside the form is the width
+ * of the *panel*, and the panel is one of four grid tracks whose width the
+ * person sets by dragging the splitter. A `@media` query asks the window
+ * instead, so on a 1180px window with the Bot Desktop pane docked the query
+ * said "wide enough" while the column was 810px, and the two columns
+ * overlapped. Wrapping on the basis of the flex basis asks the right question
+ * and needs no breakpoint at all.
+ */
+.builder__split {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-lg);
+  align-items: flex-start;
+}
+
+.builder__split > .card {
+  flex: 4 1 min(420px, 100%);
+  min-width: 0;
+}
+
+.builder__split > .teammate-preview {
+  flex: 1 1 min(280px, 100%);
+}
+
+.builder__requirement {
+  font-size: var(--text-caption-size);
+  color: var(--text-dim);
+}
+
+.teammate-preview {
+  position: sticky;
+  top: 0;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+/*
+ * Before there is a name there is nothing to preview, so the card says so by
+ * being quieter rather than by disappearing — a panel whose right-hand column
+ * pops into existence on the first keystroke is worse than one that is simply
+ * waiting.
+ */
+.teammate-preview--placeholder {
+  border-style: dashed;
+}
+
+.teammate-preview--placeholder .teammate-preview__name,
+.teammate-preview--placeholder .teammate-preview__role {
+  color: var(--text-dim);
+}
+
+.teammate-preview__eyebrow {
+  font-family: var(--font-display);
+  font-size: var(--text-eyebrow-size);
+  line-height: var(--text-eyebrow-line);
+  font-weight: var(--text-eyebrow-weight);
+  letter-spacing: var(--text-eyebrow-tracking);
+  text-transform: var(--text-eyebrow-transform);
+  color: var(--text-dim);
+}
+
+.teammate-preview__identity {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  min-width: 0;
+}
+
+/* The sidebar avatar, at the size something being introduced deserves. */
+.avatar--lg {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-md);
+  font-size: var(--text-body-size);
+}
+
+.teammate-preview__meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+
+.teammate-preview__name {
+  font-family: var(--font-display);
+  font-size: var(--text-subheading-size);
+  line-height: var(--text-subheading-line);
+  font-weight: var(--text-subheading-weight);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.teammate-preview__role {
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  color: var(--text-muted);
+}
+
+.teammate-preview__facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  margin: 0;
+  padding-top: var(--space-md);
+  border-top: 1px solid var(--border);
+}
+
+.teammate-preview__facts dt {
+  font-family: var(--font-display);
+  font-size: var(--text-eyebrow-size);
+  line-height: var(--text-eyebrow-line);
+  font-weight: var(--text-eyebrow-weight);
+  letter-spacing: var(--text-eyebrow-tracking);
+  text-transform: var(--text-eyebrow-transform);
+  color: var(--text-dim);
+}
+
+.teammate-preview__facts dd {
+  margin: 2px 0 0;
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  color: var(--text);
+}
+
+/*
+ * The rule everybody is born under, stated at the moment of creation rather
+ * than only at the moment of interruption.
+ */
+.teammate-preview__policy {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding-top: var(--space-md);
+  border-top: 1px solid var(--border);
+}
+
+.teammate-preview__policy-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  margin: 0;
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  color: var(--text-muted);
+}
+
+.teammate-preview__policy-row svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.teammate-preview__policy-row[data-tone="free"] svg { color: var(--status-success-fg); }
+.teammate-preview__policy-row[data-tone="gated"] svg { color: var(--status-warning-fg); }
+
+.teammate-preview__policy-row strong {
+  color: var(--text);
+  font-weight: var(--text-body-strong-weight);
+}
+
+.teammate-preview__risk {
+  font-weight: 700;
+}
+
+.teammate-preview__risk[data-risk="send"] { color: var(--risk-send-fg); }
+.teammate-preview__risk[data-risk="spend"] { color: var(--risk-spend-fg); }
+.teammate-preview__risk[data-risk="delete"] { color: var(--risk-delete-fg); }
+
+/* -------------------------------------------- desktop keypad & confirmations */
+
+/*
+ * The keys, as keys.
+ *
+ * The takeover row carried "Send text", a bare "⏎" and "Send Esc" as three
+ * `.btn--ghost`s of identical weight — so a glyph nobody can read aloud sat at
+ * the same rank as the control that sends a whole sentence, and nothing said
+ * that the last two are a different *kind* of action from the first. They are
+ * a keypad. It is grouped, it is labelled "Press", and each key is drawn the
+ * way `kbd` is drawn everywhere else in the product.
+ */
+.desktop-keys {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding-left: var(--space-sm);
+  border-left: 1px solid var(--border);
+}
+
+.desktop-keys__label {
+  font-size: var(--text-caption-size);
+  color: var(--text-dim);
+}
+
+.desktop-keys__key {
+  font-family: var(--font-mono);
+  font-size: var(--text-mono-size);
+  padding: 3px var(--space-sm);
+  min-width: 34px;
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-alt);
+  color: var(--text);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard),
+    transform var(--duration-fast) var(--ease-standard);
+}
+
+.desktop-keys__key:hover {
+  background: var(--surface-raised);
+  border-color: var(--accent);
+}
+
+/*
+ * It travels 1px and loses its thick bottom edge, which is the whole idea: a
+ * key that does not depress does not read as a key. Both properties are inside
+ * the transition above, so the blanket reduced-motion rule clamps them.
+ */
+.desktop-keys__key:active {
+  transform: translateY(1px);
+  border-bottom-width: 1px;
+  margin-bottom: 1px;
+}
+
+/*
+ * The wipe control at rest.
+ *
+ * A previous pass took the red fill off this button and left the danger in the
+ * word, which was right. What it kept was `btn--quiet-danger`, whose red border
+ * and red text still made it the most saturated thing in a rail that is on
+ * screen on every tab. At rest it is now an ordinary ghost button that dims
+ * rather than shouts; the red arrives with the confirmation, at the moment it
+ * is describing something that is about to happen.
+ */
+.desktop-controls__wipe {
+  color: var(--text-dim);
+}
+
+.desktop-controls__wipe:hover:not(:disabled) {
+  color: var(--status-danger-fg);
+  border-color: var(--status-danger-border);
+}
+
+.mcp__remove {
+  margin-left: auto;
+  color: var(--text-dim);
+}
+
+.mcp__remove:hover:not(:disabled) {
+  color: var(--status-danger-fg);
+  border-color: var(--status-danger-border);
+}
+
+/* The confirmation wraps to its own line rather than squeezing the row. */
+.desktop-controls .danger-confirm {
+  margin-left: auto;
+}
+
+.desktop-pane:not(.desktop-pane--expanded) .desktop-controls .danger-confirm {
+  margin-left: 0;
+  flex: 1 0 100%;
+}
+
+/* The routine's own removal, demoted to match every other destructive control. */
+.routine__delete {
+  margin-left: auto;
+  color: var(--text-dim);
+}
+
+.routine__delete:hover:not(:disabled) {
+  color: var(--status-danger-fg);
+  border-color: var(--status-danger-border);
+}
+
+/* =====================================================================
+ * Standing permissions — "don't ask again for this button"
+ *
+ * A grant of authority, so the row is built to be *checked* rather than
+ * skimmed: what it permits at body weight, the evidence it was granted on
+ * directly underneath, and the control that takes it back on the same line as
+ * both. Nothing here is folded away — a permission whose grounds are one click
+ * further in is a permission nobody audits.
+ *
+ * Colour does no work. The queue above uses `--risk-*` to make a delete look
+ * different from a draft across a room, and that is right for a list you are
+ * triaging; this is a list you read, every row of it is `send`, and painting
+ * six identical warnings would be a wall of alarm that stops meaning anything.
+ * `[data-risk]` is on the row anyway for the day the learnable set changes.
+ * ===================================================================== */
+
+.standing-panel {
+  padding: var(--space-md) var(--space-xl) 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.standing-panel__toggle {
+  margin-top: 0;
+  margin-bottom: var(--space-md);
+}
+
+.standing-panel .reveal {
+  margin-top: 0;
+  padding-bottom: var(--space-md);
+}
+
+/*
+ * The limit that cannot be switched off, above the list.
+ *
+ * Quiet, not a warning: it is reassurance, and styling reassurance as an alert
+ * teaches people to dismiss alerts.
+ */
+.standing-panel__limit {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-xs);
+  margin: 0 0 var(--space-md);
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  color: var(--text-muted);
+}
+
+.standing-panel__limit svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}
+
+.standing-panel__history {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  margin-top: var(--space-md);
+  font-size: var(--text-caption-size);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.standing-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.standing {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-lg);
+  flex-wrap: wrap;
+  padding: var(--space-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.standing--revoked {
+  background: var(--surface-alt);
+}
+
+/* Struck through, not hidden: the row is the record that it existed. */
+.standing--revoked .standing__permits {
+  text-decoration: line-through;
+  color: var(--text-dim);
+}
+
+.standing__main {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.standing__permits {
+  margin: 0;
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line);
+  font-weight: var(--text-body-strong-weight);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.standing__grounds {
+  margin: var(--space-xs) 0 0;
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.standing__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  flex-wrap: wrap;
+  margin: var(--space-xs) 0 0;
+  font-size: var(--text-caption-size);
+  color: var(--text-dim);
+}
+
+/* =====================================================================
+ * The held action, in words
+ *
+ * *"on approval i would like to see what the agent is trying to do, the
+ * message it's trying to send, not payloads."* The block this styles replaced
+ * a `<code>browser_click</code>` and a node id.
+ * ===================================================================== */
+
+.approval__plain-intent {
+  font-weight: var(--text-body-strong-weight);
+  color: var(--text);
+}
+
+/*
+ * The message, as prose.
+ *
+ * Deliberately not `.code-block`: this is Romanian outreach copy a person is
+ * about to send under their own name, and a monospace scroll box makes it read
+ * like a log line. It wraps, it uses the reading typeface, and the rule down
+ * the left says "quoted from the page" without a heading having to.
+ */
+.approval__message {
+  margin: var(--space-sm) 0 0;
+  padding: var(--space-sm) var(--space-md);
+  border-left: 3px solid var(--border-strong, var(--border));
+  background: var(--surface-alt);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  color: var(--text);
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.approval__message-clip {
+  display: block;
+  margin-top: var(--space-xs);
+  font-size: var(--text-caption-size);
+  color: var(--text-dim);
+}
+
+/* Sentences, so they are read as a story rather than parsed as a trace. */
+.approval__steps--plain {
+  color: var(--text-muted);
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+  list-style: decimal;
+  gap: 3px;
+}
+
+/*
+ * The turn a standing permission is acquired says so, here as well as in chat.
+ *
+ * Accent rather than a risk colour: nothing has gone wrong, and nothing is
+ * waiting. It is the one sentence on this card that changes what the product
+ * will do tomorrow, so it is legible and it is not alarming.
+ */
+.approval__granted {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-xs);
+  margin: var(--space-md) 0 0;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-alt);
+  color: var(--text-muted);
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+}
+
+.approval__granted svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+}

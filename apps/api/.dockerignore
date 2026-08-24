@@ -1,0 +1,35 @@
+# Build context for the API image.
+#
+# The Dockerfile only COPYs requirements.txt, app/ and sql/, but everything
+# else in this directory still gets uploaded to the daemon on every build - a
+# local .venv alone is hundreds of megabytes and invalidates nothing useful.
+#
+# Deny by default, then re-admit exactly what the image needs. That way a file
+# added later (a .env, a dump, a notebook full of credentials) cannot end up in
+# the context by accident.
+*
+
+!requirements.txt
+!requirements-dev.txt
+!app/
+!sql/
+!alembic.ini
+!alembic/
+
+# Re-exclude the noise inside the admitted directories: negation patterns do
+# not recurse into what a later rule re-excludes, so these must come last.
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.ipynb_checkpoints/
+**/.DS_Store
+**/Thumbs.db
+**/*.log
+**/*.sqlite3
+**/*.db
+**/.env
+**/.env.*
+**/tests/

@@ -1,0 +1,308 @@
+# Nesq Bot - base compose (local development, safe defaults).
+#
+#   docker compose up -d
+#
+# must work on a laptop with no Azure credentials, no Temporal experience and
+# no bot-desktop image built. Everything that needs more privilege or more
+# hardware is opt-in through an extra -f file or a profile:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.desktop-docker.yml up -d
+#       -> mounts the host Docker socket into the API and switches
+#          BOT_DESKTOP_MODE to "docker" so the API can spawn real desktops.
+#
+#   docker compose --profile desktop build bot-desktop
+#       -> builds nesqbot/bot-desktop:local (the image the API launches).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#       -> registry images, no host ports, no source bind mounts.
+#
+# All image tags are pinned. No :latest anywhere.
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-nesq}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nesq}
+      POSTGRES_DB: ${POSTGRES_DB:-nesqbot}
+      # Temporal's auto-setup creates its own databases on this same server.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      # Named volume: bind mounts into ./data are slow and permission-fragile
+      # on Windows / NAS hosts.
+      - pg_data:/var/lib/postgresql/data
+      # Lexical order matters: 00 enables pgvector/pgcrypto, 10 creates the
+      # tables that declare vector(1536) columns.
+      - ./infra/postgres/00-extensions.sql:/docker-entrypoint-initdb.d/00-extensions.sql:ro
+      - ./apps/api/sql/init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nesq} -d ${POSTGRES_DB:-nesqbot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+        reservations:
+          memory: 256m
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    logging: *default-logging
+    command:
+      - redis-server
+      - --save
+      - "60"
+      - "1"
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - noeviction
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
+
+  temporal:
+    image: temporalio/auto-setup:1.25.2
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-nesq}
+      POSTGRES_PWD: ${POSTGRES_PASSWORD:-nesq}
+      POSTGRES_SEEDS: postgres
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+      SKIP_DEFAULT_NAMESPACE_CREATION: "false"
+      DEFAULT_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      DEFAULT_NAMESPACE_RETENTION: 72h
+    ports:
+      - "${TEMPORAL_HOST_PORT:-7233}:7233"
+    volumes:
+      - ./infra/temporal/dynamicconfig:/etc/temporal/config/dynamicconfig:ro
+    healthcheck:
+      # NOT 127.0.0.1. temporal-server binds its listeners to the container's
+      # own IP, never to loopback, so a healthcheck aimed at 127.0.0.1 gets
+      # "connection refused" forever while the server is perfectly healthy.
+      # This container then never goes healthy, and `worker` — which gates on
+      # `condition: service_healthy` — never starts at all. `hostname -i` is
+      # the address it actually listens on.
+      #
+      # Three fallbacks so a CLI rename in a future image tag can never wedge
+      # the whole stack: `temporal` (>=1.22), `tctl` (legacy), then raw TCP.
+      test:
+        - CMD-SHELL
+        - ADDR=$$(hostname -i); temporal operator cluster health --address $$ADDR:7233 >/dev/null 2>&1 || tctl --address $$ADDR:7233 cluster health >/dev/null 2>&1 || bash -c "exec 3<>/dev/tcp/$$ADDR/7233" >/dev/null 2>&1
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 90s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2g
+
+  temporal-ui:
+    image: temporalio/ui:2.31.2
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      # 1420 = Tauri dev server, 8081 = Expo, 8088 = this UI itself.
+      # Nothing in this repo has ever listened on 3000.
+      TEMPORAL_CORS_ORIGINS: ${TEMPORAL_CORS_ORIGINS:-http://localhost:1420,http://localhost:8081,http://localhost:8088}
+      TEMPORAL_UI_PORT: "8080"
+    ports:
+      - "${TEMPORAL_UI_HOST_PORT:-8088}:8080"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+
+  # Published straight to the host with nothing in between, deliberately: the
+  # chat endpoints are SSE and a buffering proxy would hold every token until
+  # the turn ends. Do not put nginx/Traefik in front of this without turning
+  # response buffering off.
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    image: ${API_IMAGE:-nesqbot/api:local}
+    restart: unless-stopped
+    logging: *default-logging
+    env_file:
+      # Optional so a fresh clone comes up before anyone runs `cp .env.example .env`.
+      - path: .env
+        required: false
+    environment:
+      # Service-to-service wiring always wins over .env, which is written for
+      # running the API directly on the host.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-nesq}:${POSTGRES_PASSWORD:-nesq}@postgres:5432/${POSTGRES_DB:-nesqbot}
+      REDIS_URL: redis://redis:6379/0
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-nesq-bot}
+      # SAFE DEFAULT: no Docker socket in the base file, so the API cannot
+      # spawn desktops here. Use docker-compose.desktop-docker.yml to opt in.
+      BOT_DESKTOP_MODE: ${BOT_DESKTOP_MODE:-mock}
+      BOT_DESKTOP_IMAGE: ${BOT_DESKTOP_IMAGE:-nesqbot/bot-desktop:local}
+      BOT_DESKTOP_NETWORK: ${BOT_DESKTOP_NETWORK:-nesqbot_default}
+      BOT_DESKTOP_HOME_ROOT: /data/bot-homes
+      BOT_DESKTOP_STREAM_BASE: ${BOT_DESKTOP_STREAM_BASE:-http://localhost:6901}
+      BOTS_DIR: /bots
+      NESQ_ENV: ${NESQ_ENV:-development}
+      API_HOST: 0.0.0.0
+      API_PORT: "8080"
+    ports:
+      - "${API_HOST_PORT:-8080}:8080"
+    volumes:
+      # Kept as a bind: the API writes per-bot home directories here and the
+      # docker-mode desktops mount the same paths from the host.
+      - ./data/bot-homes:/data/bot-homes
+      - ./bots:/bots:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/health >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1g
+        reservations:
+          memory: 256m
+
+  worker:
+    build:
+      context: ./apps/worker
+      dockerfile: Dockerfile
+    image: ${WORKER_IMAGE:-nesqbot/worker:local}
+    restart: unless-stopped
+    logging: *default-logging
+    env_file:
+      # Optional so a fresh clone comes up before anyone runs `cp .env.example .env`.
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-nesq}:${POSTGRES_PASSWORD:-nesq}@postgres:5432/${POSTGRES_DB:-nesqbot}
+      REDIS_URL: redis://redis:6379/0
+      TEMPORAL_HOST: temporal:7233
+      TEMPORAL_NAMESPACE: ${TEMPORAL_NAMESPACE:-default}
+      TEMPORAL_TASK_QUEUE: ${TEMPORAL_TASK_QUEUE:-nesq-bot}
+      API_INTERNAL_URL: http://api:8080
+      NESQ_ENV: ${NESQ_ENV:-development}
+    depends_on:
+      # The worker now retries its Temporal connection with backoff, so these
+      # are no longer load-bearing against a crash loop - but gating on
+      # service_healthy still gives a clean cold start instead of a minute of
+      # "connection refused" in the logs.
+      api:
+        condition: service_healthy
+      temporal:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # No healthcheck override here on purpose: apps/worker/Dockerfile defines
+    # `python -m worker.main --healthcheck`, which checks the freshness of the
+    # marker the running worker refreshes every 15s. Redefining it in compose
+    # would only let the two drift apart.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1g
+        reservations:
+          memory: 256m
+
+  # Not started by a plain `docker compose up`. It exists so the image the API
+  # references actually has a build definition in this repo:
+  #   docker compose --profile desktop build bot-desktop
+  #   docker compose --profile desktop up -d bot-desktop   # one shared desktop
+  bot-desktop:
+    profiles: ["desktop"]
+    build:
+      context: ./infra/bot-desktop
+      dockerfile: Dockerfile
+      args:
+        DESKTOP_PROFILE_BUILD: ${DESKTOP_PROFILE_BUILD:-slim}
+    image: ${BOT_DESKTOP_IMAGE:-nesqbot/bot-desktop:local}
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      BOT_SLUG: ${BOT_SLUG:-scratch}
+      DESKTOP_PROFILE: ${DESKTOP_PROFILE:-icewm}
+      DESKTOP_RESOLUTION: ${DESKTOP_RESOLUTION:-1440x900x24}
+      VNC_PW: ${VNC_PW:-nesq}
+      NESQ_SIDECAR_TOKEN: ${NESQ_SIDECAR_TOKEN:-}
+    ports:
+      - "${BOT_DESKTOP_STREAM_HOST_PORT:-6901}:6901"
+      - "${BOT_DESKTOP_CONTROL_HOST_PORT:-7910}:7910"
+    volumes:
+      - ./data/bot-homes/scratch:/home/nesq
+    shm_size: 512m
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 3g
+        reservations:
+          memory: 512m
+
+volumes:
+  pg_data:
+    name: nesqbot_pg_data
+  redis_data:
+    name: nesqbot_redis_data
+
+networks:
+  default:
+    # Referenced by BOT_DESKTOP_NETWORK so API-spawned desktop containers land
+    # on the same network as the API.
+    name: nesqbot_default

@@ -1,0 +1,297 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "20"
+  # Pinned so a lint release cannot turn a green branch red overnight.
+  RUFF_VERSION: "0.11.2"
+  MYPY_VERSION: "1.15.0"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  python:
+    name: Python (${{ matrix.app }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [api, worker]
+
+    services:
+      postgres:
+        # Same image as docker-compose.yml so pgvector behaves identically.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: nesq
+          POSTGRES_PASSWORD: nesq
+          POSTGRES_DB: nesqbot_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nesq -d nesqbot_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      NESQ_ENV: test
+      DATABASE_URL: postgresql+asyncpg://nesq:nesq@localhost:5432/nesqbot_test
+      REDIS_URL: redis://localhost:6379/0
+      JWT_SECRET: ci-not-a-real-secret
+      BOT_DESKTOP_MODE: mock
+      BOTS_DIR: ${{ github.workspace }}/bots
+      # Keep the Temporal test server out of the sandbox temp dir so the cache
+      # below can actually retain it.
+      TEMPORAL_TEST_SERVER_CACHE: ${{ github.workspace }}/.cache/temporal
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            apps/${{ matrix.app }}/requirements.txt
+            apps/${{ matrix.app }}/requirements-dev.txt
+
+      - name: Install dependencies
+        working-directory: apps/${{ matrix.app }}
+        run: |
+          python -m pip install --upgrade pip
+          # requirements-dev.txt already pulls in requirements.txt via -r.
+          if [ -f requirements-dev.txt ]; then
+            pip install -r requirements-dev.txt
+          else
+            pip install -r requirements.txt
+          fi
+          pip install "ruff==${RUFF_VERSION}"
+
+      - name: Ruff (lint)
+        working-directory: apps/${{ matrix.app }}
+        run: ruff check --output-format=github .
+
+      - name: Ruff (format check)
+        working-directory: apps/${{ matrix.app }}
+        # Advisory until the tree is fully formatted; flip to a hard failure
+        # once `ruff format .` has been run across both apps.
+        continue-on-error: true
+        run: ruff format --check --diff .
+
+      - name: Detect mypy configuration
+        id: mypy_cfg
+        working-directory: apps/${{ matrix.app }}
+        run: |
+          # Only run mypy where the app has actually opted in - an unconfigured
+          # mypy run on an untyped tree produces thousands of useless errors.
+          if grep -qs "\[mypy\]\|\[tool.mypy\]" mypy.ini setup.cfg pyproject.toml 2>/dev/null; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::no mypy config in apps/${{ matrix.app }} - skipping type check"
+          fi
+
+      - name: Mypy
+        if: steps.mypy_cfg.outputs.configured == 'true'
+        working-directory: apps/${{ matrix.app }}
+        run: |
+          pip install "mypy==${MYPY_VERSION}"
+          mypy .
+
+      # temporalio downloads a ~30 MB test-server binary on first use. Cache it
+      # so the worker suite does not re-fetch it on every run.
+      - name: Cache Temporal test server
+        if: matrix.app == 'worker'
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.TEMPORAL_TEST_SERVER_CACHE }}
+          key: temporal-test-server-${{ runner.os }}-v1
+
+      - name: Wait for services
+        run: |
+          for _ in $(seq 1 30); do
+            pg_isready -h localhost -p 5432 -U nesq -d nesqbot_test && break
+            sleep 2
+          done
+
+      - name: Initialise schema
+        if: matrix.app == 'api'
+        run: |
+          PGPASSWORD=nesq psql -h localhost -U nesq -d nesqbot_test \
+            -v ON_ERROR_STOP=1 -f infra/postgres/00-extensions.sql
+          PGPASSWORD=nesq psql -h localhost -U nesq -d nesqbot_test \
+            -v ON_ERROR_STOP=1 -f apps/api/sql/init.sql
+
+      - name: Pytest
+        working-directory: apps/${{ matrix.app }}
+        run: |
+          if [ ! -d tests ]; then
+            echo "::notice::apps/${{ matrix.app }} has no tests/ directory yet - skipping"
+            exit 0
+          fi
+          set +e
+          python -m pytest -q --maxfail=1
+          rc=$?
+          set -e
+          # 5 = "no tests collected", which is not a failure while a suite is
+          # still being written.
+          if [ "$rc" -eq 5 ]; then
+            echo "::notice::no tests collected in apps/${{ matrix.app }}"
+            exit 0
+          fi
+          exit "$rc"
+
+  # ---------------------------------------------------------------------------
+  node:
+    name: Node workspaces
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/desktop/package-lock.json
+            apps/mobile/package-lock.json
+
+      - name: Install
+        run: |
+          # The root package.json may or may not declare `workspaces` yet
+          # (another lane owns it), so handle both shapes.
+          if node -e "process.exit(require('./package.json').workspaces ? 0 : 1)"; then
+            echo "workspaces detected - installing from the root"
+            npm install --no-audit --no-fund
+          else
+            echo "no workspaces - installing per package"
+            npm install --no-audit --no-fund
+            for dir in packages/protocol packages/ui packages/connector-sdk packages/model-router apps/desktop apps/mobile; do
+              if [ -f "$dir/package.json" ]; then
+                echo "::group::install $dir"
+                npm install --prefix "$dir" --no-audit --no-fund
+                echo "::endgroup::"
+              fi
+            done
+          fi
+
+      - name: Typecheck packages
+        run: |
+          status=0
+          for dir in packages/protocol packages/ui packages/connector-sdk packages/model-router; do
+            [ -f "$dir/package.json" ] || continue
+            node -e "process.exit((require('./$dir/package.json').scripts||{}).typecheck ? 0 : 1)" || {
+              echo "::notice::$dir has no typecheck script"; continue; }
+            echo "::group::typecheck $dir"
+            npm run typecheck --prefix "$dir" || status=1
+            echo "::endgroup::"
+          done
+          exit $status
+
+      - name: Typecheck mobile
+        # Expo types drift with the SDK; advisory until the app is stable.
+        continue-on-error: true
+        run: npm run typecheck --prefix apps/mobile
+
+      - name: Build desktop
+        # The web bundle only. `tauri build` needs the Rust toolchain plus GTK
+        # and webkit2gtk system libraries - not worth it on every PR.
+        run: npm run build --prefix apps/desktop
+
+      - name: Upload desktop bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-dist
+          path: apps/desktop/dist
+          retention-days: 7
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  shell-and-compose:
+    name: Shell + compose sanity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shellcheck + bash -n
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          status=0
+          while IFS= read -r script; do
+            echo "::group::$script"
+            bash -n "$script" || status=1
+            # SC1091: sourced files that do not exist on the runner.
+            shellcheck -e SC1091 "$script" || status=1
+            echo "::endgroup::"
+          done < <(find . -name '*.sh' -not -path './node_modules/*' -not -path '*/node_modules/*')
+          exit $status
+
+      - name: Validate compose files
+        run: |
+          cp .env.example .env
+          docker compose -f docker-compose.yml config >/dev/null
+          docker compose -f docker-compose.yml -f docker-compose.desktop-docker.yml config >/dev/null
+          API_IMAGE=ci/api:test WORKER_IMAGE=ci/worker:test \
+          POSTGRES_PASSWORD=ci REDIS_PASSWORD=ci JWT_SECRET=ci WORKER_API_TOKEN=ci \
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml config >/dev/null
+          echo "all compose files parse"
+
+      - name: Check .env.example covers every settings field
+        run: |
+          python3 - <<'EOF'
+          import pathlib, re, sys
+
+          env = pathlib.Path(".env.example").read_text(encoding="utf-8")
+          declared = {
+              line.split("=", 1)[0].strip()
+              for line in env.splitlines()
+              if line.strip() and not line.startswith("#") and "=" in line
+          }
+
+          missing = []
+          for cfg in ("apps/api/app/config.py", "apps/worker/worker/config.py"):
+              path = pathlib.Path(cfg)
+              if not path.exists():
+                  continue
+              for match in re.finditer(
+                  r"^\s{4}([a-z][a-z0-9_]*)\s*:\s*[^=]+=", path.read_text(encoding="utf-8"), re.M
+              ):
+                  name = match.group(1).upper()
+                  if name not in declared:
+                      missing.append(f"{cfg}: {name}")
+
+          if missing:
+              print("::warning::settings fields with no .env.example entry:")
+              for item in missing:
+                  print(f"  {item}")
+          else:
+              print("all settings fields are documented in .env.example")
+          EOF

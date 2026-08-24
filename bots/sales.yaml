@@ -1,0 +1,111 @@
+# See bots/chief_of_staff.yaml for the field-by-field schema notes.
+
+name: Sales
+slug: sales
+role: CRM and follow-ups
+desktop_profile: xfce
+daily_budget_usd: 5
+system_prompt: |
+  You maintain CRM hygiene, draft follow-ups in the seller's voice,
+  flag stalls and commit risk, and produce Monday scoreboards.
+
+  Prefer CRM connectors; use Bot Desktop when no API exists. Either way, do the
+  work in this turn rather than describing it. "There is no API for that" is the
+  start of a browser session, not the end of the request.
+
+connectors:
+  - id: crm
+    status: disconnected
+  - id: microsoft_graph
+    status: disconnected
+
+mcp:
+  - name: filesystem
+    transport: stdio
+    command: npx -y @modelcontextprotocol/server-filesystem /home/nesq/sales
+    enabled: false
+    tool_allowlist:
+      - read_file
+      - write_file
+      - list_directory
+
+routines:
+  - name: Monday scoreboard
+    description: >-
+      Pipeline state at the start of the week: movement, slippage and the
+      deals that need a person this week.
+    schedule_cron: "0 7 * * 1"
+    enabled: true
+    steps:
+      - type: connector
+        connector: crm
+        action: search_accounts
+        args:
+          query: "stage:Qualified OR stage:Proposal OR stage:Negotiation"
+      - type: message
+        text: >-
+          Produce the scoreboard: pipeline by stage, week-over-week movement,
+          deals that slipped a close date twice or more, and the top 5 that
+          need a human conversation. Cite the account records behind each
+          claim.
+
+  - name: Follow-up drafts
+    description: >-
+      Every weekday, draft the follow-ups that are due. Sending stays behind an
+      approval.
+    schedule_cron: "0 8 * * 1-5"
+    enabled: true
+    steps:
+      - type: connector
+        connector: crm
+        action: search_accounts
+        args:
+          query: "next_step_due:today OR last_touch:>7d"
+      - type: connector
+        connector: microsoft_graph
+        action: draft_reply
+        args:
+          body: "follow-up in the seller's voice, referencing the last call"
+      - type: message
+        text: >-
+          List the drafts with the account and the reason each is due. Report
+          drafted vs sent counts.
+
+  - name: CRM hygiene sweep
+    description: >-
+      Find the records that quietly rot: missing next steps, stale close dates,
+      empty contact roles.
+    schedule_cron: "0 17 * * 3"
+    enabled: true
+    steps:
+      - type: connector
+        connector: crm
+        action: search_accounts
+        args:
+          query: "missing:next_step OR missing:close_date"
+      - type: connector
+        connector: crm
+        action: create_task
+        args:
+          title: "Fill in the missing next step"
+      - type: message
+        text: >-
+          Summarise what was fixed and what needs the owner's judgement. Field
+          updates are risk mutate, so they run; anything that would notify a
+          customer must be queued as an approval instead.
+
+  - name: Commit risk review
+    description: End-of-month reality check on the forecast.
+    schedule_cron: "0 9 28-31 * *"
+    enabled: false
+    steps:
+      - type: connector
+        connector: crm
+        action: search_accounts
+        args:
+          query: "close_date:this_month"
+      - type: message
+        text: >-
+          For each committed deal, state the evidence it will close this month
+          and the single biggest risk. Flag anything committed with no activity
+          in 14 days.

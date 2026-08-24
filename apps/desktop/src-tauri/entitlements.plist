@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime entitlements for the macOS build of Nesq Bot.
+
+  Apple's notary service REJECTS a bundle that is not built with the hardened runtime,
+  and the hardened runtime in turn blocks what a WKWebView must do to run JavaScript at
+  all. So this file is not an optional extra; without it the app either fails
+  notarisation or launches to a window that never finishes loading.
+
+  Note what is deliberately ABSENT: com.apple.security.app-sandbox. This app is
+  distributed directly (Developer ID + notarisation + DMG), not through the Mac App
+  Store, so it is not sandboxed. Adding the sandbox key would require entitlements for
+  every file and network operation and is a separate piece of work — see
+  docs/mobile-release.md.
+
+  Also deliberately absent: any keychain entitlement. `src/secrets.rs` stores the Entra
+  refresh token and the session JWT as generic passwords in the user's login keychain.
+  A non-sandboxed app needs no entitlement for that — keychain-access-groups exists to
+  SHARE items between apps or to reach the keychain from inside the sandbox, and this
+  app does neither. What does matter is the signing identity: keychain items are ACL'd
+  to the code that created them, so an app re-signed with a different identity (an
+  unsigned local build vs. a Developer ID build) prompts the user once to allow access
+  rather than reading the item silently.
+
+  The build is wired up in .github/workflows/macos.yml — Tauri embeds this file into
+  the signature via bundle.macOS.entitlements, and the workflow asserts afterwards that
+  it actually made it in.
+-->
+<plist version="1.0">
+  <dict>
+    <!-- Outbound HTTPS/WSS to the Nesq Bot API.
+
+         Strictly speaking this is an App Sandbox key and has no effect on a
+         non-sandboxed hardened-runtime app, which already has unrestricted outbound
+         network access. It is kept because it is what Apple and Tauri both put in the
+         template, it costs nothing, and it is the one entitlement that would have to
+         be correct on day one if this app ever moves to the Mac App Store. Do not read
+         its presence as proof that network access is being granted by it. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- JavaScriptCore's JIT. This one is load-bearing: the hardened runtime denies
+         writable-executable pages by default and WebKit needs them. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+
+    <!-- WebKit also maps unsigned executable memory outside the JIT region. Broader
+         than allow-jit and Apple's notary log will mention it, which is not a
+         rejection. Required in practice for WKWebView under the hardened runtime; if a
+         future WebKit stops needing it, dropping this key is the first tightening to
+         try. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+  </dict>
+</plist>

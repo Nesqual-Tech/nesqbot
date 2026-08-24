@@ -1,0 +1,117 @@
+# Tooling config for the Nesq Bot API lane.
+#
+# pytest configuration deliberately lives in ./pytest.ini, mirroring the worker
+# lane (apps/worker/pytest.ini). pytest reads pytest.ini in preference to this
+# file, so a second copy of those keys here would be a silent trap.
+
+[project]
+name = "nesqbot-api"
+version = "0.2.0"
+description = "Nesq Bot control plane API"
+requires-python = ">=3.12"
+
+# ---------------------------------------------------------------------------
+# ruff
+# ---------------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+src = ["."]
+extend-exclude = ["sql", ".pytest-bot-homes"]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "C4",    # flake8-comprehensions
+    "ASYNC", # flake8-async
+    "S",     # flake8-bandit
+    "BLE",   # flake8-blind-except
+    "RUF",   # ruff specific
+]
+ignore = [
+    # FastAPI's `Depends(...)` / `Query(...)` in argument defaults is the framework idiom.
+    "B008",
+    # `assert` is how tests assert.
+    "S101",
+    # SQLAlchemy/pydantic models declare mutable class attributes by design.
+    "RUF012",
+    # The codebase writes `datetime.now(timezone.utc)` consistently; the
+    # `datetime.UTC` alias is equivalent and churning it buys nothing.
+    "UP017",
+    # `isinstance(x, (A, B))` reads fine and is what the code uses.
+    "UP038",
+    # Degradation boundaries (sidecar, redis, temporal, docker, embeddings)
+    # deliberately swallow and continue; each site is commented at the call.
+    "S110",
+    "S112",
+    # `API_HOST=0.0.0.0` is the container default, not a mistake.
+    "S104",
+    # Setting names like `jwt_secret` / `auth = "api_key"` are field names and
+    # scheme labels, not credentials.
+    "S105",
+    "S106",
+    # Several `# noqa: BLE001` markers are load-bearing documentation of intent
+    # even where the rule no longer fires; do not nag about them.
+    "RUF100",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Declarative column definitions are one statement per line by convention;
+# wrapping them hurts more than the width does.
+"app/models.py" = ["E501"]
+# The first-party connector manifests are data, not code.
+"app/services/connectors.py" = ["E501"]
+"tests/**" = [
+    "S311",     # test fixtures do not need a CSPRNG
+    "SLF001",   # tests reach into private helpers on purpose
+    "ASYNC109", # test helpers take an explicit `timeout=` so a hang fails fast
+    "E501",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "tests"]
+
+# ---------------------------------------------------------------------------
+# mypy — deliberately permissive to start. The goal is that it gets tightened
+# one flag at a time, not that it blocks this lane.
+#
+# `mypy app` currently reports 5 findings, all narrowing artefacts rather than
+# runtime bugs (model_router's `resp`/`stream` are Optional after the tenacity
+# loop; two locals are rebound with a wider type). They are left visible on
+# purpose — silencing them with disable_error_code would hide the same class of
+# error when it is real. Fix them in the app lane, do not widen this config.
+# ---------------------------------------------------------------------------
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = false
+warn_return_any = false
+warn_unused_ignores = false
+warn_unused_configs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+show_error_codes = true
+exclude = ['^tests/', '^\.pytest-bot-homes/']
+plugins = []
+
+[[tool.mypy.overrides]]
+module = [
+    "pgvector.*",
+    "docker.*",
+    "temporalio.*",
+    "sse_starlette.*",
+    "jose.*",
+    "azure.*",
+    "redis.*",
+    "yaml.*",
+]
+ignore_missing_imports = true

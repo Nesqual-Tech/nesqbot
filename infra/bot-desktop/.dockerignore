@@ -1,0 +1,20 @@
+# Build context for the Bot Desktop image.
+#
+# The Dockerfile COPYs four files. Everything else here is documentation and
+# Kubernetes manifests that have no business inside a container that a browser
+# driven by an LLM can read.
+*
+
+!Dockerfile
+!entrypoint.sh
+!sidecar/requirements.txt
+!sidecar/server.py
+!sidecar/browser.py
+
+**/__pycache__/
+**/*.py[cod]
+**/.DS_Store
+**/Thumbs.db
+**/*.log
+**/.env
+**/.env.*

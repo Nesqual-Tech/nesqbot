@@ -1,0 +1,47 @@
+{
+  "expo": {
+    "name": "Nesq Bot",
+    "slug": "nesqbot",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "nesqbot",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.nesqualtech.nesqbot",
+      "infoPlist": {
+        "NSFaceIDUsageDescription": "Unlock the stored Nesq Bot session token.",
+        "UIBackgroundModes": ["remote-notification"],
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "android": {
+      "package": "com.nesqualtech.nesqbot",
+      "permissions": ["android.permission.POST_NOTIFICATIONS"]
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      [
+        "expo-notifications",
+        {
+          "color": "#8499d9"
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "entra": {
+        "tenantId": "",
+        "clientId": "",
+        "scope": "",
+        "redirectUri": "nesqbot://auth"
+      }
+    }
+  }
+}

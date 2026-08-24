@@ -1,0 +1,21 @@
+# Prettier is run with `--ignore-path .gitignore --ignore-path .prettierignore`,
+# so this file only needs the things git tracks but prettier must not rewrite.
+
+# Lockfiles are npm's output, not ours. Reformatting them creates noisy diffs
+# and risks confusing the resolver.
+package-lock.json
+**/package-lock.json
+
+# Generated or vendored
+**/dist/
+**/build/
+**/.expo/
+apps/desktop/src-tauri/target/
+data/
+
+# Bicep parameter output and k8s templates use their own conventions
+**/*.bicepparam
+
+# The binding API contract. Read-only for every lane; formatting is an edit,
+# and reflowing its tables is not worth the risk of a semantic diff.
+docs/API.md

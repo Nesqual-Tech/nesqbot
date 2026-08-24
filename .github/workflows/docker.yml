@@ -1,0 +1,175 @@
+name: Docker images
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - "apps/api/**"
+      - "apps/worker/**"
+      - "infra/bot-desktop/**"
+      - ".github/workflows/docker.yml"
+  pull_request:
+    paths:
+      - "apps/api/**"
+      - "apps/worker/**"
+      - "infra/bot-desktop/**"
+      - ".github/workflows/docker.yml"
+  workflow_dispatch:
+    inputs:
+      push:
+        description: "Push images to the registry"
+        type: boolean
+        default: false
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: api
+            context: apps/api
+            dockerfile: apps/api/Dockerfile
+          - name: worker
+            context: apps/worker
+            dockerfile: apps/worker/Dockerfile
+          - name: bot-desktop
+            context: infra/bot-desktop
+            dockerfile: infra/bot-desktop/Dockerfile
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decide whether to push
+        id: decide
+        env:
+          # Forks cannot read secrets and cannot write to this repo's GHCR
+          # namespace, so they build only. Same for pull requests.
+          IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+        run: |
+          push=false
+          if [ "${{ github.event_name }}" = "push" ] && [ "$IS_FORK" != "true" ]; then
+            push=true
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.push }}" = "true" ]; then
+            push=true
+          fi
+          echo "push=$push" >> "$GITHUB_OUTPUT"
+          echo "Push decision: $push (event=${{ github.event_name }} fork=$IS_FORK)"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: steps.decide.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Optional Azure Container Registry mirror. Skipped entirely when the
+      # secrets are absent, so a secret-less fork or a fresh clone still gets a
+      # green build instead of a credentials error.
+      - name: Check for ACR credentials
+        id: acr
+        env:
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+        run: |
+          if [ -n "$ACR_LOGIN_SERVER" ] && [ -n "$ACR_USERNAME" ] && [ -n "$ACR_PASSWORD" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::ACR secrets not configured - GHCR only"
+          fi
+
+      - name: Log in to ACR
+        if: steps.decide.outputs.push == 'true' && steps.acr.outputs.available == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Compute tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/nesqbot-${{ matrix.name }}
+            ${{ steps.acr.outputs.available == 'true' && format('{0}/nesqbot/{1}', secrets.ACR_LOGIN_SERVER, matrix.name) || '' }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=short
+          # No `latest`: every deployment target pins an explicit tag.
+          flavor: |
+            latest=false
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: ${{ steps.decide.outputs.push == 'true' }}
+          load: ${{ steps.decide.outputs.push != 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Stamps the image with what it is. `GET /api/health` reports this as
+          # `build`, distinct from the hand-maintained contract `version`, and
+          # the desktop footer shows it. `metadata-action` sets `version` to the
+          # semver on a tag push and to the branch or short sha otherwise, so
+          # every image says truthfully where it came from. Only the api
+          # Dockerfile declares the ARG; the others ignore it harmlessly.
+          build-args: |
+            NESQ_BUILD=${{ steps.meta.outputs.version }}
+          # GitHub's own layer cache: no registry credentials needed, so this
+          # works on forks too.
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
+          provenance: false
+
+      - name: Smoke test the image
+        if: steps.decide.outputs.push != 'true'
+        run: |
+          tag=$(echo "${{ steps.meta.outputs.tags }}" | head -n1)
+          echo "Inspecting $tag"
+          docker image inspect "$tag" --format 'size={{.Size}} entrypoint={{.Config.Entrypoint}} cmd={{.Config.Cmd}} user={{.Config.User}}'
+          case "${{ matrix.name }}" in
+            api|worker)
+              # Imports must resolve without a database.
+              docker run --rm --entrypoint python "$tag" -c "import sys; print(sys.version)"
+              ;;
+          esac
+          case "${{ matrix.name }}" in
+            api)
+              # The build stamp must survive into the image. If the build-arg is
+              # ever dropped this reports "unknown", the desktop footer silently
+              # falls back to the contract version, and a good deploy looks bad.
+              want="${{ steps.meta.outputs.version }}"
+              got=$(docker run --rm --entrypoint python "$tag" -c "import os; print(os.environ.get('NESQ_BUILD', ''))")
+              echo "NESQ_BUILD=$got (want $want)"
+              test "$got" = "$want"
+              ;;
+            bot-desktop)
+              docker run --rm --entrypoint /opt/nesq/venv/bin/python "$tag" \
+                -c "import fastapi, PIL, uvicorn; print('sidecar deps ok')"
+              docker run --rm --entrypoint bash "$tag" -n /entrypoint.sh
+              ;;
+          esac

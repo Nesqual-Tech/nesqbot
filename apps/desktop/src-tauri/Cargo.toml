@@ -1,0 +1,72 @@
+[package]
+name = "nesqbot"
+version = "0.4.0"
+description = "Nesq Bot desktop"
+authors = ["Nesqual Tech"]
+edition = "2021"
+
+[lib]
+name = "nesqbot_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# `tray-icon` + `image-png` are needed for the system tray; both ship with Tauri.
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-shell = "2"
+# Deep links: nesqbot://approval/<id> handed off from the mobile app, and
+# nesqbot://auth?code=ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ coming back from the browser after Entra sign-in.
+tauri-plugin-deep-link = "2"
+# Redeems the Entra authorization code -- see `src/entra.rs`.
+#
+# This deliberately does NOT go through `tauri-plugin-http`. That plugin also
+# runs its client in this process, but it forwards the webview's origin with the
+# request, so Entra still answered AADSTS9002326 ("cross-origin token redemption
+# is permitted only for the Single-Page Application client-type"). Setting
+# `Origin: ""` on the plugin's fetch, which is documented as suppressing the
+# header, did not change that either -- both were shipped and both failed.
+#
+# `reqwest` sends no `Origin` unless one is explicitly added, which removes the
+# failure mode rather than arguing with it. Pinned to the 0.12 line and to
+# rustls because that is what was already in the lock file: the token client
+# therefore reuses the TLS stack the binary had rather than linking a second
+# one. `default-features = false` keeps native-tls/OpenSSL out; `charset` and
+# `http2` restore what the default feature set would have given us.
+reqwest = { version = "0.12", default-features = false, features = [
+  "rustls-tls",
+  "charset",
+  "http2",
+  "json",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# Only for the live Entra probes in `src/entra.rs` (`#[tokio::test]`). Tokio is
+# already in the tree via Tauri; this just exposes the test macro. Dev-only, so
+# nothing here reaches the shipped bundle.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# Required for deep links to work at all on Windows and Linux: those platforms
+# do not deliver a URL to a running process, they launch a *new* one with the
+# URL as its only argument. With the `deep-link` feature this plugin hands that
+# argument to the instance already running, which is the only way `on_open_url`
+# fires ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â and therefore the only way the `nesqbot://auth` redirect reaches the
+# sign-in that is waiting for it. Desktop only; mobile delivers URLs natively.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+
+# OS credential store for the Entra refresh token and the Nesq Bot session JWT.
+# Per-target features because `keyring` has no default backend: Credential
+# Manager on Windows, Keychain on macOS, Secret Service on Linux. Selecting them
+# per target also keeps dbus/openssl out of the Windows build.
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3", features = ["apple-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }

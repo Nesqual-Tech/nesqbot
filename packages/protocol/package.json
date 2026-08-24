@@ -1,0 +1,39 @@
+{
+  "name": "@nesqbot/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared Nesq Bot API types, risk helpers and event unions",
+  "license": "SEE LICENSE IN LICENSE",
+  "type": "module",
+  "sideEffects": false,
+  "//": [
+    "SOURCE-ONLY PACKAGE — do not 'fix' the fields below to point at dist/.",
+    "main/types/exports resolve to TypeScript source on purpose: the only",
+    "consumers are Vite (apps/desktop), Metro (apps/mobile) and tsc, all of",
+    "which compile TS directly. Pointing at dist/ would require a build step",
+    "before every app start and would break hot reload across packages.",
+    "`npm run build` still emits dist/ — for declaration output and CI",
+    "typechecking only, never for consumption."
+  ],
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "check:api": "node scripts/check-api-parity.mjs",
+    "clean": "tsc -b --clean"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "name": "@nesqbot/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "expo-router/entry",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "ios": "expo start --ios",
+    "typecheck": "tsc --noEmit",
+    "check": "node src/lib/__checks__/smoke.mjs"
+  },
+  "dependencies": {
+    "@nesqbot/protocol": "file:../../packages/protocol",
+    "@nesqbot/ui": "file:../../packages/ui",
+    "expo": "~52.0.39",
+    "expo-asset": "~11.0.5",
+    "expo-auth-session": "~6.0.3",
+    "expo-build-properties": "~0.13.3",
+    "expo-constants": "~17.0.8",
+    "expo-crypto": "~14.0.2",
+    "expo-device": "~7.0.3",
+    "expo-linking": "~7.0.5",
+    "expo-notifications": "~0.29.14",
+    "expo-router": "~4.0.19",
+    "expo-secure-store": "~14.0.1",
+    "expo-status-bar": "~2.0.1",
+    "expo-web-browser": "~14.0.2",
+    "react": "18.3.1",
+    "react-native": "0.76.9",
+    "react-native-safe-area-context": "4.12.0",
+    "react-native-screens": "~4.4.0",
+    "react-native-webview": "13.12.5"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.2",
+    "@types/react": "~18.3.12",
+    "babel-preset-expo": "~12.0.0",
+    "typescript": "^5.8.2"
+  }
+}

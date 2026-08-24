@@ -1,0 +1,25 @@
+# Build context for the worker image.
+#
+# Deny by default, then re-admit what the Dockerfile actually COPYs. Note that
+# requirements-dev.txt is admitted for CI convenience but the image itself only
+# installs requirements.txt - keep it that way so pytest and its transitive
+# dependencies never ship to production.
+*
+
+!requirements.txt
+!requirements-dev.txt
+!worker/
+
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.DS_Store
+**/Thumbs.db
+**/*.log
+**/.env
+**/.env.*
+**/tests/
+pytest.ini

@@ -1,0 +1,529 @@
+name: macOS desktop
+
+# Tauri cannot cross-compile a macOS bundle, so the Windows machine this repo is
+# developed on can never produce a `.app` or a `.dmg`. A hosted macOS runner can.
+# This workflow is the only thing in the repository that actually builds the
+# Apple desktop target - see `docs/mobile-release.md` for the wider picture.
+#
+# COST WARNING: macOS runner minutes bill at a 10x multiplier on private repos.
+# A cold Tauri build is ~15-25 minutes, so one universal build is roughly 200
+# billable minutes. That is why the path filter is narrow, why the default is a
+# single universal build rather than three per-architecture builds, and why the
+# Rust cache below matters.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - "apps/desktop/**"
+      - "packages/**"
+      - "package.json"
+      - ".github/workflows/macos.yml"
+  # No `pull_request:` trigger, deliberately. At a 10x minute multiplier one
+  # macOS build costs roughly what a whole day of the Linux CI does, and
+  # `packages/**` is touched by every UI change. Validate a branch on demand with
+  # `workflow_dispatch` instead - the branch selector on the Run workflow dialog
+  # builds any ref.
+  workflow_dispatch:
+    inputs:
+      architectures:
+        description: "Which architectures to build"
+        type: choice
+        default: universal
+        options:
+          - universal
+          - apple-silicon
+          - intel
+          - all
+      force_unsigned:
+        description: "Build unsigned even if the Apple secrets are configured"
+        type: boolean
+        default: false
+
+# NOTE on the `tags:` trigger above - GitHub applies `paths` to tag pushes too,
+# comparing against the commit the tag points at. A release tag placed on a
+# commit that touched none of these paths will therefore NOT start this
+# workflow. Use `workflow_dispatch` to build a release deliberately.
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "20"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Cheap Linux job. Two purposes: decide the build matrix, and refuse to spend
+  # 10x-priced macOS minutes on a half-configured signing setup.
+  plan:
+    name: Plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      sign: ${{ steps.signing.outputs.sign }}
+      notarize: ${{ steps.signing.outputs.notarize }}
+      label: ${{ steps.signing.outputs.label }}
+
+    steps:
+      - name: Build matrix
+        id: matrix
+        env:
+          CHOICE: ${{ inputs.architectures || 'universal' }}
+        run: |
+          # `universal-apple-darwin` is not a rustup target - it is a Tauri
+          # pseudo-target that compiles both real targets and lipos them into
+          # one binary. The per-architecture entries exist for bisecting a
+          # failure that only reproduces on one slice.
+          universal='{"name":"universal","target":"universal-apple-darwin"}'
+          arm='{"name":"apple-silicon","target":"aarch64-apple-darwin"}'
+          intel='{"name":"intel","target":"x86_64-apple-darwin"}'
+
+          case "$CHOICE" in
+            universal)     include="$universal" ;;
+            apple-silicon) include="$arm" ;;
+            intel)         include="$intel" ;;
+            all)           include="$universal,$arm,$intel" ;;
+            *) echo "::error::unknown architectures input '$CHOICE'"; exit 1 ;;
+          esac
+
+          echo "matrix={\"include\":[$include]}" >> "$GITHUB_OUTPUT"
+          echo "Building: $CHOICE"
+
+      - name: Resolve signing configuration
+        id: signing
+        env:
+          # Referenced by name only. Values are never echoed; the tests below
+          # are emptiness tests. GitHub masks them in logs regardless.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          FORCE_UNSIGNED: ${{ inputs.force_unsigned }}
+        run: |
+          set -euo pipefail
+
+          # The six secrets form two all-or-nothing groups. A whole group being
+          # absent is a supported configuration and is reported. A group being
+          # PARTIALLY present is not: it is the failure mode where the build
+          # succeeds, looks official, and is not actually signed. That fails here,
+          # before any macOS minutes are spent.
+          sign_group="APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY"
+          notary_group="APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID"
+
+          count_set() {
+            local n=0
+            for name in $1; do
+              if [ -n "${!name:-}" ]; then n=$((n + 1)); fi
+            done
+            echo "$n"
+          }
+          missing_of() {
+            for name in $1; do
+              if [ -z "${!name:-}" ]; then printf '%s ' "$name"; fi
+            done
+            echo
+          }
+
+          sign_set=$(count_set "$sign_group")
+          notary_set=$(count_set "$notary_group")
+
+          fail=0
+          if [ "$sign_set" -gt 0 ] && [ "$sign_set" -lt 3 ]; then
+            echo "::error title=Code signing is half configured::Set all of $sign_group, or none of them. Missing: $(missing_of "$sign_group")"
+            fail=1
+          fi
+          if [ "$notary_set" -gt 0 ] && [ "$notary_set" -lt 3 ]; then
+            echo "::error title=Notarisation is half configured::Set all of $notary_group, or none of them. Missing: $(missing_of "$notary_group")"
+            fail=1
+          fi
+          if [ "$notary_set" -eq 3 ] && [ "$sign_set" -eq 0 ]; then
+            echo "::error title=Notarisation without signing::Apple will not notarise an unsigned bundle. Add $sign_group or remove $notary_group."
+            fail=1
+          fi
+          [ "$fail" -eq 0 ] || exit 1
+
+          # Even with complete secrets, only deliberate builds sign. A pull
+          # request should not be minting signed binaries or queueing jobs with
+          # Apple's notary service.
+          eligible=false
+          case "${{ github.event_name }}" in
+            push|workflow_dispatch) eligible=true ;;
+          esac
+          if [ "$FORCE_UNSIGNED" = "true" ]; then
+            eligible=false
+            echo "::notice::force_unsigned requested - building unsigned"
+          fi
+
+          sign=false
+          notarize=false
+          if [ "$sign_set" -eq 3 ] && [ "$eligible" = "true" ]; then
+            sign=true
+            if [ "$notary_set" -eq 3 ]; then notarize=true; fi
+          fi
+
+          if [ "$sign" = "true" ] && [ "$notarize" = "true" ]; then
+            label=signed-notarized
+          elif [ "$sign" = "true" ]; then
+            label=signed-unnotarized
+            echo "::warning title=Signed but not notarised::Gatekeeper blocks a Developer ID app that has not been notarised. Add $notary_group to complete the chain."
+          else
+            label=UNSIGNED
+          fi
+
+          {
+            echo "sign=$sign"
+            echo "notarize=$notarize"
+            echo "label=$label"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "signing secrets present: $sign_set/3   notarisation secrets present: $notary_set/3"
+          echo "decision: sign=$sign notarize=$notarize label=$label"
+
+          if [ "$label" = "UNSIGNED" ]; then
+            echo "::notice title=Unsigned build::No Apple credentials in play. The artifact runs locally after a Gatekeeper override and is not distributable."
+          fi
+
+  # ---------------------------------------------------------------------------
+  build:
+    name: ${{ matrix.name }} (${{ needs.plan.outputs.label }})
+    needs: plan
+    # Pinned rather than `macos-latest`, matching how every other workflow here
+    # pins `ubuntu-24.04`: a runner image rolling forward under a release build
+    # is not a surprise anyone wants. macos-15 is arm64 and cross-compiles the
+    # x86_64 slice natively. macos-14 is deprecated; bump to macos-26 when this
+    # one is.
+    runs-on: macos-15
+    timeout-minutes: 75
+
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+
+    env:
+      TARGET: ${{ matrix.target }}
+      ARCH_NAME: ${{ matrix.name }}
+      SIGN_LABEL: ${{ needs.plan.outputs.label }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/desktop/package-lock.json
+
+      - name: Rust toolchain
+        run: |
+          set -euo pipefail
+          # rustup ships in the macOS runner image; install it if that ever
+          # stops being true rather than failing with "command not found".
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --profile minimal --default-toolchain stable
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          # The universal pseudo-target needs both real targets present.
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          rustc --version
+          rustup target list --installed
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            apps/desktop/src-tauri/target
+          # The target directory is in here deliberately: a cold Tauri build is
+          # the single largest cost in this workflow. It is also ~3 GB per
+          # matrix entry against a 10 GB per-repository cache budget, so
+          # building `all` three architectures regularly will thrash the cache.
+          # If that becomes the problem, drop the target line and keep only the
+          # registry, or move to Swatinem/rust-cache which prunes it.
+          #
+          # Cargo.toml is in the key alongside Cargo.lock so the cache still
+          # keys correctly if the lock file is ever removed - hashFiles
+          # tolerates a pattern that matches nothing.
+          key: cargo-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('apps/desktop/src-tauri/Cargo.lock', 'apps/desktop/src-tauri/Cargo.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ matrix.target }}-
+
+      - name: Install node dependencies
+        run: |
+          set -euo pipefail
+          # Root install covers apps/desktop and packages/* through the
+          # workspaces array. apps/mobile is deliberately not a workspace and is
+          # not needed here.
+          if node -e "process.exit(require('./package.json').workspaces ? 0 : 1)"; then
+            npm install --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+            npm install --prefix apps/desktop --no-audit --no-fund
+          fi
+
+      - name: Inspect the macOS bundle configuration
+        working-directory: apps/desktop
+        run: |
+          set -euo pipefail
+          # `plutil` only exists here, so this is the first opportunity in the
+          # whole toolchain to have Apple itself validate the entitlements.
+          plutil -lint src-tauri/entitlements.plist
+          echo "::group::entitlements"
+          plutil -p src-tauri/entitlements.plist
+          echo "::endgroup::"
+          echo "::group::tauri info"
+          npm run --silent tauri -- info || true
+          echo "::endgroup::"
+          node -e "
+            const c = require('./src-tauri/tauri.conf.json');
+            const mac = c.bundle.macOS || {};
+            console.log('productName      ', c.productName);
+            console.log('version          ', c.version);
+            console.log('identifier       ', c.identifier);
+            console.log('minimumSystemVer ', mac.minimumSystemVersion);
+            console.log('hardenedRuntime  ', mac.hardenedRuntime);
+            console.log('entitlements     ', mac.entitlements);
+            if (!mac.entitlements) { console.error('bundle.macOS.entitlements is missing'); process.exit(1); }
+            if (mac.signingIdentity) {
+              console.error('bundle.macOS.signingIdentity is set in a tracked file - it belongs in APPLE_SIGNING_IDENTITY');
+              process.exit(1);
+            }
+          "
+
+      - name: Build
+        id: build
+        working-directory: apps/desktop
+        env:
+          # Present only when the plan job decided to sign. Tauri's bundler
+          # imports the .p12 into a temporary keychain itself - no `security
+          # create-keychain` dance is needed here.
+          APPLE_CERTIFICATE: ${{ needs.plan.outputs.sign == 'true' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ needs.plan.outputs.sign == 'true' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ needs.plan.outputs.sign == 'true' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          # Notarisation. Tauri only notarises when the whole trio is set.
+          APPLE_ID: ${{ needs.plan.outputs.notarize == 'true' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ needs.plan.outputs.notarize == 'true' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ needs.plan.outputs.notarize == 'true' && secrets.APPLE_TEAM_ID || '' }}
+        run: |
+          set -euo pipefail
+          # `beforeBuildCommand` in tauri.conf.json runs `npm run build`
+          # (tsc --noEmit && vite build), so the web bundle is built here too.
+          #
+          # CI=true is already set by GitHub. Tauri passes --skip-jenkins to
+          # bundle_dmg.sh when it sees it, which is what stops the AppleScript
+          # Finder layout from timing out on a headless runner. The consequence
+          # is that bundle.macOS.dmg's windowSize/appPosition are NOT applied to
+          # a CI-built DMG - the disk image is functional but plainly laid out.
+          npm run tauri -- build --target "$TARGET" --bundles app,dmg --verbose
+
+      # Staging comes BEFORE verification on purpose. An assertion failure below
+      # should still leave a downloadable bundle to look at - the whole point of
+      # running this is that nobody here has a Mac to reproduce it on.
+      - name: Stage the bundles
+        id: stage
+        if: ${{ !cancelled() && steps.build.outcome != 'skipped' }}
+        run: |
+          set -euo pipefail
+          bundle_dir="apps/desktop/src-tauri/target/$TARGET/release/bundle"
+          out="artifacts"
+          mkdir -p "$out"
+
+          if [ ! -d "$bundle_dir" ]; then
+            echo "::error::no bundle directory at $bundle_dir"
+            exit 1
+          fi
+          echo "::group::bundle tree"
+          find "$bundle_dir" -maxdepth 2
+          echo "::endgroup::"
+
+          app=$(find "$bundle_dir/macos" -maxdepth 1 -name '*.app' 2>/dev/null | head -n1 || true)
+          if [ -z "$app" ]; then
+            echo "::error::no .app produced"
+            exit 1
+          fi
+          echo "app: $app"
+
+          version=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")
+          base="NesqBot-${version}-macos-${ARCH_NAME}-${SIGN_LABEL}"
+
+          # `ditto` is mandatory here. actions/upload-artifact follows symlinks
+          # and drops the executable bit, which silently corrupts a .app; a zip
+          # made by ditto survives the round trip intact.
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$out/${base}.app.zip"
+
+          dmg=$(find "$bundle_dir/dmg" -maxdepth 1 -name '*.dmg' 2>/dev/null | head -n1 || true)
+          if [ -n "$dmg" ]; then
+            cp "$dmg" "$out/${base}.dmg"
+          else
+            echo "::warning::no .dmg produced - the .app is still available"
+          fi
+
+          (cd "$out" && shasum -a 256 ./* > "$RUNNER_TEMP/SHA256SUMS.txt")
+          mv "$RUNNER_TEMP/SHA256SUMS.txt" "$out/SHA256SUMS.txt"
+          ls -lh "$out"
+          echo "app=$app" >> "$GITHUB_OUTPUT"
+
+      - name: Upload
+        if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          # The signing state is in the artifact name on purpose. Somebody will
+          # download this months from now with no memory of how it was built.
+          name: nesqbot-macos-${{ matrix.name }}-${{ needs.plan.outputs.label }}
+          path: artifacts
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Verify the bundle
+        if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
+        env:
+          APP: ${{ steps.stage.outputs.app }}
+        run: |
+          set -euo pipefail
+          plist="$APP/Contents/Info.plist"
+          exe=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")
+          bin="$APP/Contents/MacOS/$exe"
+
+          echo "::group::Info.plist"
+          plutil -p "$plist"
+          echo "::endgroup::"
+
+          # These are the failures that break the app rather than the build. A
+          # missing URL scheme means the Entra sign-in redirect and the approval
+          # hand-off from the phone both land nowhere, and the app just looks
+          # like it is hanging.
+          got_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")
+          want_id=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').identifier")
+          [ "$got_id" = "$want_id" ] || { echo "::error::CFBundleIdentifier is $got_id, expected $want_id"; exit 1; }
+
+          got_min=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$plist" 2>/dev/null || echo "(absent)")
+          want_min=$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').bundle.macOS.minimumSystemVersion")
+          [ "$got_min" = "$want_min" ] || { echo "::error::LSMinimumSystemVersion is $got_min, expected $want_min"; exit 1; }
+
+          if plutil -p "$plist" | grep -q '"nesqbot"'; then
+            echo "deep-link scheme nesqbot:// is registered in CFBundleURLTypes"
+          else
+            echo "::error::CFBundleURLTypes has no nesqbot scheme - deep links and the Entra sign-in redirect will not reach the app"
+            exit 1
+          fi
+
+          echo "::group::architectures"
+          lipo -archs "$bin"
+          echo "::endgroup::"
+          if [ "$TARGET" = "universal-apple-darwin" ]; then
+            archs=$(lipo -archs "$bin")
+            case "$archs" in
+              *arm64*) ;; *) echo "::error::universal binary has no arm64 slice: $archs"; exit 1 ;;
+            esac
+            case "$archs" in
+              *x86_64*) ;; *) echo "::error::universal binary has no x86_64 slice: $archs"; exit 1 ;;
+            esac
+            echo "universal binary confirmed: $archs"
+          fi
+
+          # `|| echo` throughout: an unsigned bundle makes every one of these
+          # exit non-zero, and that is the expected state for a build with no
+          # credentials. The hard assertion for a signed build is further down.
+          echo "::group::codesign"
+          codesign --display --verbose=4 "$APP" 2>&1 || echo "not signed"
+          codesign --verify --deep --strict --verbose=2 "$APP" 2>&1 || echo "signature verification failed (expected when unsigned)"
+          codesign --display --entitlements - --xml "$APP" 2>/dev/null | plutil -p - 2>/dev/null || echo "no embedded entitlements (expected when unsigned)"
+          echo "::endgroup::"
+
+          echo "::group::gatekeeper assessment"
+          spctl --assess --type execute --verbose=4 "$APP" 2>&1 || echo "rejected by Gatekeeper (expected unless signed AND notarised)"
+          echo "::endgroup::"
+
+          case "$SIGN_LABEL" in
+            signed-*)
+              # Tauri warns and carries on in some signing failure modes, so an
+              # artifact labelled "signed" must be proved signed here or the
+              # label is a lie.
+              codesign --verify --deep --strict "$APP" || {
+                echo "::error::artifact is labelled signed but the signature does not verify"
+                exit 1
+              }
+              codesign --display --entitlements - --xml "$APP" 2>/dev/null \
+                | grep -q 'com.apple.security.cs.allow-jit' || {
+                  echo "::error::hardened-runtime entitlements are not embedded in the signature"
+                  exit 1
+                }
+              ;;
+          esac
+
+          if [ "$SIGN_LABEL" = "signed-notarized" ]; then
+            # A stapled ticket is the only proof notarisation actually happened.
+            xcrun stapler validate "$APP" || {
+              echo "::error::the build claims to be notarised but no stapled ticket is present"
+              exit 1
+            }
+          fi
+
+      - name: Summary
+        if: ${{ !cancelled() }}
+        run: |
+          {
+            echo "### macOS ${ARCH_NAME} — ${SIGN_LABEL}"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Rust target | \`${TARGET}\` |"
+            echo "| Runner | \`macos-15\` (arm64) |"
+            echo "| Artifact | \`nesqbot-macos-${ARCH_NAME}-${SIGN_LABEL}\` |"
+            echo "| Build outcome | ${{ steps.build.outcome }} |"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          case "$SIGN_LABEL" in
+            UNSIGNED)
+              {
+                echo "> [!WARNING]"
+                echo "> **This build is not signed and not notarised. Do not distribute it.**"
+                echo ">"
+                echo "> Gatekeeper will refuse to open it. On your own machine:"
+                echo ">"
+                echo "> \`\`\`"
+                echo "> unzip NesqBot-*-macos-*.app.zip"
+                echo "> xattr -dr com.apple.quarantine \"Nesq Bot.app\""
+                echo "> open \"Nesq Bot.app\""
+                echo "> \`\`\`"
+                echo ">"
+                echo "> Signing needs an Apple Developer Program membership and six repository"
+                echo "> secrets — see \`docs/mobile-release.md\`."
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            signed-unnotarized)
+              {
+                echo "> [!WARNING]"
+                echo "> Signed with a Developer ID certificate but **not notarised**, so Gatekeeper"
+                echo "> still blocks it on a machine that has not seen it before. Set \`APPLE_ID\`,"
+                echo "> \`APPLE_PASSWORD\` and \`APPLE_TEAM_ID\` to finish the chain."
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            signed-notarized)
+              {
+                echo "> [!NOTE]"
+                echo "> Signed, notarised and stapled. This one is distributable."
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+          esac
+
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "The DMG is built with \`--skip-jenkins\` because \`CI=true\`, so the custom Finder" >> "$GITHUB_STEP_SUMMARY"
+          echo "window layout in \`bundle.macOS.dmg\` is not applied to CI disk images." >> "$GITHUB_STEP_SUMMARY"

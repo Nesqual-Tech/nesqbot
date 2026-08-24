@@ -1,0 +1,4 @@
+# Minimal dynamic config placeholder for temporal auto-setup
+limit.maxIDLength:
+  - value: 255
+    constraints: {}

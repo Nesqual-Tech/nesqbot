@@ -1,0 +1,163 @@
+name: Infra
+
+# PR-only by design: a what-if against a live subscription is a review aid, not
+# something to run on every push to a branch.
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - ".github/workflows/infra.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: infra-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write # OIDC federated login to Azure
+  pull-requests: write # what-if summary comment
+
+jobs:
+  build:
+    name: Bicep build + lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Bicep
+        run: |
+          az bicep install
+          az bicep version
+
+      - name: Build every template
+        run: |
+          status=0
+          while IFS= read -r template; do
+            echo "::group::az bicep build $template"
+            az bicep build --file "$template" --outfile /dev/null || status=1
+            echo "::endgroup::"
+          done < <(find infra -name '*.bicep')
+          exit $status
+
+      - name: Build parameter files
+        # Secure params come from the environment; CI uses throwaway values
+        # purely so the parameter file resolves. Nothing is deployed here.
+        env:
+          NESQBOT_PG_PASSWORD: ci-placeholder-not-a-real-password
+          NESQBOT_JWT_SECRET: ci-placeholder-jwt-secret-value-32chars
+          NESQBOT_WORKER_TOKEN: ci-placeholder-worker-token-value-32ch
+          NESQBOT_SIDECAR_TOKEN: ci-placeholder-sidecar-token-24c
+        run: |
+          status=0
+          while IFS= read -r params; do
+            echo "::group::az bicep build-params $params"
+            az bicep build-params --file "$params" --outfile /dev/null || status=1
+            echo "::endgroup::"
+          done < <(find infra -name '*.bicepparam')
+          exit $status
+
+      - name: Kubernetes manifest sanity
+        run: |
+          # The desktop manifest is a placeholder template, so substitute
+          # before parsing it as YAML.
+          sed -e 's/BOT_SLUG/citest/g' \
+              -e 's|ACR_LOGIN_SERVER|ci.azurecr.io|g' \
+              -e 's/IMAGE_TAG/v0.0.0/g' \
+              -e 's/NAMESPACE/nesq-desktops/g' \
+              -e 's/STORAGE_CLASS/managed-csi/g' \
+              infra/bot-desktop/k8s/desktop-template.yaml > /tmp/desktop.yaml
+          python3 -c "
+          import sys, yaml
+          docs = [d for d in yaml.safe_load_all(open('/tmp/desktop.yaml')) if d]
+          for d in docs:
+              print(f\"{d['kind']:24} {d['metadata']['name']}\")
+          assert {d['kind'] for d in docs} >= {
+              'Deployment', 'Service', 'PersistentVolumeClaim', 'NetworkPolicy'
+          }, 'template lost a required object'
+          print(f'{len(docs)} objects OK')
+          "
+
+  what-if:
+    name: What-if
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    needs: build
+    # Forks never get the OIDC identity, so do not even queue the job for them.
+    if: github.event.pull_request.head.repo.fork != true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for Azure credentials
+        id: creds
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+        run: |
+          if [ -n "$AZURE_CLIENT_ID" ] && [ -n "$AZURE_TENANT_ID" ] \
+             && [ -n "$AZURE_SUBSCRIPTION_ID" ] && [ -n "$AZURE_RESOURCE_GROUP" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Azure OIDC secrets not configured - skipping what-if. Set AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID and AZURE_RESOURCE_GROUP to enable it."
+          fi
+
+      - name: Azure login (OIDC)
+        if: steps.creds.outputs.available == 'true'
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deployment what-if
+        if: steps.creds.outputs.available == 'true'
+        id: whatif
+        env:
+          # Real secrets so the template validates; what-if changes nothing.
+          NESQBOT_PG_PASSWORD: ${{ secrets.NESQBOT_PG_PASSWORD || 'ci-placeholder-not-a-real-password' }}
+          NESQBOT_JWT_SECRET: ${{ secrets.NESQBOT_JWT_SECRET || 'ci-placeholder-jwt-secret-value-32chars' }}
+          NESQBOT_WORKER_TOKEN: ${{ secrets.NESQBOT_WORKER_TOKEN || 'ci-placeholder-worker-token-value-32ch' }}
+          NESQBOT_SIDECAR_TOKEN: ${{ secrets.NESQBOT_SIDECAR_TOKEN || 'ci-placeholder-sidecar-token-24c' }}
+        run: |
+          set -o pipefail
+          az deployment group what-if \
+            --resource-group "${{ secrets.AZURE_RESOURCE_GROUP }}" \
+            --template-file infra/azure/main.bicep \
+            --parameters infra/azure/main.bicepparam \
+            --no-pretty-print > whatif.json 2> whatif.err || {
+              echo "::error::what-if failed"; cat whatif.err; exit 1; }
+
+          {
+            echo "### Bicep what-if"
+            echo
+            echo '```'
+            python3 - <<'PY'
+          import json
+          changes = json.load(open("whatif.json")).get("changes", [])
+          counts = {}
+          for change in changes:
+              counts[change["changeType"]] = counts.get(change["changeType"], 0) + 1
+          for kind, count in sorted(counts.items()):
+              print(f"{kind:12} {count}")
+          print()
+          for change in changes:
+              if change["changeType"] != "NoChange":
+                  print(f'{change["changeType"]:12} {change["resourceId"].split("/")[-1]}')
+          PY
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload what-if output
+        if: steps.creds.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bicep-whatif
+          path: whatif.json
+          retention-days: 14
+          if-no-files-found: ignore

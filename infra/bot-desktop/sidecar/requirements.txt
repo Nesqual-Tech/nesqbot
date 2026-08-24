@@ -1,0 +1,10 @@
+fastapi==0.115.12
+uvicorn==0.34.0
+pillow==11.1.0
+pydantic==2.11.1
+# CDP transport for /browser/*. Chosen over playwright/pyppeteer because those
+# ship (or download) their own browser binary - this image already has Chromium
+# and is 1.66 GB. websocket-client is a pure-python wheel, ~60 KB installed,
+# no compiled extensions, and the only new dependency the CDP layer needs: the
+# HTTP half of CDP (/json/version, /json/list) goes through stdlib urllib.
+websocket-client==1.8.0

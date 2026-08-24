@@ -1,0 +1,11 @@
+# Local Expo state: device history, dev-server settings and the generated
+# typed-route declarations (.expo/types/router.d.ts). Machine-specific.
+#
+# The root .gitignore already lists `apps/mobile/.expo/`, but `expo-doctor`
+# reads only the project's own .gitignore and reports the directory as
+# uncommitted-but-tracked without this file — a check that fails the moment
+# anyone runs `expo start` here. Duplicated deliberately, not by oversight.
+.expo/
+
+# `expo export` output.
+dist/

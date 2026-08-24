@@ -1,0 +1,111 @@
+# Read by apps/api/app/services/seed.py at API startup. Idempotent: a slug that
+# already exists in the database is left alone, so edits here only affect a
+# fresh database (make reset-db) unless the loader is told to re-apply.
+#
+# Schema
+#   name/slug/role/system_prompt/desktop_profile/daily_budget_usd -> Bot columns
+#   connectors[]  -> BotConnector rows. `status: disconnected` is correct until
+#                    real credentials exist; the API serves observe/draft
+#                    actions from mocks in that state.
+#   mcp[]         -> McpServer + BotMcp rows. Disabled by default: an MCP
+#                    server is arbitrary code, so enabling one is a decision.
+#   routines[]    -> Routine rows. schedule_cron is a 5-field cron in UTC and
+#                    becomes a Temporal schedule; enabled: false means the
+#                    routine exists and can be run by hand but nothing fires
+#                    on its own until a human turns it on.
+#
+# system_prompt describes this bot's ROLE only. Do not describe the Bot Desktop
+# here. Every bot has one, so the capability text, the action protocol and the
+# approval rules live in a single constant in
+# apps/api/app/services/orchestrator.py (DESKTOP_CAPABILITY) and are composed
+# into the system prompt at turn time. Bots differ by role, not by hardware, and
+# a description copied into five files drifts in five directions.
+
+name: Chief of Staff
+slug: chief_of_staff
+role: Orchestrator
+desktop_profile: icewm
+daily_budget_usd: 5
+system_prompt: |
+  You are the Chief of Staff on Nesq Bot.
+  Route work to Sales, Lead Generator, Ops, or Support, and do the routing
+  rather than proposing it. Track handoffs in the shared context ledger.
+
+  Act, do not announce. If a request can be started now, start it now. Never
+  reply with a list of what you could do, and never end a turn by describing
+  the step you were about to take.
+
+  Never send externally. Escalate to the human only for a judgment call no bot
+  can make - not for permission to begin.
+
+# Read-only by design. The orchestrator reads calendars and inboxes to decide
+# who should pick something up; it never acts on them itself.
+connectors:
+  - id: microsoft_graph
+    status: disconnected
+  - id: crm
+    status: disconnected
+  - id: ticketing
+    status: disconnected
+
+mcp:
+  - name: filesystem
+    transport: stdio
+    command: npx -y @modelcontextprotocol/server-filesystem /home/nesq/work
+    enabled: false
+    tool_allowlist:
+      - read_file
+      - list_directory
+
+routines:
+  - name: Morning brief
+    description: >-
+      Overnight digest before the working day: what landed, what stalled, what
+      needs a human decision today.
+    schedule_cron: "0 6 * * 1-5"
+    enabled: true
+    steps:
+      - type: connector
+        connector: microsoft_graph
+        action: list_inbox
+        args:
+          top: 40
+      - type: connector
+        connector: crm
+        action: search_accounts
+        args:
+          query: "stage:Qualified OR stage:Proposal"
+      - type: connector
+        connector: ticketing
+        action: list_open
+        args: {}
+      - type: message
+        text: >-
+          Post the brief to the thread: top 5 items needing a decision, what
+          each specialist bot is holding, and anything stalled more than 48h.
+
+  - name: Stall sweep
+    description: >-
+      Twice a day, find work sitting with no movement and nudge the owning bot
+      rather than the human.
+    schedule_cron: "0 11,15 * * 1-5"
+    enabled: true
+    steps:
+      - type: message
+        text: >-
+          List every open run and pending approval older than 24h. For each,
+          hand back to the owning bot with a one-line reason. Escalate to the
+          human only when the block is a decision no bot can make.
+
+  - name: Weekly ledger review
+    description: >-
+      Friday retrospective over the context ledger, spend and approval
+      outcomes.
+    schedule_cron: "0 15 * * 5"
+    enabled: false
+    steps:
+      - type: message
+        text: >-
+          Summarise the week: handoffs made, approvals approved vs rejected
+          with reasons, spend per bot against budget, and the three routines
+          that would save the most time if they were taught next.

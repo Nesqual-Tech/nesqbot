@@ -1,0 +1,32 @@
+{
+  "name": "@nesqbot/desktop",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check:markdown": "node scripts/check-markdown.mjs",
+    "lint": "tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@nesqbot/protocol": "*",
+    "@nesqbot/ui": "*",
+    "@gsap/react": "^2.1.2",
+    "@tauri-apps/api": "^2.11.1",
+    "gsap": "^3.13.0",
+    "react": "19.0.0",
+    "react-dom": "19.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.4.0",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "4.3.4",
+    "typescript": "5.8.2",
+    "vite": "6.2.2"
+  }
+}
