@@ -20,12 +20,13 @@ from typing import Any
 import httpx
 from fastapi import Depends, Header, HTTPException
 from jose import JWTError, jwt
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_db
-from app.models import User
+from app.models import RevokedToken, User
 
 logger = logging.getLogger(__name__)
 
@@ -47,9 +48,65 @@ def create_access_token(user_id: str, email: str) -> str:
     payload = {
         "sub": user_id,
         "email": email,
+        "jti": str(uuid.uuid4()),
         "exp": datetime.now(timezone.utc) + timedelta(days=14),
     }
     return jwt.encode(payload, settings.jwt_secret, algorithm=ALGORITHM)
+
+
+async def revoke_token(db: AsyncSession, payload: dict[str, Any]) -> bool:
+    """Revoke the session token whose decoded claims are `payload`.
+
+    Returns False for a token minted before `jti` existed - there is nothing to
+    key the revocation row on, and it will simply expire on its own within the
+    14-day window. `ON CONFLICT DO NOTHING` covers two requests racing on the
+    same still-valid token (both pass `get_current_user` before either commits);
+    a token already revoked can never reach here twice sequentially, since the
+    second call is rejected as unauthorized before the route body runs.
+    """
+    jti = payload.get("jti")
+    sub = payload.get("sub")
+    exp = payload.get("exp")
+    if not jti or not sub or not exp:
+        return False
+    stmt = (
+        pg_insert(RevokedToken)
+        .values(
+            jti=uuid.UUID(str(jti)),
+            user_id=uuid.UUID(str(sub)),
+            expires_at=datetime.fromtimestamp(exp, tz=timezone.utc),
+        )
+        .on_conflict_do_nothing(index_elements=["jti"])
+    )
+    await db.execute(stmt)
+    await db.commit()
+    return True
+
+
+async def prune_expired_revocations(db: AsyncSession) -> int:
+    """Drop revocation rows for tokens that would have expired anyway.
+
+    A revoked token only needs remembering until its own `exp` passes — after
+    that the signature check in `get_current_user` already refuses it, and
+    keeping the row is pure growth with no effect. Called once at boot, next to
+    `reap_orphaned_runs`, not on a schedule: this table grows one row per
+    logout, which is nowhere near enough traffic to need more than that.
+    """
+    now = datetime.now(timezone.utc)
+    result = await db.execute(delete(RevokedToken).where(RevokedToken.expires_at < now))
+    await db.commit()
+    return result.rowcount or 0
+
+
+async def _token_is_revoked(db: AsyncSession, jti: str | None) -> bool:
+    if not jti:
+        return False
+    try:
+        jti_uuid = uuid.UUID(str(jti))
+    except ValueError:
+        return False
+    result = await db.execute(select(RevokedToken.jti).where(RevokedToken.jti == jti_uuid))
+    return result.scalar_one_or_none() is not None
 
 
 async def get_or_create_dev_user(db: AsyncSession) -> User:
@@ -359,6 +416,9 @@ async def get_current_user(
         user_id = uuid.UUID(payload["sub"])
     except (JWTError, KeyError, ValueError) as exc:
         raise HTTPException(status_code=401, detail="Invalid token") from exc
+
+    if await _token_is_revoked(db, payload.get("jti")):
+        raise HTTPException(status_code=401, detail="Invalid token")
 
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()

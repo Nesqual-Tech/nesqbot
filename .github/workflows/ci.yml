@@ -295,3 +295,54 @@ jobs:
           else:
               print("all settings fields are documented in .env.example")
           EOF
+
+  # ---------------------------------------------------------------------------
+  # Advisory until a first pass has been triaged (pinned versions can carry
+  # long-known, unfixable transitive CVEs that would otherwise fail every PR
+  # from day one) - the same bring-up pattern as "Ruff (format check)" above.
+  # Flip continue-on-error off once the existing findings are clean or ignored.
+  dependency-scan:
+    name: Dependency scan (${{ matrix.app }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [api, worker]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: pip-audit
+        working-directory: apps/${{ matrix.app }}
+        continue-on-error: true
+        run: |
+          python -m pip install --upgrade pip pip-audit
+          pip-audit -r requirements.txt --strict
+
+  node-dependency-scan:
+    name: Dependency scan (node)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/desktop/package-lock.json
+            apps/mobile/package-lock.json
+
+      - name: npm audit
+        continue-on-error: true
+        run: |
+          npm install --no-fund
+          npm audit --audit-level=high

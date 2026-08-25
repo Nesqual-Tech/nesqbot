@@ -44,6 +44,14 @@ class UserDevice(Base):
     __table_args__ = (UniqueConstraint("user_id", "token", name="uq_user_devices_user_token"),)
 
 
+class RevokedToken(Base):
+    __tablename__ = "revoked_tokens"
+    jti: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"))
+    revoked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.clock_timestamp())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class Bot(Base):
     __tablename__ = "bots"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -320,7 +328,7 @@ class WorkItem(Base):
     exception and an onboarding checklist all need the same three facts — an
     owning bot, the human it belongs to, and a recorded history of who was
     holding it when. Per-use-case tables would each need their own copy of the
-    transfer ledger, and the ledger is the whole point: `docs/architecture.md`
+    transfer ledger, and the ledger is the whole point: `docs/competitive-analysis.md`
     records that the competitor's audit view is "coming". One table means one
     queryable answer to "who handed this to whom, and why".
 

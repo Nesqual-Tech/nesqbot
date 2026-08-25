@@ -6,13 +6,16 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, status
+from jose import JWTError, jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import (
+    ALGORITHM,
     create_access_token,
     get_current_user,
     get_or_create_dev_user,
+    revoke_token,
     upsert_entra_user,
     verify_entra_access_token,
 )
@@ -74,6 +77,30 @@ async def entra_login(
     token = create_access_token(str(user.id), user.email)
     logger.info("entra login oid=%s user=%s", claims.get("oid"), user.id)
     return TokenOut(access_token=token, user=UserOut.model_validate(user))
+
+
+@router.post("/auth/logout", response_model=OkOut)
+async def logout(
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> OkOut:
+    """End this session token now, rather than waiting out its 14-day life.
+
+    `get_current_user` already proved the token is valid and unrevoked; this
+    decodes it a second time only to reach the claims (`jti`/`exp`) it does not
+    return. A token with no `jti` (minted before this endpoint existed) or the
+    worker's shared service token both decode-fail here and are reported as
+    nothing to revoke rather than an error - logging out was never going to do
+    anything to them anyway.
+    """
+    token = (authorization or "").removeprefix("Bearer ").strip()
+    try:
+        payload = jwt.decode(token, get_settings().jwt_secret, algorithms=[ALGORITHM])
+    except JWTError:
+        return OkOut(ok=True, detail="nothing_to_revoke")
+    revoked = await revoke_token(db, payload)
+    return OkOut(ok=True, detail="revoked" if revoked else "nothing_to_revoke")
 
 
 @router.get("/me", response_model=UserOut)

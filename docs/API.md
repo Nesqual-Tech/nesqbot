@@ -11,6 +11,7 @@ All list endpoints are scoped to the calling user where an owner column exists.
 | GET | `/health/deep` | checks db + redis + temporal; `{ok, checks:{db,redis,temporal}}`; 503 if db down |
 | POST | `/auth/dev-login` | dev only (403 when `NESQ_ENV=production`) |
 | POST | `/auth/entra` | body `{id_token}` → validate Entra JWT via JWKS, upsert user by `oid`, return `TokenOut` |
+| POST | `/auth/logout` | revoke the bearer token presented on this call; `{ok, detail: revoked\|nothing_to_revoke}` |
 | GET | `/me` | current user |
 | POST | `/me/devices` | register a push token: `{token, platform: ios\|android\|web}` → upsert on `(user_id, token)`, returns `{ok, device_id}`. Used by the mobile app for approval notifications |
 | DELETE | `/me/devices/{token}` | unregister |
@@ -311,7 +312,7 @@ noVNC files. Close codes: `4401` unauthorised, `4404` no desktop, `4409` ticket 
 
 A work item is an owned, transferable unit of work — the object a bot hands to another bot. It is
 generalised with a `type` (`lead`, `ticket`, `invoice`, …) rather than modelled as a `leads` table:
-the transfer ledger is the differentiator (`docs/architecture.md`), and a differentiator
+the transfer ledger is the differentiator (`docs/competitive-analysis.md`), and a differentiator
 wants one place to be queried from. Owner-scoped to the human via `work_items.owner_user_id`, which
 never changes; only `owner_bot_id` moves. Not-yours is 404, never 403.
 
@@ -417,7 +418,7 @@ with no resolvable human gets no run at all and is recorded `unroutable`, never 
 ## Rehearsal and reversibility
 
 Answers the two gaps that make agent products unfit for customer-facing work: you cannot
-rehearse an action, and you cannot take it back. See `docs/architecture.md`.
+rehearse an action, and you cannot take it back. See `docs/competitive-analysis.md`.
 
 A dry run performs **no** side effects. Every outbound effect in the service layer passes
 through one chokepoint, `services.simulation.perform`, which either records the intent or

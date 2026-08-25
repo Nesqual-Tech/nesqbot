@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.auth import prune_expired_revocations
 from app.config import get_settings
 from app.db import SessionLocal, engine
 from app.errors import register_error_handlers
@@ -84,8 +85,12 @@ async def lifespan(_app: FastAPI):
             # Age-based and idempotent, so it is safe with several replicas; see
             # services/reaper.py for why it never reaps a parked run.
             reaped = await reap_orphaned_runs(db)
+            pruned = await prune_expired_revocations(db)
         logger.info(
-            "schema ensured, system bots seeded, %d orphaned run(s) reclaimed", len(reaped)
+            "schema ensured, system bots seeded, %d orphaned run(s) reclaimed, "
+            "%d expired revocation(s) pruned",
+            len(reaped),
+            pruned,
         )
     except Exception:  # noqa: BLE001 - logged, and fatal in production
         logger.exception("startup failed: schema migration or seeding did not complete")

@@ -15,14 +15,14 @@ Legend: **done** · **mocked** · **partial** · **missing**
 | Error envelope              | **done**    | `{detail, code}`, 500s carry `request_id` from the `X-Request-Id` middleware                                                                                                                                                          |
 | Dev auth bypass             | **done**    | `NESQ_ENV=development` + missing `Authorization` or `X-Nesq-Dev: 1`                                                                                                                                                                   |
 | Entra sign-in               | **done**    | Real JWKS fetch with cache and rollover, `aud`/`iss` validated, upsert by `oid`                                                                                                                                                       |
-| Session tokens              | **partial** | HS256, 14 days. No refresh, no revocation                                                                                                                                                                                             |
+| Session tokens              | **partial** | HS256, 14 days. `POST /auth/logout` revokes the presented token (`jti` in `revoked_tokens`, checked on every request, pruned at boot). No refresh endpoint — a token cannot be renewed short of signing in again              |
 | Ownership / visibility      | **done**    | System bots shared, custom bots and threads owned; invisible objects 404 rather than 403                                                                                                                                              |
 | Roles / RBAC                | **missing** | Every authenticated user is equal. See `security.md`                                                                                                                                                                                  |
 | Schema + seeding on boot    | **done**    | `ensure_schema` + `seed_system`; fatal in production, tolerated in dev                                                                                                                                                                |
 | Streaming turns             | **done**    | SSE `token`/`handoff`/`tool`/`approval`/`done`/`error`                                                                                                                                                                                |
 | Risk gate + approvals       | **done**    | Connector, MCP and desktop actions all gated; execution replays the stored payload server-side                                                                                                                                        |
-| Approval scoping            | **missing** | Any authenticated user can decide any system bot's approval                                                                                                                                                                           |
-| Key Vault secret resolution | **partial** | `app/services/secrets.py` resolves `kv://`, `env://` and bare refs with caching and a no-logging contract. Never run against a real vault, and `_invoke_vendor` still returns mock payloads, so no connector reaches a vendor API yet |
+| Approval scoping            | **done**    | Owner-resolved (`requested_by` payload → thread owner → custom bot owner), decide/expire require caller to be that owner; unattributable approvals fall back to bot visibility. 404 not 403. See `routers/deps.py::get_visible_approval` |
+| Key Vault secret resolution | **done when configured** | `app/services/secrets.py` resolves `kv://`, `env://` and bare refs with caching and a no-logging contract. `_invoke_vendor` dispatches to real drivers: `vendors/graph.py` (Microsoft Graph mail, live once `GRAPH_API_BASE_URL` set) and `vendors/generic_http.py` (manifest-driven, live once a connector's manifest sets `base_url`). No connector/vault exercised against real credentials yet |
 | Rate limiting               | **missing** | Only the per-bot daily budget, which is a soft cap                                                                                                                                                                                    |
 
 ## Models and RAG
@@ -43,10 +43,10 @@ Legend: **done** · **mocked** · **partial** · **missing**
 | Bot Desktop lifecycle    | **done**                            | start / stop / suspend / resume / action / screenshot / windows                 |
 | Desktop backend `mock`   | **mocked**                          | Default. State transitions plus a generated placeholder PNG                     |
 | Desktop backend `docker` | **done**                            | Container per bot, home bind-mounted from `data/bot-homes/`                     |
-| Desktop backend `aks`    | **partial**                         | API records `starting`; the pod path is not exercised end to end                |
+| Desktop backend `aks`    | **missing**                         | `services/desktop.py` sets `state="starting"` and a placeholder `container_id`, then stops — `apps/worker` has zero aks/pod/kubernetes reconciliation code, so it can never leave `starting` |
 | Temporal worker          | **done**                            | Workflows, activities, health file, graceful drain                              |
 | Routine schedules        | **done when Temporal is reachable** | Sync on create/patch, delete on delete                                          |
-| Routine inline fallback  | **mocked**                          | No Temporal ⇒ steps run inline, no real `workflow_id`                           |
+| Routine inline fallback  | **partial**                         | No Temporal ⇒ `services/routines.py` runs steps inline through the same `simulation.perform`/risk-gate/approval path as the Temporal-backed run — real effects, not canned output. Only gap: no real `workflow_id` for tracking |
 | Redis pubsub             | **done**                            | In-process fallback when Redis is absent, single replica only                   |
 | Mobile push on approval  | **partial**                         | Device registration and Expo push are wired; not verified against a real device |
 
@@ -67,12 +67,12 @@ Legend: **done** · **mocked** · **partial** · **missing**
 | Root scripts                | **done**    | `dev`, `desktop`, `mobile`, `api`, `worker`, `build`, `typecheck`, `lint`, `format`, `clean`                                                                                                                                  |
 | `tsconfig.base.json`        | **done**    | Strict, ES2022, bundler resolution, composite project references                                                                                                                                                              |
 | Source-only package exports | **done**    | Deliberate — documented in every `package.json` and in `local-dev.md`                                                                                                                                                         |
-| CI                          | **partial** | GitHub Actions: ruff, mypy, pytest, Bicep build/lint/what-if, Node typecheck, desktop bundle, image builds                                                                                                                    |
-| Python tests                | **partial** | `apps/worker/tests` only. The API has none                                                                                                                                                                                    |
+| CI                          | **partial** | GitHub Actions: ruff, mypy, pytest, Bicep build/lint/what-if, Node typecheck, desktop bundle, image builds. `macos.yml` also does full native Tauri `.app`/`.dmg` builds with codesign/notarize verification                |
+| Python tests                | **done**    | `apps/api/tests` has 74 files (services + router-level: risk gating, approval scoping, auth, contract coverage). `apps/worker/tests` has one. Run status not re-verified locally as of this edit                            |
 | API/protocol parity check   | **done**    | `npm run check:api --workspace @nesqbot/protocol` diffs the TS interfaces against `schemas.py` for field presence and nullability. Advisory, not wired into CI                                                                |
 | TypeScript tests            | **missing** | No test runner configured in any package                                                                                                                                                                                      |
 | Prettier                    | **done**    | Configured in the root `package.json` (no semicolons, 120 cols, matching the existing style); `.prettierignore` covers lockfiles, generated output and `docs/API.md`. The tree has been formatted, so `npm run lint` is green |
-| Dependency scanning         | **missing** |                                                                                                                                                                                                                               |
+| Dependency scanning         | **partial** | `dependency-scan`/`node-dependency-scan` jobs in `ci.yml` run `pip-audit`/`npm audit`, advisory (`continue-on-error`) until a first pass is triaged. `.github/dependabot.yml` opens weekly update PRs for pip/npm/actions   |
 
 ## Infrastructure
 
@@ -101,11 +101,14 @@ Legend: **done** · **mocked** · **partial** · **missing**
 
 If you are picking up work, these are the highest-value gaps:
 
-1. **Scope approvals to a user or an approver role.** Today anyone can approve
-   anything a system bot raises. This is the one that blocks real use.
-2. **Implement Key Vault `secret_ref` resolution.** Until then no connector can
-   hold a real credential.
-3. **Tests for the API.** The worker has some; the control plane — the part
-   that enforces the risk gate — has none.
-4. **Exercise the AKS desktop path end to end.** It is the only major
-   subsystem that has never run outside mock or local Docker.
+1. **Build the AKS desktop reconciler.** `apps/worker` has zero aks/pod code;
+   `services/desktop.py` can only ever set `state="starting"` and stop. This is
+   not "exercise it end to end" — the worker-side half does not exist yet.
+2. **Scope approvals/actions to a role, not just an owner.** RBAC is still
+   fully missing — every authenticated user is equal once past ownership
+   checks. See the design sketch in `security.md`.
+3. **Session token refresh.** Logout/revocation now exists; there is still no
+   way to renew a token short of signing in again.
+4. **Run the Key Vault + Graph/generic_http live path against real
+   credentials at least once.** Code is done; nobody has proven it against an
+   actual vault, tenant, or connector yet.

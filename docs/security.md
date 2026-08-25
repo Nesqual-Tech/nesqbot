@@ -152,22 +152,19 @@ things you can verify in the code.
 
 **No roles or RBAC.** Every authenticated user is equal. There is no admin, no
 read-only viewer, and no approver role. Anyone who can log in can register a
-connector, create a bot, and change a budget.
+connector, create a bot, and change a budget. A design sketch for closing this
+follows the gaps list, below — it is a proposal, not something implemented.
 
-**Any user can decide any system bot's approvals.** Approval visibility is
-inherited from bot visibility, and system bots are visible to everyone. So an
-approval raised by the Sales bot can be approved by anyone in the tenant, not
-just the person whose thread raised it. This is the most significant gap on the
-list and it is a consequence of system bots being shared objects.
-
-**Secret resolution is implemented but unexercised against a real vault.**
-`app/services/secrets.py` resolves `kv://vault/name`, `env://VAR`, and bare
-names against `AZURE_KEY_VAULT_URL`, via `DefaultAzureCredential`, with a
-five-minute cache and an explicit contract that a resolved value never reaches
-a log line, response body, or audit event. What has not happened is a
-deployment: no connector has been bound to a real credential, and
-`_invoke_vendor` still returns the mock payload for every connector, so the
-resolved secret is currently fetched and then not used against a vendor API.
+**Secret resolution and vendor calls are implemented but unexercised against
+real infrastructure.** `app/services/secrets.py` resolves `kv://vault/name`,
+`env://VAR`, and bare names against `AZURE_KEY_VAULT_URL`, via
+`DefaultAzureCredential`, with a five-minute cache and an explicit contract
+that a resolved value never reaches a log line, response body, or audit event.
+`_invoke_vendor` dispatches a resolved credential to a real driver —
+`vendors/graph.py` for Microsoft Graph mail, `vendors/generic_http.py` for any
+connector whose manifest sets `base_url` — once that base URL is configured.
+What has not happened is a deployment: no connector has been bound to a real
+Key Vault secret and called against a live tenant.
 
 **`mutate` runs unattended, and prompt injection is real.** A bot that reads an
 email containing instructions may act on them. The approval gate stops anything
@@ -187,9 +184,11 @@ explicitly in production.
 per-bot daily budget, which is a _soft_ cap checked before a turn — it does not
 kill work in flight and it does not limit request volume.
 
-**Session tokens cannot be revoked.** A 14-day HS256 token stays valid until it
-expires or the user row is deleted. There is no refresh flow, no rotation, and
-no logout-everywhere.
+**Session tokens have no refresh flow.** `POST /auth/logout` revokes the
+presented token immediately (`jti` recorded in `revoked_tokens`, checked on
+every request, pruned at boot once expired) — there is no logout-everywhere
+across a user's other sessions, and a token cannot be renewed short of signing
+in again, so a 14-day expiry is the only alternative to a fresh login.
 
 **No encryption beyond the platform's.** Message content, memories and KB
 articles are stored in plain columns, protected only by Postgres and disk
@@ -198,18 +197,61 @@ encryption. Do not put secrets in a chat message.
 **Desktop stream authorisation is coarse.** Anyone who can see a bot can watch
 its screen and, through `/desktop/action`, drive it.
 
-**No automated security testing.** No dependency scanning, no SAST, and no test
-suite at all — see `STATUS.md`.
+**No SAST, and dependency scanning is advisory only.** `ci.yml` runs
+`pip-audit`/`npm audit` and `dependabot.yml` opens weekly update PRs, but both
+are `continue-on-error` until a first pass of existing findings is triaged —
+neither currently blocks a merge. There is no static application security
+scan. (The API itself has 1800+ passing tests — see `STATUS.md` — this gap is
+about scanning, not about test coverage.)
+
+## A design sketch for roles
+
+Not implemented. Approval and object *ownership* is enforced today (see
+Tenancy and ownership, above) — what is missing is *authorization by role*
+layered on top of it, for the handful of actions ownership alone cannot gate:
+who may register a connector or MCP server, create a system bot, change a
+daily budget, or approve on behalf of a shared system bot rather than only
+their own.
+
+A minimal shape that fits the existing schema without a migration framework:
+
+- **A `role` column on `users`** (`TEXT NOT NULL DEFAULT 'member'`), values
+  `admin`, `member`, `viewer`. Same `IF NOT EXISTS` / `ADD COLUMN IF NOT
+  EXISTS` idempotent pattern `sql/init.sql` already uses everywhere else.
+- **A small `require_role(*roles)` FastAPI dependency** next to
+  `get_current_user`, composed onto the handful of routes that need it —
+  connector/MCP registration, system-bot creation, budget changes — the same
+  way `get_visible_bot`/`get_visible_approval` compose onto the ownership
+  checks now. Most routes would not change at all: ownership already gates
+  them correctly.
+- **An `approver` grant, separate from role**, for the system-bot approval
+  problem specifically: today `get_visible_approval` falls back to *bot*
+  visibility only when an approval has no knowable owner (a routine step
+  against a shared system bot). A `bot_approvers(bot_id, user_id)` table would
+  let that fallback narrow to a named set of people per system bot instead of
+  "everyone who can see the bot" — closing the approval-scoping gap for the
+  shared-bot case the same way owner-resolution already closed it for the
+  per-user case.
+- **404, not 403, stays the rule.** A role check that fails should look
+  identical to the object not existing, consistent with every other
+  authorization check in this codebase.
+
+This is deliberately small: one column, one dependency, one join table. A
+fuller permission matrix (per-connector grants, delegated admin, audit of role
+changes themselves) is real future work, but the object above is enough to
+close "anyone who can log in can register a connector" without redesigning
+anything that already works.
 
 ## If you are hardening this for production
 
 In rough priority order:
 
-1. Scope approvals to the requesting user, or introduce an approver role.
+1. Implement roles (see the design sketch above) and gate connector/MCP
+   registration, system-bot creation, and budget changes behind `admin`.
 2. Exercise secret resolution end to end: bind one connector to a real Key Vault secret against a deployed managed identity, and confirm the value never lands in a log, response, or audit row.
-3. Add roles: admin (register connectors, create system bots), member, viewer.
+3. Add a `bot_approvers` grant so a shared system bot's approvals are decidable by a named set of people, not everyone who can see the bot.
 4. Set `CORS_ORIGINS` explicitly and fail startup if it is empty in production.
-5. Move `JWT_SECRET` to Key Vault, shorten the session to hours, add refresh.
+5. Move `JWT_SECRET` to Key Vault, shorten the session to hours, add a refresh endpoint.
 6. Add rate limiting at the ingress.
 7. Gate `mutate` on connectors that touch customer-visible records.
-8. Turn on dependency scanning in CI.
+8. Triage the existing `pip-audit`/`npm audit` findings and drop `continue-on-error` once clean.

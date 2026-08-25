@@ -367,7 +367,7 @@ CREATE INDEX IF NOT EXISTS idx_action_log_reversible ON action_log(bot_id, rever
 -- A lead is the motivating case, not the mechanism, so this is one general
 -- `work_items` table with a free-text `type` rather than a `leads` table plus a
 -- `tickets` table plus an `invoices` table, each with its own copy of the
--- transfer ledger. The ledger is the differentiator (docs/architecture.md
+-- transfer ledger. The ledger is the differentiator (docs/competitive-analysis.md
 -- records the competitor's audit view as "coming"), and a differentiator wants
 -- exactly one place to be queried from.
 --
@@ -636,6 +636,26 @@ CREATE INDEX IF NOT EXISTS idx_standing_approvals_owner
 -- approval behind it and offer no way to find out why. NULL is the ordinary
 -- case: a human approved it, or it never needed approving.
 ALTER TABLE action_log ADD COLUMN IF NOT EXISTS standing_approval_id UUID;
+
+-- ---------------------------------------------------------------------------
+-- Session token revocation.
+--
+-- A session JWT is normally just decoded and trusted for its full 14-day
+-- life -- there was no way to end one early. `jti` (set on every token minted
+-- after this table existed; older tokens simply have none and cannot be
+-- revoked, which is fine, they age out) is looked up here on every request.
+-- `expires_at` mirrors the `exp` claim already on the token, so the reaper
+-- can drop rows for tokens that would have expired anyway, without ever
+-- needing the secret to decode them.
+-- ---------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS revoked_tokens (
+  jti UUID PRIMARY KEY,
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  revoked_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires_at ON revoked_tokens(expires_at);
 
 -- ---------------------------------------------------------------------------
 -- `now()` is the transaction clock, not the row clock.

@@ -163,3 +163,67 @@ async def test_devices_are_scoped_to_their_owner(authed, other):
     response = await other.delete("/api/me/devices/a-device")
     assert response.status_code == 200
     assert response.json()["detail"] == "not_registered"
+
+
+async def test_logout_revokes_the_presented_token(authed):
+    logout = await authed.post("/api/auth/logout")
+    assert logout.status_code == 200
+    assert logout.json() == {"ok": True, "detail": "revoked"}
+
+    # Same client, same header - the token itself is now dead.
+    response = await authed.get("/api/me")
+    assert response.status_code == 401
+    assert response.json()["code"] == "unauthorized"
+
+
+async def test_logout_does_not_touch_other_sessions(app, user_a):
+    """Logging out one token must not revoke a second token for the same user."""
+    from tests.conftest import _client_for, auth_headers
+
+    async with _client_for(app, auth_headers(user_a)) as first, _client_for(app, auth_headers(user_a)) as second:
+        await first.post("/api/auth/logout")
+        assert (await first.get("/api/me")).status_code == 401
+        assert (await second.get("/api/me")).status_code == 200
+
+
+async def test_logging_out_an_already_revoked_token_is_unauthorized(authed):
+    """A revoked token cannot even reach the handler a second time -
+    `get_current_user` rejects it before the route runs, same as any other
+    dead token would."""
+    first = await authed.post("/api/auth/logout")
+    assert first.json()["detail"] == "revoked"
+    second = await authed.post("/api/auth/logout")
+    assert second.status_code == 401
+
+
+async def test_revoking_the_same_token_twice_at_the_database_is_a_no_op(db, user_a):
+    """The `ON CONFLICT DO NOTHING` path: two writes racing for the same `jti`
+    (concurrent requests both past the `get_current_user` check before either
+    commit) must not 500 on the second."""
+    from jose import jwt
+
+    from app.auth import create_access_token, revoke_token
+    from app.config import get_settings
+
+    token = create_access_token(str(user_a.id), user_a.email)
+    payload = jwt.decode(token, get_settings().jwt_secret, algorithms=["HS256"])
+
+    assert await revoke_token(db, payload) is True
+    assert await revoke_token(db, payload) is True  # same jti, no unique-violation
+
+
+async def test_logout_with_no_bearer_token_is_not_an_error(client):
+    """The dev bypass reaches this route with nothing to decode."""
+    response = await client.post("/api/auth/logout")
+    assert response.status_code == 200
+    assert response.json()["detail"] == "nothing_to_revoke"
+
+
+async def test_dev_login_tokens_can_be_revoked(client, app):
+    from tests.conftest import _client_for
+
+    token = (await client.post("/api/auth/dev-login")).json()["access_token"]
+    async with _client_for(app, {"Authorization": f"Bearer {token}"}) as bearer_client:
+        await bearer_client.post("/api/auth/logout")
+        response = await bearer_client.get("/api/me")
+    assert response.status_code == 401
