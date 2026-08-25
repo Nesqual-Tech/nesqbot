@@ -1,4 +1,4 @@
-temporalio==1.9.0
+temporalio==1.31.0
 httpx==0.28.1
 pydantic-settings==2.8.1
 sqlalchemy[asyncio]==2.0.40
