@@ -21,7 +21,7 @@
     "expo-crypto": "~14.0.2",
     "expo-device": "~7.0.3",
     "expo-linking": "~7.0.5",
-    "expo-notifications": "~0.29.14",
+    "expo-notifications": "~57.0.13",
     "expo-router": "~4.0.19",
     "expo-secure-store": "~14.0.1",
     "expo-status-bar": "~2.0.1",
