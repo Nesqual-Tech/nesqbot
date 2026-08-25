@@ -381,7 +381,7 @@ jobs:
 
       - name: Upload
         if: ${{ !cancelled() && steps.stage.outcome == 'success' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # The signing state is in the artifact name on purpose. Somebody will
           # download this months from now with no memory of how it was built.
