@@ -32,9 +32,9 @@ from app.services.model_router import (
 #: The real values from the production container app, so the test reads like the
 #: deployment it protects. `AZURE_CLIENT_ID` is the Entra API app registration;
 #: `AZURE_MANAGED_IDENTITY_CLIENT_ID` is the user-assigned identity.
-ENTRA_API_APP_ID = "20000000-0000-0000-0000-000000000002"
-UAMI_CLIENT_ID = "50000000-0000-0000-0000-000000000005"
-ENDPOINT = "https://your-aoai.openai.azure.com/"
+ENTRA_API_APP_ID = "7959c495-0000-0000-0000-000000000000"
+UAMI_CLIENT_ID = "2375487d-0183-4e1d-8155-b98c09b3d4b9"
+ENDPOINT = "https://nesqbot-prod-aoai-4zelre5orjeuw.openai.azure.com/"
 
 
 def _settings(**overrides: Any) -> Settings:
@@ -316,7 +316,7 @@ def test_rag_embeddings_share_the_routers_client():
 
     assert isinstance(rag._router, ModelRouter)
     source = inspect.getsource(rag)
-    assert "_router.client()" in source
+    assert '_router.client("embed")' in source
     assert "AsyncAzureOpenAI" not in source
     assert "azure.identity" not in source
 

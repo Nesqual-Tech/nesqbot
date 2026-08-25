@@ -98,14 +98,24 @@ async def embed(
     if not clean:
         return None
 
-    client = _router.client()
+    # The `embed` tier specifically, not the router's default account: a
+    # deployment can perfectly well point `embed` at its own endpoint or
+    # provider (see ModelRouter._provider_for), and the old `client()` (no
+    # tier) call here ignored that entirely while still sending the Azure
+    # embed deployment name to whatever it resolved — silently broken the
+    # moment `embed` was overridden to anything else.
+    client = _router.client("embed")
     if client is None:
+        return None
+
+    model = _router.model_name("embed")
+    if not model:
         return None
 
     settings = get_settings()
     try:
         resp = await client.embeddings.create(
-            model=settings.azure_deployment_embed,
+            model=model,
             input=clean,
             timeout=settings.request_timeout_seconds,
         )

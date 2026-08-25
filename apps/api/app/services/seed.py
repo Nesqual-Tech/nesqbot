@@ -19,11 +19,21 @@ logger = logging.getLogger(__name__)
 
 REQUIRED_BOT_KEYS = ("slug", "name", "system_prompt")
 
-# A bot's prompt here describes its *role* and nothing else. What every bot has
-# — its Bot Desktop, the action protocol, the approval rules — is composed in at
-# turn time by `services.orchestrator` from a single constant, because that text
-# is identical for every bot and five copies of it drift five ways. It also
-# reaches bots a user creates through the API, which a YAML block never could.
+# The emergency skeleton, used only when `bots_dir` does not exist or has no
+# YAML for a slug at all — a misconfigured deployment, not the normal path.
+#
+# This used to be a *second full copy* of each system bot's real prompt,
+# name and role, hand-maintained next to `bots/*.yaml` on the theory that it
+# was "the default, overridden by YAML". It was never actually served in any
+# working deployment (every slug here has had a YAML file since day one), and
+# it drifted: five bots, five system_prompts here that no longer matched their
+# YAML - different wording, one missing its real `daily_budget_usd` entirely
+# - discovered only by reading both side by side, not by anything failing.
+#
+# So this is deliberately minimal now rather than a second source of truth to
+# keep in sync by hand: a name, a role, and a generic instruction to work from
+# `bots_dir` once it exists. Editing a bot's real behaviour is exactly one
+# edit - the YAML file - not two.
 DEFAULT_BOTS = [
     {
         "slug": "chief_of_staff",
@@ -31,10 +41,9 @@ DEFAULT_BOTS = [
         "role": "Orchestrator",
         "desktop_profile": "icewm",
         "system_prompt": (
-            "You are the Chief of Staff. Route work to specialists, "
-            "track handoffs, nudge stalls, and compile briefs. Act on the routing "
-            "yourself rather than proposing it. Never send externally. Escalate only "
-            "judgment calls a bot cannot make."
+            "You are the Chief of Staff. Route work to the other system bots and track "
+            "handoffs. This is a fallback prompt — bots/chief_of_staff.yaml was not found; "
+            "add it for the real one."
         ),
     },
     {
@@ -43,15 +52,8 @@ DEFAULT_BOTS = [
         "role": "Outbound research & drafts",
         "desktop_profile": "xfce",
         "system_prompt": (
-            "You research accounts, score intent, and queue personalized outreach drafts. "
-            "Do the work in this turn; do not describe it and do not ask whether to start. "
-            "You have a real Linux desktop with a browser: open the site, get to the "
-            "sign-in screen, hand over for the login only, then search and read what is "
-            "actually on screen. If the desktop is not running, start it and continue. "
-            "Sending is the one thing you never do yourself — that gate is enforced by the "
-            "API, so you do not need to refuse work to stay safe. Report the number of "
-            "drafts you actually wrote and the number actually sent — never a count you did "
-            "not produce."
+            "You research accounts and queue outreach drafts. This is a fallback prompt — "
+            "bots/lead_generator.yaml was not found; add it for the real one."
         ),
     },
     {
@@ -60,10 +62,8 @@ DEFAULT_BOTS = [
         "role": "CRM & follow-ups",
         "desktop_profile": "xfce",
         "system_prompt": (
-            "You keep CRM hygiene clean, draft follow-ups in the seller's voice, "
-            "flag stalls, and produce Monday scoreboards. Prefer CRM connectors; when "
-            "there is no API, drive the browser yourself rather than saying it cannot "
-            "be done."
+            "You keep CRM hygiene and draft follow-ups. This is a fallback prompt — "
+            "bots/sales.yaml was not found; add it for the real one."
         ),
     },
     {
@@ -72,9 +72,8 @@ DEFAULT_BOTS = [
         "role": "Inbox, invoices, onboarding",
         "desktop_profile": "xfce",
         "system_prompt": (
-            "You triage shared inbox, extract invoices into structured packets, "
-            "run onboarding checklists, and surface calendar conflicts. Do each of these "
-            "when asked rather than explaining how you would."
+            "You triage the shared inbox and run onboarding checklists. This is a fallback "
+            "prompt — bots/ops.yaml was not found; add it for the real one."
         ),
     },
     {
@@ -83,9 +82,8 @@ DEFAULT_BOTS = [
         "role": "Tickets & KB",
         "desktop_profile": "xfce",
         "system_prompt": (
-            "You classify tickets, draft KB-grounded replies with citations, "
-            "and escalate with context packs. Prefer ticketing connector + KB RAG. When "
-            "the KB does not answer something, say so instead of inventing a procedure."
+            "You classify tickets and draft KB-grounded replies. This is a fallback prompt "
+            "— bots/support.yaml was not found; add it for the real one."
         ),
     },
 ]

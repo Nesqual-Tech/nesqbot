@@ -22,6 +22,7 @@ All list endpoints are scoped to the calling user where an owner column exists.
 | --- | --- | --- |
 | GET | `/bots` | list |
 | POST | `/bots` | create custom |
+| POST | `/bots/system/reseed` | re-run system-bot seeding from `bots/*.yaml` without restarting the API; creates new slugs, reconciles existing system bots, never touches a custom bot |
 | GET | `/bots/{bot_id}` | single, 404 if missing |
 | PATCH | `/bots/{bot_id}` | `UpdateBotIn`: name/role/system_prompt/daily_budget_usd/desktop_profile; 403 changing prompt/slug on system bots |
 | DELETE | `/bots/{bot_id}` | custom bots only (403 on `is_system`); stops desktop first |

@@ -8,7 +8,7 @@ import uuid
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
@@ -30,6 +30,7 @@ from app.routers.deps import (
 )
 from app.schemas import BotOut, BudgetIn, CreateCustomBotIn, OkOut, UpdateBotIn
 from app.services import mcp_registry
+from app.services.seed import seed_system
 
 logger = logging.getLogger("nesqbot.bots")
 
@@ -94,6 +95,33 @@ async def create_custom_bot(
         await mcp_registry.attach_mcp(db, bot.id, mid)
     await db.commit()
     return _bot_out(bot)
+
+
+@router.post("/bots/system/reseed", response_model=OkOut)
+async def reseed_system_bots(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> OkOut:
+    """Re-run system-bot seeding without restarting the API.
+
+    Editing `bots/*.yaml` — a new bot, a changed prompt — only ever took
+    effect on the next boot, because `seed_system` ran once, in `lifespan`.
+    This calls the exact same function on demand: new slugs get created,
+    existing system bots get their name/role/prompt/desktop_profile
+    reconciled from the YAML, and a custom bot's owner-tuned budget is never
+    touched — identical to what happens at boot, see `services.seed`.
+
+    No RBAC exists yet (see `security.md`'s known gaps), so this is reachable
+    by anyone authenticated, same as bot creation already is. Idempotent and
+    additive-or-reconciling only — it cannot delete a bot — so the exposure is
+    "someone re-applies YAML you already wrote", not a destructive action.
+    """
+    before = await db.execute(select(func.count()).select_from(Bot).where(Bot.is_system.is_(True)))
+    await seed_system(db)
+    after = await db.execute(select(func.count()).select_from(Bot).where(Bot.is_system.is_(True)))
+    created = int(after.scalar_one()) - int(before.scalar_one())
+    logger.info("system bots reseeded by %s (%d new)", user.id, created)
+    return OkOut(ok=True, detail=f"reseeded — {created} new system bot(s)")
 
 
 @router.get("/bots/{bot_id}", response_model=BotOut)

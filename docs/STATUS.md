@@ -30,6 +30,7 @@ Legend: **done** · **mocked** · **partial** · **missing**
 | Area                  | State                    | Notes                                                                                         |
 | --------------------- | ------------------------ | --------------------------------------------------------------------------------------------- |
 | Tier routing          | **done**                 | `nano`/`mini`/`reason`/`embed` by task class, mirrored in `@nesqbot/model-router`             |
+| Multi-provider models | **partial**              | `MODEL_PROVIDER` (global + per-tier) picks `azure` (default, unchanged) or `openai` — real OpenAI or any self-hosted OpenAI-compatible server ("local models": Ollama, vLLM, LM Studio, OpenRouter) via `OPENAI_BASE_URL`. `anthropic`/`google` are accepted config values with no client yet — a tier routed to either falls back to mock, on purpose, rather than guessing at an unbuilt wire format. No per-bot override, no setup wizard UI. See `services/model_router.py` |
 | Azure Foundry calls   | **done when configured** | Retries via tenacity, 60 s timeout                                                            |
 | Model fallback        | **mocked**               | No endpoint/key ⇒ deterministic `[mock:<tier>]` replies, still ledgered with estimated tokens |
 | Cost ledger + budgets | **done**                 | One row per completion; soft stop at the daily cap                                            |

@@ -28,6 +28,36 @@ async def test_create_custom_bot(authed):
     assert body["is_system"] is False
 
 
+async def test_reseed_is_a_no_op_when_nothing_new_is_configured(authed):
+    """The database is already seeded (see conftest) - reseeding again must
+    not duplicate anything or report new bots that were not new."""
+    response = await authed.post("/api/bots/system/reseed")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert "0 new" in body["detail"]
+
+
+async def test_reseed_picks_up_a_new_yaml_bot_without_a_restart(authed, monkeypatch):
+    import app.services.seed as seed_module
+
+    extra = {
+        "slug": "finance_test",
+        "name": "Finance",
+        "role": "Bookkeeping",
+        "system_prompt": "Reconcile invoices.",
+    }
+    monkeypatch.setattr(seed_module, "DEFAULT_BOTS", [*seed_module.DEFAULT_BOTS, extra])
+
+    response = await authed.post("/api/bots/system/reseed")
+    assert response.status_code == 200
+    assert "1 new" in response.json()["detail"]
+
+    listed = await authed.get("/api/bots")
+    slugs = {b["slug"] for b in listed.json()}
+    assert "finance_test" in slugs
+
+
 async def test_create_custom_bot_deduplicates_slugs(authed):
     first = await authed.post(
         "/api/bots", json={"name": "Twin", "role": "r", "system_prompt": "p"}

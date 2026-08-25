@@ -21,7 +21,7 @@ role: Orchestrator # optional — one-line job description, shown in the UI
 desktop_profile: icewm # optional — xfce (default) | icewm
 daily_budget_usd: 5 # optional — soft cap, defaults to 5
 system_prompt: | # required — the bot's standing instructions
-  You are the Chief of Staff on Nesq Bot.
+  You are the Chief of Staff for Nesqual Tech on Nesq Bot.
   Route work to Sales, Lead Generator, Ops, or Support.
   Track handoffs in the shared context ledger. Never send externally.
   Only escalate judgment calls to the human.
@@ -42,10 +42,15 @@ Seeding rules — the surprising ones are worth internalising:
   valid YAML with a matching `slug`. A YAML file wins over the default.
 - A malformed file is skipped with a warning, not fatal. The API still boots.
   Check the API log if a bot you expected is missing.
-- Seeding is **create-only**. A bot whose `slug` already exists in the database
-  is left alone — editing YAML does not update a running deployment. To change
-  a system bot after first boot, use `PATCH /api/bots/{bot_id}` (or drop the
-  row and restart).
+- Seeding is create-only for a *new* slug, but a system bot (`is_system`) that
+  already exists is **reconciled**, not skipped: its `name`/`role`/
+  `system_prompt`/`desktop_profile` are overwritten from the current YAML
+  every time seeding runs. A custom bot is never touched — reconciliation only
+  applies to `is_system` rows. Seeding runs on boot and on
+  `POST /api/bots/system/reseed` (no restart needed for either a new bot or an
+  edited prompt). `daily_budget_usd` is the one field seeding never overwrites
+  once a bot exists, system or custom — an operator's tuned budget survives a
+  YAML edit; change it with `PATCH /api/bots/{bot_id}/budget`.
 - The API also seeds the first-party connector catalog and two starter KB
   articles on an empty database.
 
@@ -111,8 +116,10 @@ Capability, not prompt wording, is the real configuration surface.
      Never pay anything. Never email a supplier. Draft, then stop.
    ```
 
-2. Restart the API. The bot is seeded on boot (create-only — a `finance` slug
-   that already exists is left untouched).
+2. `POST /api/bots/system/reseed`, or restart the API — seeding also runs on
+   boot. Either way it is create-only for a new slug, and reconciles
+   name/role/prompt/desktop_profile for an existing system bot without
+   touching a custom bot's owner-tuned budget.
 3. Bind its connectors and set its budget through the API or the desktop app.
 
 ### At runtime (owned by you)

@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     azure_tenant_id: str = ""
     # THE API'S OWN app registration id — the `aud` this API accepts, *not* the
     # desktop/mobile client's id. See docs/entra-setup.md: the resource server is
-    # `Nesq Bot API` and the public client is `Nesq Bot`.
+    # `Nesq Bot API` (7959c495-…) and the public client is `Nesq Bot` (a369e670-…).
     # Setting the client's id here would make the API accept tokens audienced to
     # the client — exactly the audience confusion the two-registration split
     # exists to prevent — and it would do so silently, because such tokens verify
@@ -116,7 +116,7 @@ class Settings(BaseSettings):
     #
     # The account, as it actually is, so nobody has to re-measure it:
     #
-    #   endpoint   https://your-ai-services.cognitiveservices.azure.com/
+    #   endpoint   https://nesqbot-prod-xai-4zelre5orjeuw.cognitiveservices.azure.com/
     #   kind       AIServices (an xAI model cannot deploy to an OpenAI-kind one)
     #   region     swedencentral, GlobalStandard
     #   rate limit 50,000 tokens AND 50 requests per 60 seconds, read off
@@ -148,6 +148,51 @@ class Settings(BaseSettings):
     azure_openai_api_version_mini: str = ""
     azure_openai_api_version_reason: str = ""
     azure_openai_api_version_embed: str = ""
+
+    # ---- OpenAI-protocol providers -------------------------------------------
+    #
+    # `AsyncOpenAI` and `AsyncAzureOpenAI` (same `openai` package, already a
+    # dependency) return the identical response shape, so everything downstream
+    # of ModelRouter.client() - _request_kwargs, parse_tool_calls,
+    # billable_output_tokens, the streaming delta accumulator - needs no per-
+    # provider branch. Only client construction and the model-name lookup
+    # differ, which is what this block and ModelRouter._openai_client() cover.
+    #
+    # This one client shape also covers a self-hosted "local model" server -
+    # Ollama, vLLM, LM Studio, OpenRouter, or anything else that speaks the
+    # OpenAI chat-completions wire format - by pointing `openai_base_url` at it.
+    # There is no separate "local" code path: it is this same client with a
+    # different base_url, most such servers accept any non-empty API key.
+    #
+    # `model_provider` picks the provider per tier; blank means "azure", which
+    # keeps every existing deployment's behaviour byte-for-byte unchanged.
+    model_provider: str = "azure"
+    model_provider_nano: str = ""
+    model_provider_mini: str = ""
+    model_provider_reason: str = ""
+    model_provider_embed: str = ""
+
+    # Blank base_url means the SDK's own default (https://api.openai.com/v1) -
+    # real OpenAI. A self-hosted server sets this to its own address instead,
+    # globally or per tier.
+    openai_base_url: str = ""
+    openai_base_url_nano: str = ""
+    openai_base_url_mini: str = ""
+    openai_base_url_reason: str = ""
+    openai_base_url_embed: str = ""
+    openai_api_key: str = ""
+    openai_api_key_nano: str = ""
+    openai_api_key_mini: str = ""
+    openai_api_key_reason: str = ""
+    openai_api_key_embed: str = ""
+    # Real model names, not Azure deployment aliases - e.g. "gpt-5.1",
+    # "llama3.1:70b". No default: a tier routed to this provider with no model
+    # name configured cannot be resolved and falls back to mock, the same as an
+    # Azure tier with no endpoint.
+    openai_model_nano: str = ""
+    openai_model_mini: str = ""
+    openai_model_reason: str = ""
+    openai_model_embed: str = ""
 
     # ---- what a vision step costs -------------------------------------------
     #

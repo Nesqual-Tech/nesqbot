@@ -8,9 +8,15 @@ import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
-from openai import APIConnectionError, APIStatusError, AsyncAzureOpenAI, RateLimitError
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    AsyncAzureOpenAI,
+    AsyncOpenAI,
+    RateLimitError,
+)
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
@@ -21,6 +27,13 @@ from app.models import CostLedger
 logger = logging.getLogger(__name__)
 
 Tier = Literal["nano", "mini", "reason", "embed"]
+
+#: `anthropic` and `google` are accepted config values but have no client
+#: implementation yet - see ModelRouter.client(). Selecting one is honest about
+#: that (falls back to mock, same as an unconfigured Azure tier) rather than
+#: silently mis-routing to a provider that was never actually built.
+Provider = Literal["azure", "openai", "anthropic", "google"]
+_OPENAI_PROTOCOL_PROVIDERS = frozenset({"azure", "openai"})
 TaskClass = Literal[
     "classify",
     "route",
@@ -130,7 +143,11 @@ def _rejects_reasoning_effort(exc: BaseException) -> bool:
 #: is rejected by the Foundry endpoint with a confusing 401.
 AZURE_OPENAI_SCOPE = "https://cognitiveservices.azure.com/.default"
 
-AuthMode = Literal["api_key", "managed_identity", "mock"]
+#: "unauthenticated" is a self-hosted OpenAI-compatible server with no key
+#: configured - most (Ollama, vLLM, LM Studio) accept any request. Distinct
+#: from "mock" so the logs can tell "talking to a real local server" apart
+#: from "nothing is configured at all".
+AuthMode = Literal["api_key", "managed_identity", "unauthenticated", "mock"]
 
 #: One INFO line per distinct auth decision per process. "Why is it mocking?" has
 #: to be answerable from the logs without a redeploy.
@@ -235,6 +252,35 @@ def _warn_tier_is_off_the_default_account(tier: str, endpoint: str, deployment: 
         tier,
         endpoint,
         deployment,
+        tier,
+        price_in,
+        price_out,
+    )
+
+
+def _warn_tier_pricing_may_not_match_provider(tier: str, provider: str) -> None:
+    """The `openai`/`anthropic`/`google` sibling of `_warn_tier_is_off_the_default_account`.
+
+    `TIER_PRICES` is Azure list pricing. Routing a tier to a different provider
+    does not change what `cost_ledger` bills it at — a local model that costs
+    nothing gets billed as if it were `gpt-5.4-mini`, and the daily budget trips
+    on numbers that are not this provider's numbers. Said once per tier, same
+    as the Azure cross-account case, because there is no reliable way to look
+    up another vendor's live price from here.
+    """
+    key = f"provider::{tier}"
+    if key in _WARNED_OFF_DEFAULT:
+        return
+    _WARNED_OFF_DEFAULT.add(key)
+    price_in, price_out = TIER_PRICES[tier]  # type: ignore[index]
+    logger.warning(
+        "tier %r is served by provider %r, not azure — cost_ledger will still "
+        "bill it at TIER_PRICES[%r] = $%.2f/$%.2f per 1M, which is Azure "
+        "pricing and almost certainly wrong for this provider. Fix TIER_PRICES "
+        "in services/model_router.py and packages/model-router/src/index.ts "
+        "if per-bot cost accounting matters to you.",
+        tier,
+        provider,
         tier,
         price_in,
         price_out,
@@ -663,12 +709,12 @@ class ModelRouter:
         #: connection pool and its token cache — while a tier pointed at the
         #: xAI account gets its own. Keyed rather than counted so adding a
         #: third account is a config change and not a code change.
-        self._clients: dict[tuple[str, str], AsyncAzureOpenAI | None] = {}
+        self._clients: dict[tuple[str, str], AsyncAzureOpenAI | AsyncOpenAI | None] = {}
         #: An explicit override that serves *every* tier, ignoring the endpoint
         #: table entirely. Set by tests and by anything that has already built
         #: a client; a router handed one talks to that and nothing else, which
         #: is the only behaviour a caller who set it could reasonably expect.
-        self._client: AsyncAzureOpenAI | None = None
+        self._client: AsyncAzureOpenAI | AsyncOpenAI | None = None
         self.last_result: ChatResult | None = None
         #: Set by `client()`; None until it has been called at least once. With
         #: more than one endpoint in play this is the mode of the *most recent*
@@ -708,6 +754,57 @@ class ModelRouter:
             "embed": self.settings.azure_deployment_embed,
         }[tier]
 
+    def _openai_model(self, tier: Tier) -> str:
+        return {
+            "nano": self.settings.openai_model_nano,
+            "mini": self.settings.openai_model_mini,
+            "reason": self.settings.openai_model_reason,
+            "embed": self.settings.openai_model_embed,
+        }[tier]
+
+    def model_name(self, tier: Tier) -> str:
+        """The model/deployment name `tier` resolves to under its active provider.
+
+        Empty for `anthropic`/`google` (no client implementation yet, see
+        `client()`) or for `openai` with no model name configured - both read
+        as "cannot be resolved", the same outcome an Azure tier with no
+        deployment name would produce.
+        """
+        provider = self._provider_for(tier)
+        if provider == "azure":
+            return self._deployment(tier)
+        if provider == "openai":
+            return self._openai_model(tier)
+        return ""
+
+    def _provider_for(self, tier: Tier | None) -> Provider:
+        """Which provider serves `tier`. `tier=None` resolves the global
+        default only, matching the `tier=None` case of `_endpoint_for` -
+        no per-tier override lookup."""
+        raw = self.settings.model_provider if tier is None else (
+            getattr(self.settings, f"model_provider_{tier}", "") or ""
+        ).strip() or self.settings.model_provider
+        value = (raw or "azure").strip().lower()
+        if value not in ("azure", "openai", "anthropic", "google"):
+            logger.warning("unknown model_provider %r for tier %r — falling back to azure", raw, tier)
+            return "azure"
+        return value  # type: ignore[return-value]
+
+    def _openai_config_for(self, tier: Tier | None) -> tuple[str, str]:
+        """`(base_url, api_key)` for one tier on the `openai` provider.
+
+        Blank `base_url` means the SDK's own default (real OpenAI). `tier` is
+        None for the same "default account only" case `_endpoint_for`
+        documents.
+        """
+        shared_url = (self.settings.openai_base_url or "").strip()
+        shared_key = (self.settings.openai_api_key or "").strip()
+        if tier is None:
+            return shared_url, shared_key
+        url = (getattr(self.settings, f"openai_base_url_{tier}", "") or "").strip() or shared_url
+        key = (getattr(self.settings, f"openai_api_key_{tier}", "") or "").strip() or shared_key
+        return url, key
+
     def _endpoint_for(self, tier: Tier | None) -> tuple[str, str, str]:
         """`(endpoint, api_key, api_version)` for one tier.
 
@@ -739,13 +836,42 @@ class ModelRouter:
         _warn_tier_is_off_the_default_account(tier, override, self._deployment(tier))
         return override, (getattr(self.settings, f"azure_openai_api_key_{tier}", "") or "").strip(), version
 
-    def client(self, tier: Tier | None = None) -> AsyncAzureOpenAI | None:
-        """The client for `tier`'s account, or None when there is nothing to talk to.
+    def client(self, tier: Tier | None = None) -> AsyncAzureOpenAI | AsyncOpenAI | None:
+        """The client for `tier`'s active provider, or None when there is
+        nothing to talk to.
 
-        Three outcomes, in order, and they are decided **per endpoint** rather
-        than once for the router: a deployment can perfectly well have a live
-        `reason` account and a mock everything-else, and collapsing that into
-        one answer is how a working tier ends up returning canned text.
+        Dispatches on `_provider_for(tier)` first; everything else in this
+        class (`_request_kwargs`, `parse_tool_calls`, `billable_output_tokens`,
+        the streaming delta accumulator) reads the OpenAI response shape that
+        both `AsyncAzureOpenAI` and `AsyncOpenAI` return, so nothing downstream
+        of this method needs to know which provider produced a `ChatResult`.
+
+        * **azure** — see `_azure_client`: api_key, managed_identity, or mock.
+        * **openai** — see `_openai_client`: real OpenAI (api key required) or
+          a self-hosted OpenAI-compatible server, "local models" included -
+          same client, different `base_url`.
+        * **anthropic** / **google** — accepted config values, no client
+          implementation yet. Falls back to mock rather than guessing at a
+          wire format nobody has built.
+        """
+        if self._client is not None:
+            return self._client
+
+        provider = self._provider_for(tier)
+        if provider == "openai":
+            return self._openai_client(tier)
+        if provider != "azure":
+            detail = f"provider {provider!r} has no client implementation yet"
+            self._note_auth(f"{provider}::{tier}", "mock", detail)
+            return None
+        return self._azure_client(tier)
+
+    def _azure_client(self, tier: Tier | None) -> AsyncAzureOpenAI | None:
+        """Three outcomes, in order, and they are decided **per endpoint**
+        rather than once for the router: a deployment can perfectly well have
+        a live `reason` account and a mock everything-else, and collapsing
+        that into one answer is how a working tier ends up returning canned
+        text.
 
         * **api_key** — endpoint and key both set. Local dev against a real
           Foundry account; unchanged behaviour.
@@ -764,15 +890,15 @@ class ModelRouter:
         production reply read `[mock:mini] …`: the deployment has an endpoint but
         deliberately no key.
         """
-        if self._client is not None:
-            return self._client
-
         endpoint, api_key, api_version = self._endpoint_for(tier)
         cache_key = (endpoint, api_version)
         if cache_key in self._clients:
             cached = self._clients[cache_key]
             self.auth_mode = self.auth_modes.get(endpoint, "mock")
-            return cached
+            # Every azure cache_key is only ever set by this method, below, to
+            # an AsyncAzureOpenAI|None - the dict's value type is the union
+            # only because `_openai_client` shares the same cache.
+            return cast("AsyncAzureOpenAI | None", cached)
 
         if not endpoint:
             self._clients[cache_key] = None
@@ -807,6 +933,49 @@ class ModelRouter:
             "managed_identity",
             f"endpoint={endpoint} client_id={client_id or 'system-assigned'}",
         )
+        return client
+
+    def _openai_client(self, tier: Tier | None) -> AsyncOpenAI | None:
+        """Real OpenAI, or a self-hosted OpenAI-compatible server ("local
+        models" included — same client, a different `base_url`).
+
+        * **api_key** — a key is configured. Real OpenAI requires one; a
+          self-hosted server that also wants one (OpenRouter, a gateway with
+          auth in front of it) gets it here too.
+        * **unauthenticated** — `base_url` set, no key. Most self-hosted
+          servers (Ollama, vLLM, LM Studio) accept any non-empty string, so one
+          is sent rather than failing a request that would otherwise work.
+        * **mock** — neither is set. Real OpenAI cannot be reached keyless, and
+          nothing points at a self-hosted server either.
+        """
+        base_url, api_key = self._openai_config_for(tier)
+        cache_key = (f"openai::{base_url}", "")
+        if cache_key in self._clients:
+            cached = self._clients[cache_key]
+            self.auth_mode = self.auth_modes.get(base_url or "openai::default", "mock")
+            return cast("AsyncOpenAI | None", cached)
+
+        if not base_url and not api_key:
+            self._clients[cache_key] = None
+            self._note_auth(base_url or "openai::default", "mock", "no OPENAI_API_KEY and no OPENAI_BASE_URL")
+            return None
+
+        if tier is not None:
+            _warn_tier_pricing_may_not_match_provider(tier, "openai")
+
+        common: dict[str, Any] = {"timeout": self.settings.request_timeout_seconds}
+        if base_url:
+            common["base_url"] = base_url
+
+        if api_key:
+            client = AsyncOpenAI(api_key=api_key, **common)
+            self._clients[cache_key] = client
+            self._note_auth(base_url or "openai::default", "api_key", f"base_url={base_url or 'https://api.openai.com/v1'}")
+            return client
+
+        client = AsyncOpenAI(api_key="not-needed", **common)
+        self._clients[cache_key] = client
+        self._note_auth(base_url, "unauthenticated", f"base_url={base_url}")
         return client
 
     def _note_auth(self, endpoint: str, mode: AuthMode, detail: str) -> None:
@@ -860,9 +1029,9 @@ class ModelRouter:
         tool_choice: str | dict[str, Any] | None,
         reasoning_effort: str | None,
     ) -> dict[str, Any]:
-        deployment = self._deployment(tier)
+        model = self.model_name(tier)
         kwargs: dict[str, Any] = {
-            "model": deployment,
+            "model": model,
             "messages": messages,
             "timeout": self.settings.request_timeout_seconds,
         }
@@ -871,7 +1040,7 @@ class ModelRouter:
             if tool_choice is not None:
                 kwargs["tool_choice"] = tool_choice
         effort = normalise_effort(reasoning_effort)
-        if effort and (deployment, effort) not in self.rejected_efforts:
+        if effort and (model, effort) not in self.rejected_efforts:
             kwargs["reasoning_effort"] = effort
         return kwargs
 
