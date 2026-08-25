@@ -1,6 +1,6 @@
 temporalio==1.9.0
 httpx==0.28.1
-pydantic-settings==2.8.1
+pydantic-settings==2.15.0
 sqlalchemy[asyncio]==2.0.40
 asyncpg==0.30.0
 pyyaml==6.0.2
