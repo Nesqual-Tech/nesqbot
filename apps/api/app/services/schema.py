@@ -137,8 +137,26 @@ async def ensure_schema(engine: AsyncEngine) -> None:
     for stmt in statements:
         # Each statement gets its own transaction so one failure (e.g. missing
         # pgvector extension) does not abort the rest of the bootstrap.
+        #
+        # `lock_timeout` is what makes that failure *fast*. A DDL statement
+        # here (CREATE TABLE / ADD COLUMN / CREATE INDEX) takes an ACCESS
+        # EXCLUSIVE lock, and with no timeout a single other session merely
+        # holding a weaker lock on the same table — an idle-in-transaction
+        # connection, a long SELECT — blocks it *indefinitely*, with no
+        # exception and nothing to catch: Postgres is genuinely waiting, not
+        # erroring. That hang sits ahead of every other line in this
+        # function, including its own completion log below, so the process
+        # never reaches the point of serving `/api/health` at all — which
+        # reads to Container Apps' startup probe as a dead container, and it
+        # kills and restarts the replica once the probe's failure budget
+        # runs out, forever, since the same lock is still held on the next
+        # attempt. 5 seconds is generous for a lock a healthy deployment
+        # should never hold this long anyway; failing that one statement and
+        # logging it (same as any other bootstrap failure) is strictly
+        # better than an unexplained boot that never completes.
         try:
             async with engine.begin() as conn:
+                await conn.execute(text("SET LOCAL lock_timeout = '5s'"))
                 await conn.execute(text(stmt))
         except Exception as exc:  # noqa: BLE001 - dev bootstrap must not crash boot
             failures += 1
