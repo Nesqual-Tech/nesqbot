@@ -111,6 +111,10 @@ class _FakeGoogleAdapter:
 
 
 async def test_azure_hits_the_deployments_endpoint_not_the_model_catalog(monkeypatch):
+    # `azure_openai_api_version` set to something the deployments-list
+    # endpoint does NOT accept, on purpose - see the pinned-version comment
+    # on `_azure_list_all_deployments`. This proves the call ignores the
+    # configured chat api-version entirely for this one endpoint.
     router = ModelRouter(_settings(azure_openai_api_version="2024-10-21"))
     fake = _FakeAzureClient({"data": [{"id": "gpt-5.6-luna"}, {"id": "gpt-5.4-mini"}]})
     monkeypatch.setattr(router, "_azure_client", lambda tier: fake)
@@ -120,7 +124,7 @@ async def test_azure_hits_the_deployments_endpoint_not_the_model_catalog(monkeyp
     assert models == ["gpt-5.4-mini", "gpt-5.6-luna"]
     path, options = fake.calls[0]
     assert path == "/deployments"
-    assert options["params"]["api-version"] == "2024-10-21"
+    assert options["params"]["api-version"] == "2023-03-15-preview"
 
 
 async def test_azure_drops_deployment_rows_with_no_id(monkeypatch):

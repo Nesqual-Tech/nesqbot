@@ -1983,10 +1983,22 @@ class ModelRouter:
             # for an undocumented endpoint: it hands back the parsed JSON body
             # as-is (a dict here), typed `object` because that is genuinely
             # all the SDK can promise for a response shape it does not know.
+            #
+            # `api-version=2023-03-15-preview`, not `self.settings.
+            # azure_openai_api_version` — deliberately pinned, not the
+            # configured chat api-version. Verified live against this
+            # deployment's own resource: `GET /openai/deployments` 404s on
+            # every api-version actually used for chat (2023-05-15,
+            # 2024-02-01, 2024-10-21, and the configured 2024-12-01-preview
+            # all 404 "Resource not found"), and answers correctly only on
+            # this one. This *is* the version to request the deployments
+            # list with, on any account, regardless of which version its
+            # deployments are actually served on for chat completions - the
+            # two are unrelated axes.
             body = cast("dict[str, Any]", await client.get(
                 "/deployments",
                 cast_to=object,
-                options={"params": {"api-version": self.settings.azure_openai_api_version}},
+                options={"params": {"api-version": "2023-03-15-preview"}},
             ))
             models.update(row["id"] for row in (body.get("data") or []) if row.get("id"))
         return sorted(models)
