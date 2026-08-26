@@ -3832,6 +3832,18 @@ class Orchestrator:
                 "Nothing on the screen changed as a result of this call."
             )
         lines = [f"{action} ran and reported success."]
+        if outcome_result.get("mock"):
+            # Same truthfulness the screenshot path already applies (see the
+            # `screen.get("mock")` note above): a mock deployment has no real
+            # desktop behind it, so "ran and reported success" on its own reads
+            # to the model exactly like a genuine action and gets narrated as
+            # one. Without this, the honest disclosure only reached actions that
+            # happen to attach a screenshot — click, type, key, scroll and drag
+            # do not — and the model reported work it never did.
+            lines.append(
+                "NOTE: this deployment has no real desktop (BOT_DESKTOP_MODE=mock) — nothing "
+                "actually happened on a screen. Do not describe this as if it were a real action."
+            )
         if action == DESKTOP_WINDOWS:
             lines.append(self._windows_line(outcome_result))
         if action in (DESKTOP_START, DESKTOP_STOP):

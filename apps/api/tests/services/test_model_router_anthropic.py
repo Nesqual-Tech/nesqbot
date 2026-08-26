@@ -250,9 +250,9 @@ def test_anthropic_request_sets_a_default_max_tokens():
     assert request["model"] == "claude-opus-4-5"
 
 
-def test_anthropic_request_drops_reasoning_effort_silently():
-    """Not mapped to `thinking` - deliberately ignored, see the docstring on
-    `_anthropic_request`. Must not appear in the outgoing request at all."""
+def test_anthropic_request_never_forwards_the_raw_reasoning_effort_string():
+    """`reasoning_effort` itself is an Azure/OpenAI-shaped param name and must
+    never appear verbatim on an Anthropic request, mapped or not."""
     request = _anthropic_request(
         {
             "model": "claude-opus-4-5",
@@ -262,7 +262,70 @@ def test_anthropic_request_drops_reasoning_effort_silently():
         }
     )
     assert "reasoning_effort" not in request
-    assert "thinking" not in request
+
+
+def test_anthropic_request_omits_thinking_for_none_or_unset_effort():
+    for effort in (None, "none", "bogus"):
+        request = _anthropic_request(
+            {
+                "model": "claude-opus-4-5",
+                "messages": [{"role": "user", "content": "hi"}],
+                "timeout": 60.0,
+                "reasoning_effort": effort,
+            }
+        )
+        assert "thinking" not in request
+        assert request["max_tokens"] == ANTHROPIC_DEFAULT_MAX_TOKENS
+
+
+@pytest.mark.parametrize(
+    ("effort", "expected_budget"),
+    [("minimal", 1024), ("low", 2048), ("medium", 4096), ("high", 8192)],
+)
+def test_anthropic_request_maps_reasoning_effort_to_a_thinking_budget(effort, expected_budget):
+    request = _anthropic_request(
+        {
+            "model": "claude-opus-4-5",
+            "messages": [{"role": "user", "content": "hi"}],
+            "timeout": 60.0,
+            "reasoning_effort": effort,
+        }
+    )
+    assert request["thinking"] == {"type": "enabled", "budget_tokens": expected_budget}
+    # Anthropic 400s unless max_tokens exceeds the thinking budget.
+    assert request["max_tokens"] > expected_budget
+
+
+def test_anthropic_request_drops_a_forced_tool_choice_when_thinking_is_enabled():
+    """Extended thinking only permits `tool_choice: auto` (or none) - a
+    forced choice would otherwise ship a request Anthropic rejects outright."""
+    request = _anthropic_request(
+        {
+            "model": "claude-opus-4-5",
+            "messages": [{"role": "user", "content": "hi"}],
+            "timeout": 60.0,
+            "reasoning_effort": "high",
+            "tools": [{"type": "function", "function": {"name": "click", "parameters": {}}}],
+            "tool_choice": {"type": "function", "function": {"name": "click"}},
+        }
+    )
+    assert "thinking" in request
+    assert "tool_choice" not in request
+
+
+def test_anthropic_request_keeps_an_auto_tool_choice_when_thinking_is_enabled():
+    request = _anthropic_request(
+        {
+            "model": "claude-opus-4-5",
+            "messages": [{"role": "user", "content": "hi"}],
+            "timeout": 60.0,
+            "reasoning_effort": "medium",
+            "tools": [{"type": "function", "function": {"name": "click", "parameters": {}}}],
+            "tool_choice": "auto",
+        }
+    )
+    assert request["thinking"] == {"type": "enabled", "budget_tokens": 4096}
+    assert request["tool_choice"] == {"type": "auto"}
 
 
 def test_anthropic_request_omits_tools_and_tool_choice_when_absent():

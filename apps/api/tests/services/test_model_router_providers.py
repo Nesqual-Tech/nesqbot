@@ -22,7 +22,9 @@ from app.models import Bot
 from app.services.model_router import (
     _LOGGED_AUTH_MODES,
     _WARNED_OFF_DEFAULT,
+    MODEL_PRICES,
     ModelRouter,
+    estimate_cost_usd,
 )
 
 
@@ -334,3 +336,91 @@ async def test_stream_chat_also_honours_the_bot_override():
     chunks = [c async for c in router.stream_chat(task="agent_turn", messages=[{"role": "user", "content": "hi"}], bot=bot)]
     assert chunks == ["hi"]
     assert fake.calls[0]["model"] == "gpt-5.1-mega"
+
+
+# ---------------------------------------------------------------------------
+# Per-model pricing — a bot pinned to a real model should be billed at that
+# model's real price, not a guess borrowed from whichever Azure tier the task
+# class happens to map to.
+# ---------------------------------------------------------------------------
+
+
+def test_estimate_cost_usd_uses_the_model_price_when_known():
+    # gpt-5.4-mini is $0.75/$4.50 per 1M in MODEL_PRICES, and also happens to
+    # be the "mini" tier's own price - pick a model whose price differs from
+    # the tier it would otherwise borrow to prove the model table won.
+    cost = estimate_cost_usd("nano", 1_000_000, 1_000_000, model="gpt-5.4-mini")
+    assert float(cost) == pytest.approx(0.75 + 4.50)
+
+
+def test_estimate_cost_usd_falls_back_to_tier_price_for_an_unknown_model():
+    assert "definitely-not-a-real-model" not in MODEL_PRICES
+    cost = estimate_cost_usd("nano", 1_000_000, 1_000_000, model="definitely-not-a-real-model")
+    inp, out = 0.20, 1.20  # TIER_PRICES["nano"]
+    assert float(cost) == pytest.approx(inp + out)
+
+
+def test_estimate_cost_usd_falls_back_to_tier_price_when_model_is_none():
+    cost = estimate_cost_usd("nano", 1_000_000, 1_000_000)
+    assert float(cost) == pytest.approx(0.20 + 1.20)
+
+
+async def test_chat_bills_a_pinned_bot_at_its_models_real_price_not_the_tier():
+    router = ModelRouter(_settings(openai_api_key="sk-test"))
+    bot = _bot(model_provider="openai", model_name="gpt-4o")  # $2.50/$10.00, not any tier's price
+
+    class _Recording:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=self)
+
+        async def create(self, **kwargs):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=None))],
+                usage=SimpleNamespace(prompt_tokens=1_000_000, completion_tokens=1_000_000, total_tokens=2_000_000),
+            )
+
+    router._openai_client = lambda tier: _Recording()
+    result = await router.chat(task="agent_turn", messages=[{"role": "user", "content": "hi"}], bot=bot)
+    assert float(result.cost_usd) == pytest.approx(2.50 + 10.00)
+
+
+async def test_a_known_model_price_suppresses_the_tier_pricing_warning(caplog):
+    """The warning exists because the tier price is usually wrong for a
+    non-Azure bot - it must not fire when the price is actually right."""
+    router = ModelRouter(_settings(openai_api_key="sk-test"))
+    bot = _bot(model_provider="openai", model_name="gpt-4o")
+
+    class _Recording:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=self)
+
+        async def create(self, **kwargs):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=None))],
+                usage=SimpleNamespace(prompt_tokens=5, completion_tokens=2),
+            )
+
+    router._openai_client = lambda tier: _Recording()
+    with caplog.at_level("WARNING"):
+        await router.chat(task="agent_turn", messages=[{"role": "user", "content": "hi"}], bot=bot)
+    assert not any("cost_ledger" in record.message for record in caplog.records)
+
+
+async def test_an_unlisted_model_still_gets_the_tier_pricing_warning(caplog):
+    router = ModelRouter(_settings(openai_api_key="sk-test"))
+    bot = _bot(model_provider="openai", model_name="some-brand-new-model")
+
+    class _Recording:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=self)
+
+        async def create(self, **kwargs):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=None))],
+                usage=SimpleNamespace(prompt_tokens=5, completion_tokens=2),
+            )
+
+    router._openai_client = lambda tier: _Recording()
+    with caplog.at_level("WARNING"):
+        await router.chat(task="agent_turn", messages=[{"role": "user", "content": "hi"}], bot=bot)
+    assert any("cost_ledger" in record.message for record in caplog.records)

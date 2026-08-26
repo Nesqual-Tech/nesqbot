@@ -37,6 +37,8 @@ export type IconName =
   | "keyboard"
   | "search"
   | "command"
+  | "list"
+  | "book"
 
 /** Path data on a 24x24 grid. Stroked, never filled, so weight stays uniform. */
 const PATHS: Record<IconName, string> = {
@@ -70,6 +72,13 @@ const PATHS: Record<IconName, string> = {
   search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14Zm5 12 4 4",
   command:
     "M9 9h6v6H9V9Zm0 0V6a3 3 0 1 0-3 3h3Zm6 0V6a3 3 0 1 1 3 3h-3Zm-6 6v3a3 3 0 1 1-3-3h3Zm6 0v3a3 3 0 1 0 3-3h-3Z",
+  // A ledger, not a to-do list: rows of a fixed width rather than checkboxes,
+  // for the audit trail's "what happened, in order" rather than "what is
+  // left to do".
+  list: "M4 6h16M4 12h16M4 18h10",
+  // Two pages meeting at a spine — the knowledge base, distinct from `list`'s
+  // rows-of-equal-width ledger.
+  book: "M12 6.5C10.5 5 8 4 4 4v14c4 0 6.5 1 8 2.5m0-14C13.5 5 16 4 20 4v14c-4 0-6.5 1-8 2.5m0-14v14",
 }
 
 export interface IconProps extends Omit<SVGProps<SVGSVGElement>, "name"> {

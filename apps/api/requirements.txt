@@ -19,6 +19,14 @@ openai==1.70.0
 # Message/Usage/the streaming event types were read off this exact version's
 # type definitions, not guessed).
 anthropic==1.0.0
+# Same lazy-import pattern, inside ModelRouter._google_client(). Pinned to the
+# version verified against services/model_router.py's `_google_*` translation
+# layer (field names on Content/Part/FunctionCall/GenerateContentResponse/
+# UsageMetadata were read off this exact version's own pydantic model_fields,
+# not guessed). Built against `models.generate_content` - the mature,
+# strongly-typed entry point - not the newer, loosely-typed
+# `client.interactions.create` surface this SDK also exposes.
+google-genai==2.20.0
 pyyaml==6.0.2
 python-multipart==0.0.20
 orjson==3.10.16
@@ -37,6 +45,11 @@ aiohttp==3.11.16
 # (subnet_ids and identity-based ACR pull both need 2021-09-01 or newer).
 azure-mgmt-containerinstance==10.1.0
 azure-keyvault-secrets==4.9.0
+# Bot Desktop on a generic self-hosted Kubernetes cluster (BOT_DESKTOP_MODE=k8s).
+# Imported lazily inside app/services/desktop.py, so mock/docker/aci deployments
+# never load it. The official client, not a cloud-specific SDK - it talks to any
+# standard cluster via kubeconfig.
+kubernetes==31.0.0
 sse-starlette==2.2.1
 # The Bot Desktop stream proxy dials websockify over RFC 6455 as a *client*
 # (app/routers/desktop.py). uvicorn[standard] already drags this in for the

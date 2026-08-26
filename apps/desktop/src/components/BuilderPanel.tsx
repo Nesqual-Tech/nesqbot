@@ -1,15 +1,224 @@
-import { useEffect, useState, type CSSProperties } from "react"
+import { useCallback, useEffect, useState, type CSSProperties } from "react"
 import { getBotColor, riskLabels } from "@nesqbot/ui"
 import { errorMessage } from "../api/client"
-import { getProviders } from "../api/endpoints"
+import { createMemory, deleteMemory, getProviders, listMemories, reseedSystemBots } from "../api/endpoints"
 import type { BotsApi } from "../hooks/useBots"
-import { cx, initials, usd } from "../lib/format"
+import { cx, initials, relativeTime, usd } from "../lib/format"
 import { GATED_RISKS } from "../lib/risk"
 import { useToast } from "../state/AppState"
 import { EmptyState, ErrorState } from "./EmptyState"
 import { Icon } from "./Icon"
 import { Spinner } from "./Spinner"
-import type { Bot, DesktopProfile, ModelProvider } from "../types"
+import type { Bot, DesktopProfile, Memory, MemoryKind, ModelProvider } from "../types"
+
+const MEMORY_KINDS: MemoryKind[] = ["fact", "preference", "contact", "procedure", "note"]
+
+/**
+ * What this one bot has learned — separate from the Knowledge tab's shared
+ * KB on purpose: `GET/POST /bots/{id}/memories` is scoped to a bot (and
+ * within it, per user), where `/kb` is organisation-wide. Living inside the
+ * edit form rather than its own tab because there is nothing to say about a
+ * bot's memories without a bot already selected — the same reasoning that
+ * keeps the provider/model picker here instead of a dedicated screen.
+ */
+function MemoriesSection({ bot }: { bot: Bot }) {
+  const toast = useToast()
+  const [memories, setMemories] = useState<Memory[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<unknown>(null)
+  const [kind, setKind] = useState<MemoryKind>("note")
+  const [content, setContent] = useState("")
+  const [adding, setAdding] = useState(false)
+  const [open, setOpen] = useState(false)
+
+  const load = useCallback(async () => {
+    setError(null)
+    try {
+      setMemories(await listMemories(bot.id, 50))
+    } catch (err) {
+      setError(err)
+    } finally {
+      setLoading(false)
+    }
+  }, [bot.id])
+
+  useEffect(() => {
+    setLoading(true)
+    void load()
+  }, [load])
+
+  const add = async () => {
+    if (!content.trim()) return
+    setAdding(true)
+    try {
+      await createMemory(bot.id, { kind, content: content.trim() })
+      setContent("")
+      toast.success("Memory added")
+      await load()
+    } catch (err) {
+      toast.error("Could not add the memory", errorMessage(err))
+    } finally {
+      setAdding(false)
+    }
+  }
+
+  const remove = async (id: string) => {
+    try {
+      await deleteMemory(id)
+      setMemories((current) => current.filter((m) => m.id !== id))
+    } catch (err) {
+      toast.error("Could not remove the memory", errorMessage(err))
+    }
+  }
+
+  return (
+    <section className="card builder__memories">
+      <button
+        type="button"
+        className="disclosure"
+        aria-expanded={open}
+        onClick={() => setOpen((prev) => !prev)}
+      >
+        <Icon name={open ? "collapse" : "expand"} size={14} />
+        {open ? "Hide memories" : `What ${bot.name} remembers${loading ? "" : ` (${memories.length})`}`}
+      </button>
+
+      {open ? (
+        <div className="reveal builder__memories-body">
+          <div className="builder__memory-add">
+            <select className="select" value={kind} onChange={(event) => setKind(event.target.value as MemoryKind)}>
+              {MEMORY_KINDS.map((k) => (
+                <option key={k} value={k}>
+                  {k}
+                </option>
+              ))}
+            </select>
+            <input
+              className="input"
+              value={content}
+              onChange={(event) => setContent(event.target.value)}
+              placeholder="Something this bot should remember…"
+              onKeyDown={(event) => event.key === "Enter" && void add()}
+            />
+            <button type="button" className="btn btn--primary btn--sm" onClick={() => void add()} disabled={adding || !content.trim()}>
+              {adding ? <Spinner inline label="Adding" /> : "Add"}
+            </button>
+          </div>
+
+          {loading ? <Spinner inline label="Loading memories" /> : null}
+          {error && !loading ? <ErrorState error={error} title="Memories unavailable" onRetry={() => void load()} /> : null}
+          {!loading && !error && memories.length === 0 ? (
+            <p className="field__hint">Nothing yet. Memories accumulate as this bot works, or add one by hand above.</p>
+          ) : null}
+
+          {memories.length > 0 ? (
+            <ul className="builder__memory-list">
+              {memories.map((memory) => (
+                <li key={memory.id} className="builder__memory-item">
+                  <span className="chip chip--muted">{memory.kind}</span>
+                  <span className="builder__memory-content">{memory.content}</span>
+                  <span className="builder__memory-time">{relativeTime(memory.created_at)}</span>
+                  <button
+                    type="button"
+                    className="btn btn--ghost btn--xs"
+                    onClick={() => void remove(memory.id)}
+                    aria-label="Delete this memory"
+                  >
+                    <Icon name="trash" size={13} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  )
+}
+
+/**
+ * Starting points for "New teammate" — a role, a prompt and a desktop
+ * profile someone can start from and rename, not a bot they're stuck with.
+ * Written to the same rule `docs/bots.md` holds the five system bots to:
+ * describe the *role* only. The desktop capability text, the action
+ * protocol and the approval rules are composed in at turn time by
+ * `services.orchestrator` from one constant — repeating them here would be
+ * the sixth copy of the same paragraph the system-bot YAML files already
+ * agreed not to have.
+ */
+interface BotTemplate {
+  id: string
+  label: string
+  role: string
+  desktop_profile: DesktopProfile
+  system_prompt: string
+}
+
+const BOT_TEMPLATES: BotTemplate[] = [
+  {
+    id: "support",
+    label: "Customer Support",
+    role: "Tickets & KB",
+    desktop_profile: "xfce",
+    system_prompt:
+      "You classify incoming tickets, draft KB-grounded replies with citations, and escalate with a context " +
+      "pack when the knowledge base does not answer something — say so plainly rather than inventing a " +
+      "procedure. Do the classification and the drafting in this turn rather than describing them. Sending is " +
+      "gated and stops for a human on its own.",
+  },
+  {
+    id: "research",
+    label: "Research Analyst",
+    role: "Market & company research",
+    desktop_profile: "xfce",
+    system_prompt:
+      "You research companies, markets and competitors, and turn what you find into a structured brief with " +
+      "sources. You have a real Linux desktop with a browser: open the site, read what is actually there, and " +
+      "record what you actually found — never a fact you did not see. Do the research in this turn rather than " +
+      "describing how you would approach it.",
+  },
+  {
+    id: "writer",
+    label: "Content Writer",
+    role: "Drafts & copy",
+    desktop_profile: "icewm",
+    system_prompt:
+      "You draft blog posts, social copy and marketing pages in the voice you are given, and revise against " +
+      "feedback rather than re-explaining the brief back. Write the draft in this turn; do not describe what " +
+      "you are about to write. Publishing anywhere external is gated and stops for a human.",
+  },
+  {
+    id: "assistant",
+    label: "Executive Assistant",
+    role: "Calendar & inbox",
+    desktop_profile: "xfce",
+    system_prompt:
+      "You triage the inbox, manage the calendar, and prepare briefs before meetings. Flag conflicts and " +
+      "overdue replies rather than letting them sit. Do the triage in this turn rather than listing what you " +
+      "could do. Sending and scheduling on someone else's behalf are gated and stop for a human.",
+  },
+  {
+    id: "recruiter",
+    label: "Recruiter",
+    role: "Sourcing & screening",
+    desktop_profile: "xfce",
+    system_prompt:
+      "You source candidates, screen resumes against a role's requirements, and draft outreach. Score fit " +
+      "against the stated requirements, not a vibe, and say when a candidate is a stretch rather than " +
+      "inflating the match. Do the sourcing and screening in this turn. Sending outreach is gated and stops " +
+      "for a human.",
+  },
+  {
+    id: "analyst",
+    label: "Data Analyst",
+    role: "Reports & dashboards",
+    desktop_profile: "icewm",
+    system_prompt:
+      "You pull numbers into structured reports, flag anomalies against the prior period, and keep a running " +
+      "note of where each figure came from. A total that does not reconcile gets flagged, never smoothed over. " +
+      "Do the analysis in this turn rather than describing the approach.",
+  },
+]
 
 const PROVIDER_LABEL: Record<ModelProvider, string> = {
   azure: "Azure OpenAI",
@@ -164,6 +373,33 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
   const toast = useToast()
   const [draft, setDraft] = useState(EMPTY_DRAFT)
   const [creating, setCreating] = useState(false)
+  const [appliedTemplate, setAppliedTemplate] = useState<string | null>(null)
+  const [reseeding, setReseeding] = useState(false)
+
+  /** Fills role/prompt/profile from a template; the name stays whatever was
+   * already typed — a template is a starting point, not a rename. */
+  const applyTemplate = (template: BotTemplate) => {
+    setAppliedTemplate(template.id)
+    setDraft((current) => ({
+      ...current,
+      role: template.role,
+      system_prompt: template.system_prompt,
+      desktop_profile: template.desktop_profile,
+    }))
+  }
+
+  const reseed = async () => {
+    setReseeding(true)
+    try {
+      const result = await reseedSystemBots()
+      toast.success("System bots reseeded", result.detail ?? "Done")
+      await bots.refetch()
+    } catch (err) {
+      toast.error("Could not reseed", errorMessage(err))
+    } finally {
+      setReseeding(false)
+    }
+  }
 
   const selected: Bot | null = bots.bots.find((b) => b.id === activeBotId) ?? null
   const [edit, setEdit] = useState({
@@ -290,6 +526,17 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
             rule as everyone else: it stops before anything consequential.
           </p>
         </div>
+        <div className="panel__header-actions">
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            onClick={() => void reseed()}
+            disabled={reseeding}
+            title="Re-apply bots/*.yaml on the backend without restarting it — creates any new system bot, reconciles existing ones"
+          >
+            {reseeding ? <Spinner inline label="Reseeding" /> : "Reseed system bots"}
+          </button>
+        </div>
       </header>
 
       <div className="panel__body">
@@ -299,6 +546,19 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
 
         <section className="subpanel">
           <h3 className="subpanel__title">New teammate</h3>
+
+          <div className="builder__templates" role="group" aria-label="Start from a template">
+            {BOT_TEMPLATES.map((template) => (
+              <button
+                key={template.id}
+                type="button"
+                className={cx("chip", appliedTemplate === template.id && "chip--active")}
+                onClick={() => applyTemplate(template)}
+              >
+                {template.label}
+              </button>
+            ))}
+          </div>
 
           {/*
             Form on the left, the thing being made on the right. The preview is
@@ -556,6 +816,8 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
               />
             </div>
           )}
+
+          {selected ? <MemoriesSection bot={selected} /> : null}
         </section>
       </div>
     </section>

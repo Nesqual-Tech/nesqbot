@@ -7,7 +7,6 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import { AuthProvider } from "../auth"
 import { uid } from "../lib/format"
 import { TakeoverProvider } from "./takeover"
-import { ThemeProvider } from "./theme"
 import type { DesktopActionInput, RecorderStep } from "../types"
 
 /* ------------------------------------------------------------------ toasts */
@@ -126,7 +125,7 @@ export function useToast(): ToastContextValue {
 
 /* --------------------------------------------------------------- selection */
 
-export type PanelTab = "chat" | "approvals" | "integrations" | "routines" | "usage" | "builder"
+export type PanelTab = "chat" | "approvals" | "integrations" | "routines" | "usage" | "audit" | "knowledge" | "builder"
 
 interface SelectionContextValue {
   tab: PanelTab
@@ -354,16 +353,14 @@ export function useRecorder(): RecorderContextValue {
  */
 export function AppProviders({ children }: { children: ReactNode }) {
   return (
-    <ThemeProvider>
-      <AuthProvider>
-        <ToastProvider>
-          <SelectionProvider>
-            <TakeoverProvider>
-              <RecorderProvider>{children}</RecorderProvider>
-            </TakeoverProvider>
-          </SelectionProvider>
-        </ToastProvider>
-      </AuthProvider>
-    </ThemeProvider>
+    <AuthProvider>
+      <ToastProvider>
+        <SelectionProvider>
+          <TakeoverProvider>
+            <RecorderProvider>{children}</RecorderProvider>
+          </TakeoverProvider>
+        </SelectionProvider>
+      </ToastProvider>
+    </AuthProvider>
   )
 }

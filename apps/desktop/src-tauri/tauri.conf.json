@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Nesq Bot",
-  "version": "0.2.4",
+  "version": "0.5.0",
   "identifier": "com.nesqualtech.nesqbot",
   "build": {
     "frontendDist": "../dist",
@@ -25,7 +25,7 @@
     ],
     "security": {
       "capabilities": ["default"],
-      "csp": "default-src 'self' ipc: http://ipc.localhost; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: asset: http://asset.localhost https://your-api.example.com http://localhost:8080 http://127.0.0.1:8080; media-src 'self' blob: data:; connect-src 'self' ipc: http://ipc.localhost https://your-api.example.com wss://your-api.example.com http://localhost:8080 http://127.0.0.1:8080 ws://localhost:8080 ws://127.0.0.1:8080; frame-src 'self' https://your-api.example.com http://localhost:8080 http://127.0.0.1:8080; worker-src 'self' blob:"
+      "csp": "default-src 'self' ipc: http://ipc.localhost; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: asset: http://asset.localhost https://nesqbot-prod-api.proudcoast-679cb5ac.swedencentral.azurecontainerapps.io http://localhost:8080 http://127.0.0.1:8080; media-src 'self' blob: data:; connect-src 'self' ipc: http://ipc.localhost https://nesqbot-prod-api.proudcoast-679cb5ac.swedencentral.azurecontainerapps.io wss://nesqbot-prod-api.proudcoast-679cb5ac.swedencentral.azurecontainerapps.io http://localhost:8080 http://127.0.0.1:8080 ws://localhost:8080 ws://127.0.0.1:8080; frame-src 'self' https://nesqbot-prod-api.proudcoast-679cb5ac.swedencentral.azurecontainerapps.io http://localhost:8080 http://127.0.0.1:8080; worker-src 'self' blob:"
     }
   },
   "plugins": {
@@ -40,7 +40,7 @@
     "targets": ["nsis", "msi", "app", "dmg", "deb", "rpm", "appimage"],
     "publisher": "Nesqual Tech SRL",
     "homepage": "https://nesqualtech.com",
-    "copyright": "Ã‚Â© 2026 Nesqual Tech SRL",
+    "copyright": "© 2026 Nesqual Tech SRL",
     "category": "Productivity",
     "shortDescription": "Nesq Bot desktop",
     "icon": [
@@ -51,7 +51,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "longDescription": "Nesq Bot Ã¢â‚¬â€ always-on AI teammates with their own isolated Linux desktop, connectors, and human approval before anything consequential leaves the building.",
+    "longDescription": "Nesq Bot — always-on AI teammates with their own isolated Linux desktop, connectors, and human approval before anything consequential leaves the building.",
     "macOS": {
       "minimumSystemVersion": "11.0",
       "hardenedRuntime": true,

@@ -12,16 +12,23 @@
  * and does, is tell you what the backend already has configured
  * (`GET /bots/providers`) and let you assign a bot to one of the providers
  * that are actually live (`PATCH /bots/{id}`).
+ *
+ * Steps 2 and 3 hit those two endpoints, and both require a session — see
+ * `SignInStep` below. Step 1 does not: `GET /health` is intentionally
+ * unauthenticated, which is what lets the wizard probe a candidate backend
+ * before anyone has a token for it.
  */
 import { useCallback, useEffect, useState } from "react"
 import { brand } from "@nesqbot/ui"
-import { API_BASE, DEFAULT_API_BASE, errorMessage, isApiError, setApiBase } from "../api/client"
+import { API_BASE, DEFAULT_API_BASE, REQUIRES_SIGN_IN, errorMessage, isApiError, setApiBase } from "../api/client"
 import { getHealth, getProviders, listBots, updateBot } from "../api/endpoints"
 import { useMutation } from "../hooks/useAsync"
 import { markSetupComplete } from "../state/setup"
 import { cx } from "../lib/format"
+import { EntraCancelledError, useAuth } from "../auth"
 import { Icon } from "./Icon"
 import { NesqualLockup } from "./Brand"
+import { SessionBootScreen } from "./SignInScreen"
 import { Spinner } from "./Spinner"
 import type { Bot, ModelProvider, ProvidersOut } from "../types"
 
@@ -44,11 +51,23 @@ type Step = "endpoint" | "providers" | "bots"
 export function SetupWizard({ onDone }: { onDone: () => void }) {
   const [step, setStep] = useState<Step>("endpoint")
   const [endpointConfirmed, setEndpointConfirmed] = useState(false)
+  const { status, entraAvailable } = useAuth()
 
   const finish = useCallback(() => {
     markSetupComplete()
     onDone()
   }, [onDone])
+
+  /**
+   * Steps 2 and 3 call real protected endpoints (`GET /bots/providers`,
+   * `GET /bots`, `PATCH /bots/{id}`) — on purpose, they are not meant to be
+   * reachable by anyone who can merely reach the API. Against a production
+   * build with no dev bypass, that means a session is required before either
+   * step can do anything but 401. Same fallback `AuthGate` uses for `Shell`:
+   * a build with no Entra registration has no sign-in to offer, so it falls
+   * through rather than dead-ending.
+   */
+  const needsSignIn = endpointConfirmed && step !== "endpoint" && REQUIRES_SIGN_IN && entraAvailable && status !== "authenticated"
 
   return (
     <div className="signin-screen">
@@ -75,12 +94,75 @@ export function SetupWizard({ onDone }: { onDone: () => void }) {
           />
         ) : null}
 
-        {step === "providers" ? (
-          <ProvidersStep onBack={() => setStep("endpoint")} onNext={() => setStep("bots")} />
-        ) : null}
+        {step !== "endpoint" && needsSignIn ? (
+          status === "loading" ? (
+            <SessionBootScreen />
+          ) : (
+            <SignInStep onBack={() => setStep("endpoint")} />
+          )
+        ) : (
+          <>
+            {step === "providers" ? (
+              <ProvidersStep onBack={() => setStep("endpoint")} onNext={() => setStep("bots")} />
+            ) : null}
 
-        {step === "bots" ? <BotsStep onBack={() => setStep("providers")} onFinish={finish} /> : null}
+            {step === "bots" ? <BotsStep onBack={() => setStep("providers")} onFinish={finish} /> : null}
+          </>
+        )}
       </main>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ *
+ * Between step 1 and step 2 — sign in if the backend requires it
+ * ------------------------------------------------------------------ */
+
+function SignInStep({ onBack }: { onBack: () => void }) {
+  const { signingIn, error, signInWithEntra, clearError } = useAuth()
+
+  const onSignIn = useCallback(() => {
+    clearError()
+    void signInWithEntra().catch(() => {
+      // A cancelled sign-in (closed browser tab) is a normal outcome.
+    })
+  }, [signInWithEntra, clearError])
+
+  const showError = error !== null && !(error instanceof EntraCancelledError)
+
+  return (
+    <div className="setup-wizard__step">
+      <h1 className="setup-wizard__headline">Sign in to continue</h1>
+      <p className="setup-wizard__body">
+        Providers and per-bot model assignment are account-scoped on the backend, so this step needs a signed-in
+        session.
+      </p>
+
+      <div className="setup-wizard__actions-row">
+        <button type="button" className="btn btn--primary" onClick={onSignIn} disabled={signingIn}>
+          {signingIn ? (
+            <Spinner inline label="Waiting for your browser…" />
+          ) : (
+            <>
+              <Icon name="user" size={16} />
+              Sign in with Microsoft
+            </>
+          )}
+        </button>
+      </div>
+
+      {showError ? (
+        <div className="setup-wizard__error" role="alert">
+          <Icon name="alert" size={15} />
+          <span>{errorMessage(error)}</span>
+        </div>
+      ) : null}
+
+      <div className="setup-wizard__actions">
+        <button type="button" className="btn btn--ghost" onClick={onBack}>
+          Back
+        </button>
+      </div>
     </div>
   )
 }

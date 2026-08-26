@@ -1,6 +1,6 @@
 [package]
 name = "nesqbot"
-version = "0.4.0"
+version = "0.5.0"
 description = "Nesq Bot desktop"
 authors = ["Nesqual Tech"]
 edition = "2021"
@@ -17,7 +17,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-shell = "2"
 # Deep links: nesqbot://approval/<id> handed off from the mobile app, and
-# nesqbot://auth?code=ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬Ãƒâ€šÃ‚Â¦ coming back from the browser after Entra sign-in.
+# nesqbot://auth?code=… coming back from the browser after Entra sign-in.
 tauri-plugin-deep-link = "2"
 # Redeems the Entra authorization code -- see `src/entra.rs`.
 #
@@ -53,7 +53,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 # do not deliver a URL to a running process, they launch a *new* one with the
 # URL as its only argument. With the `deep-link` feature this plugin hands that
 # argument to the instance already running, which is the only way `on_open_url`
-# fires ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â and therefore the only way the `nesqbot://auth` redirect reaches the
+# fires — and therefore the only way the `nesqbot://auth` redirect reaches the
 # sign-in that is waiting for it. Desktop only; mobile delivers URLs natively.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }

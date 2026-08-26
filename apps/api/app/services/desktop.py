@@ -1,6 +1,7 @@
-"""Bot Desktop lifecycle â€” mock and docker locally, Azure Container Instances in production.
+"""Bot Desktop lifecycle â€” mock and docker locally, Azure Container Instances or a
+generic self-hosted Kubernetes cluster in production.
 
-Four modes, one `DesktopManager` surface (`start` / `stop` / `suspend` / `resume` /
+Five modes, one `DesktopManager` surface (`start` / `stop` / `suspend` / `resume` /
 `screenshot` / `windows` / `computer_action` / `browser_call`):
 
 * ``mock``   â€” no container at all; canned screenshot and window list.
@@ -8,12 +9,19 @@ Four modes, one `DesktopManager` surface (`start` / `stop` / `suspend` / `resume
 * ``aci``    â€” one Azure Container Instances *container group* per bot: hypervisor
   isolated, its own kernel and filesystem, a private IP in the delegated subnet, and
   billed per second so an idle roster costs nothing.
-* ``aks``    â€” the older pod-per-bot path; the API only records "pending" and the worker
-  reconciles.
+* ``k8s``    â€” one Pod per bot against any standard Kubernetes cluster (k3s, kind, EKS,
+  GKE, bare metal - whatever the kubeconfig points at), driven directly by the API through
+  the `kubernetes` client. The self-hosted alternative to `aci`: no Azure dependency, and
+  a real PersistentVolumeClaim (or hostPath, single-node/dev only) keeps a bot's home
+  across a stop, which `aci` cannot do at all.
+* ``aks``    â€” the older, static-template pod-per-bot path (see
+  ``infra/bot-desktop/k8s/desktop-template.yaml``): the API only records "pending" and a
+  human applies the template out of band. Superseded by ``k8s`` for anyone who wants the
+  API to actually drive the cluster; kept for the manual/CI deployment it was built for.
 
-The per-bot boundary is the product claim (see docs/architecture.md), so the ACI
-driver never shares or reuses a container group between bots and never asks Azure for a
-public IP.
+The per-bot boundary is the product claim (see docs/competitive-analysis.md), so neither
+the ACI nor the k8s driver ever shares or reuses a container group/Pod between bots, and
+the ACI driver never asks Azure for a public IP.
 """
 
 from __future__ import annotations
@@ -85,6 +93,8 @@ __all__ = [
     "DESKTOP_STREAM_IDLE_TIMEOUT_SECONDS",
     "DESKTOP_STREAM_TICKET_TTL_SECONDS",
     "DESKTOP_STREAM_WS_UPSTREAM_PATH",
+    "K8S_CONTROL_PORT",
+    "K8S_STREAM_PORT",
     "MOCK_SCREENSHOT_SIZE",
     "MOCK_WINDOWS",
     "POINT_ARGUMENTS",
@@ -97,6 +107,7 @@ __all__ = [
     "AciStartError",
     "DesktopManager",
     "DesktopStreamTickets",
+    "K8sStartError",
     "ScreenGeometry",
     "StreamTicket",
     "StreamTicketError",
@@ -111,6 +122,11 @@ __all__ = [
     "classify_action_risk",
     "filter_proxy_request_headers",
     "filter_proxy_response_headers",
+    "k8s_pod_phase",
+    "k8s_pod_ready",
+    "k8s_pvc_name",
+    "k8s_resource_name",
+    "k8s_start_failure_reason",
     "make_placeholder_png",
     "max_risk",
     "negotiate_stream_subprotocol",
@@ -246,7 +262,7 @@ def aci_group_name(bot: Any) -> str:
     first 12 hex digits of the bot id so that two slugs which sanitise to the
     same label (``Sales Ops`` and ``sales-ops``) can never land on the same
     group. Reuse across bots is the one thing that would turn per-bot isolation
-    back into a competing agent product's shared machine.
+    back into Grok Bot's shared machine.
     """
     slug = _ACI_NAME_RUNS.sub("-", _ACI_NAME_ILLEGAL.sub("-", str(getattr(bot, "slug", "")).lower()))
     slug = slug.strip("-")[:32].strip("-")
@@ -437,6 +453,158 @@ def aci_start_failure_reason(group: Any, image: str, seconds: float) -> str:
         f"{f' ({detail})' if detail else ''} after {waited}"
         f"{'; last event: ' + events[-1] if events else '; no container events'}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Generic self-hosted Kubernetes
+#
+# One Pod per bot against whatever cluster the kubeconfig points at - k3s,
+# kind, EKS, GKE, bare metal, anything. This is deliberately not the `aks`
+# path above: `aks` is a static template a human `sed`s and `kubectl apply`s
+# out of band (infra/bot-desktop/k8s/desktop-template.yaml), meant for a
+# managed AKS deployment with its own ServiceAccount/NetworkPolicy/PDB. `k8s`
+# is API-driven, like `docker` and `aci`: the API creates and deletes a Pod,
+# a Service and (when persistence is configured) a PersistentVolumeClaim at
+# runtime through the standard `kubernetes` client, and never touches Azure
+# APIs at all.
+#
+# Ports and the environment variable contract match `aci` exactly (BOT_SLUG,
+# DESKTOP_PROFILE, VNC_PW, NESQ_STREAM_PORT, NESQ_SIDECAR_PORT, and
+# NESQ_SIDECAR_TOKEN when configured) so the same bot-desktop image serves all
+# three backends unmodified.
+# ---------------------------------------------------------------------------
+
+K8S_STREAM_PORT = ACI_STREAM_PORT
+K8S_CONTROL_PORT = ACI_CONTROL_PORT
+K8S_POD_PREFIX = "nesq-desktop"
+#: Same constant `docker` and `aci` pass. See `ACI_VNC_PASSWORD` for the honest
+#: limit of what this protects - it is defence in depth, not a boundary.
+K8S_VNC_PASSWORD = ACI_VNC_PASSWORD
+#: How often `start`/`resume` re-read the pod while waiting for Ready.
+K8S_POLL_INTERVAL_SECONDS = 3.0
+#: How long `stop` waits for the delete to be acknowledged before returning
+#: anyway - a stop request must not hang on a slow API server.
+K8S_DELETE_WAIT_SECONDS = 15.0
+
+#: Waiting-state reasons that mean "still pulling", not "this failed".
+_K8S_PULL_WAITING_REASONS = frozenset({"ContainerCreating", "PodInitializing"})
+#: Waiting-state reasons that are a genuine, actionable failure.
+_K8S_PULL_FAILURE_REASONS = frozenset(
+    {"ErrImagePull", "ImagePullBackOff", "InvalidImageName", "ErrImageNeverPull"}
+)
+
+
+class K8sStartError(RuntimeError):
+    """A Pod failed to reach Ready.
+
+    Carries the pod name as `container_id` - the same attribute name
+    `AciStartError` uses - so `start`'s generic `except Exception` handler
+    (`getattr(exc, "container_id", None)`) records it without a mode-specific
+    branch: the desktop lands in `error`, but an operator still needs a handle
+    to inspect (`kubectl -n <namespace> describe pod <name>`) and to clean up.
+    """
+
+    def __init__(self, message: str, container_id: str | None = None) -> None:
+        super().__init__(message)
+        self.container_id = container_id
+
+
+def _k8s_short_id(bot: Any) -> str:
+    """First 12 hex digits of the bot id, for names that must survive a slug rename."""
+    return _ACI_NAME_ILLEGAL.sub("", str(getattr(bot, "id", "")).lower())[:12]
+
+
+def k8s_resource_name(bot: Any) -> str:
+    """Deterministic Pod/Service name for one bot - a valid DNS-1123 label.
+
+    Same sanitisation as `aci_group_name`: k8s object names follow the exact
+    same rule ACI container group names do (lowercase alphanumerics and
+    hyphens, 1-63 characters, first and last character alphanumeric), so reuse
+    rather than reinvent it.
+    """
+    slug = _ACI_NAME_RUNS.sub("-", _ACI_NAME_ILLEGAL.sub("-", str(getattr(bot, "slug", "")).lower()))
+    slug = slug.strip("-")[:32].strip("-")
+    suffix = _k8s_short_id(bot)
+    parts = [part for part in (K8S_POD_PREFIX, slug, suffix) if part]
+    return "-".join(parts)[:63].strip("-")
+
+
+def k8s_pvc_name(bot: Any) -> str:
+    """Deterministic PVC name, keyed on bot id alone so a slug rename does not
+    orphan the volume and start a fresh, empty home."""
+    return f"{K8S_POD_PREFIX}-home-{_k8s_short_id(bot)}"[:63]
+
+
+def k8s_pod_phase(pod: Any) -> str:
+    """`status.phase`: Pending / Running / Succeeded / Failed / Unknown."""
+    return str(getattr(getattr(pod, "status", None), "phase", "") or "")
+
+
+def k8s_pod_ready(pod: Any) -> bool:
+    """True once the pod's `Ready` condition is `True`.
+
+    `phase == "Running"` alone is not enough: a container can be Running and
+    still failing its readiness probe (the desktop's `/health` is not up yet),
+    and starting to proxy traffic at that point would just 502.
+    """
+    conditions = list(getattr(getattr(pod, "status", None), "conditions", None) or [])
+    return any(
+        str(getattr(c, "type", "")) == "Ready" and str(getattr(c, "status", "")) == "True"
+        for c in conditions
+    )
+
+
+def k8s_container_waiting_reason(pod: Any) -> str | None:
+    """`reason` of the desktop container's `waiting` state, or `None`."""
+    statuses = list(getattr(getattr(pod, "status", None), "container_statuses", None) or [])
+    if not statuses:
+        return None
+    waiting = getattr(statuses[0].state, "waiting", None) if hasattr(statuses[0], "state") else None
+    return str(getattr(waiting, "reason", "")) if waiting is not None else None
+
+
+def k8s_start_failure_reason(pod: Any, image: str, seconds: float) -> str:
+    """Name the likely cause of a start that never reached Ready.
+
+    Mirrors `aci_start_failure_reason`: an operator's first question is always
+    whether the image is still pulling, the pull was refused, or the container
+    came up and crashed, and the pod's own status can tell those apart.
+    """
+    waited = f"{seconds:.0f}s"
+    if pod is None:
+        return (
+            f"the API server never returned the pod after {waited} - the create call was "
+            "accepted but nothing was scheduled. Check `kubectl get events` for a scheduling "
+            "failure (insufficient CPU/memory, no node matches, PVC not binding) before "
+            "looking at the image."
+        )
+
+    reason = k8s_container_waiting_reason(pod)
+    if reason in _K8S_PULL_FAILURE_REASONS:
+        return (
+            f"the image pull was refused ({reason}) - check that {image} exists at that exact "
+            "tag and, if the registry is private, that k8s_image_pull_secret names a valid "
+            "imagePullSecret in the target namespace"
+        )
+    phase = k8s_pod_phase(pod)
+    if phase == "Failed":
+        return (
+            "the pod reached phase Failed - this is the desktop crashing, not the pull; "
+            "`kubectl -n <namespace> logs <pod>` has the entrypoint output"
+        )
+    if phase == "Running" and not k8s_pod_ready(pod):
+        return (
+            f"the pod is Running but never passed its readiness probe after {waited} - the "
+            "desktop's /health endpoint on the control port is not answering; check "
+            "`kubectl -n <namespace> logs <pod>` for the sidecar's own startup errors"
+        )
+    if reason in _K8S_PULL_WAITING_REASONS or phase == "Pending":
+        return (
+            f"still {reason or 'Pending'} after {waited} - either raise "
+            "k8s_start_timeout_seconds for a cold image pull, or check the node has room to "
+            "schedule the pod (`kubectl get events`)"
+        )
+    return f"phase={phase or 'unknown'}, container waiting reason={reason or 'none'} after {waited}"
 
 
 def normalize_button(value: Any) -> str:
@@ -705,6 +873,12 @@ class DesktopManager:
                 desktop.control_url = info["control_url"]
             elif self.settings.bot_desktop_mode == "aci":
                 info = await self._aci_start(bot)
+                desktop.state = "running"
+                desktop.container_id = info["container_id"]
+                desktop.stream_url = info["stream_url"]
+                desktop.control_url = info["control_url"]
+            elif self.settings.bot_desktop_mode == "k8s":
+                info = await self._k8s_start(bot)
                 desktop.state = "running"
                 desktop.container_id = info["container_id"]
                 desktop.stream_url = info["stream_url"]
@@ -1076,6 +1250,360 @@ class DesktopManager:
         )
         return await self._aci_wait_for_running(client, name)
 
+    # -- Generic self-hosted Kubernetes --------------------------------------
+    #
+    # `kubernetes` is imported inside the methods, exactly like `docker` and
+    # the Azure SDK above, so a mock/docker/aci deployment never loads it.
+
+    def _k8s_client(self):
+        """A `CoreV1Api` for the configured cluster.
+
+        `k8s_kubeconfig_path` set -> that file (and `k8s_context`, if also
+        set). Otherwise: try in-cluster config first (the API itself running
+        as a pod in the cluster it manages desktops in - the common
+        self-hosted layout), and fall back to the default kubeconfig
+        (`~/.kube/config`) for the local `k3s`/`kind` dev path.
+        """
+        from kubernetes import client, config
+
+        path = (self.settings.k8s_kubeconfig_path or "").strip()
+        if path:
+            config.load_kube_config(config_file=path, context=self.settings.k8s_context or None)
+        else:
+            try:
+                config.load_incluster_config()
+            except config.ConfigException:
+                config.load_kube_config(context=self.settings.k8s_context or None)
+        return client.CoreV1Api()
+
+    def _k8s_require_config(self) -> None:
+        """Refuse to start rather than start something unreachable."""
+        settings = self.settings
+        if not str(settings.bot_desktop_image or "").strip():
+            raise K8sStartError("k8s mode is not configured: bot_desktop_image is empty")
+        if not str(settings.k8s_namespace or "").strip():
+            raise K8sStartError("k8s mode is not configured: k8s_namespace is empty")
+        if settings.k8s_service_type == "NodePort" and not str(settings.k8s_public_host or "").strip():
+            # A ClusterIP-only URL is unusable from outside the cluster. Rather than
+            # hand back a Service address nothing can reach, refuse up front - the
+            # same "fail loud, not silently unreachable" call `aci_subnet_id` makes.
+            raise K8sStartError(
+                "k8s_service_type is NodePort but k8s_public_host is empty - refusing to start "
+                "a desktop whose stream/control URLs would be unreachable"
+            )
+
+    def _k8s_home_volume(self, bot: Bot):
+        """The `home` volume source: a PVC when `k8s_storage_class` is set, else
+        a hostPath directory (single-node/dev only - see config.py)."""
+        from kubernetes import client as k8s
+
+        if str(self.settings.k8s_storage_class or "").strip():
+            return k8s.V1Volume(
+                name="home",
+                persistent_volume_claim=k8s.V1PersistentVolumeClaimVolumeSource(
+                    claim_name=k8s_pvc_name(bot)
+                ),
+            )
+        home = f"{self.settings.k8s_host_path_root.rstrip('/')}/{bot.id}"
+        return k8s.V1Volume(
+            name="home", host_path=k8s.V1HostPathVolumeSource(path=home, type="DirectoryOrCreate")
+        )
+
+    def _k8s_ensure_pvc(self, core, bot: Bot) -> None:
+        """Get-or-create the bot's home PVC. Never recreated on every start -
+        that would defeat the point of it surviving a stop."""
+        from kubernetes.client.rest import ApiException
+
+        name = k8s_pvc_name(bot)
+        namespace = str(self.settings.k8s_namespace)
+        try:
+            core.read_namespaced_persistent_volume_claim(name, namespace)
+            return
+        except ApiException as exc:
+            if exc.status != 404:
+                raise
+
+        from kubernetes import client as k8s
+
+        pvc = k8s.V1PersistentVolumeClaim(
+            metadata=k8s.V1ObjectMeta(
+                name=name,
+                labels={
+                    "app.kubernetes.io/name": "nesq-bot-desktop",
+                    "app.kubernetes.io/part-of": "nesqbot",
+                    "nesqbot.bot_id": str(bot.id),
+                },
+            ),
+            spec=k8s.V1PersistentVolumeClaimSpec(
+                access_modes=["ReadWriteOnce"],
+                storage_class_name=str(self.settings.k8s_storage_class),
+                resources=k8s.V1ResourceRequirements(
+                    requests={"storage": f"{self.settings.k8s_pvc_size_gi}Gi"}
+                ),
+            ),
+        )
+        try:
+            core.create_namespaced_persistent_volume_claim(namespace, pvc)
+        except ApiException as exc:
+            if exc.status != 409:  # already created by a racing request
+                raise
+
+    def _k8s_pod_manifest(self, bot: Bot, name: str):
+        """The Pod definition for one bot.
+
+        Security posture matches `infra/bot-desktop/k8s/desktop-template.yaml`:
+        non-root, no privilege escalation, every capability dropped, seccomp
+        RuntimeDefault. A Bot Desktop runs a real browser driven by an LLM over
+        content that must be assumed hostile, so this is not optional hardening.
+        """
+        from kubernetes import client as k8s
+
+        settings = self.settings
+        env = [
+            k8s.V1EnvVar(name="BOT_SLUG", value=bot.slug),
+            k8s.V1EnvVar(name="DESKTOP_PROFILE", value=bot.desktop_profile or "icewm"),
+            k8s.V1EnvVar(name="VNC_PW", value=K8S_VNC_PASSWORD),
+            k8s.V1EnvVar(name="NESQ_STREAM_PORT", value=str(K8S_STREAM_PORT)),
+            k8s.V1EnvVar(name="NESQ_SIDECAR_PORT", value=str(K8S_CONTROL_PORT)),
+        ]
+        token = (settings.nesq_sidecar_token or "").strip()
+        if token:
+            # No write-only field exists for a Pod env var the way ACI's
+            # `secure_value` is - this is readable by anyone with pod-read RBAC
+            # on the namespace. Restrict who can `get pods -o yaml` there.
+            env.append(k8s.V1EnvVar(name="NESQ_SIDECAR_TOKEN", value=token))
+        else:
+            logger.warning(
+                "NESQ_SIDECAR_TOKEN is empty - the desktop control plane on %s will accept "
+                "any caller that can reach the pod network",
+                K8S_CONTROL_PORT,
+            )
+
+        image_pull_secrets = None
+        secret_name = (settings.k8s_image_pull_secret or "").strip()
+        if secret_name:
+            image_pull_secrets = [k8s.V1LocalObjectReference(name=secret_name)]
+
+        container = k8s.V1Container(
+            name=ACI_CONTAINER_NAME,
+            image=str(settings.bot_desktop_image),
+            image_pull_policy="IfNotPresent",
+            env=env,
+            ports=[
+                k8s.V1ContainerPort(name="stream", container_port=K8S_STREAM_PORT, protocol="TCP"),
+                k8s.V1ContainerPort(name="control", container_port=K8S_CONTROL_PORT, protocol="TCP"),
+            ],
+            resources=k8s.V1ResourceRequirements(
+                requests={"cpu": settings.k8s_cpu_request, "memory": settings.k8s_memory_request},
+                limits={"cpu": settings.k8s_cpu_limit, "memory": settings.k8s_memory_limit},
+            ),
+            security_context=k8s.V1SecurityContext(
+                allow_privilege_escalation=False,
+                privileged=False,
+                read_only_root_filesystem=False,  # X sockets, dbus and apt-free tmp writes
+                capabilities=k8s.V1Capabilities(drop=["ALL"]),
+            ),
+            startup_probe=k8s.V1Probe(
+                http_get=k8s.V1HTTPGetAction(path="/health", port="control"),
+                period_seconds=5,
+                failure_threshold=30,
+                timeout_seconds=3,
+            ),
+            readiness_probe=k8s.V1Probe(
+                http_get=k8s.V1HTTPGetAction(path="/health", port="control"),
+                period_seconds=10,
+                timeout_seconds=3,
+                failure_threshold=3,
+            ),
+            liveness_probe=k8s.V1Probe(
+                http_get=k8s.V1HTTPGetAction(path="/health", port="control"),
+                period_seconds=20,
+                timeout_seconds=5,
+                failure_threshold=6,
+            ),
+            volume_mounts=[
+                k8s.V1VolumeMount(name="home", mount_path="/home/nesq"),
+                k8s.V1VolumeMount(name="tmp", mount_path="/tmp"),  # noqa: S108 - in-container path
+                k8s.V1VolumeMount(name="dshm", mount_path="/dev/shm"),  # noqa: S108 - in-container path
+            ],
+        )
+        pod = k8s.V1Pod(
+            metadata=k8s.V1ObjectMeta(
+                name=name,
+                labels={
+                    "app.kubernetes.io/name": "nesq-bot-desktop",
+                    "app.kubernetes.io/part-of": "nesqbot",
+                    "nesqbot.bot_id": str(bot.id),
+                    "nesqbot.bot_slug": str(bot.slug)[:63],
+                },
+            ),
+            spec=k8s.V1PodSpec(
+                automount_service_account_token=False,
+                restart_policy="Always",
+                security_context=k8s.V1PodSecurityContext(
+                    run_as_non_root=True,
+                    run_as_user=1000,
+                    run_as_group=1000,
+                    fs_group=1000,
+                    seccomp_profile=k8s.V1SeccompProfile(type="RuntimeDefault"),
+                ),
+                image_pull_secrets=image_pull_secrets,
+                containers=[container],
+                volumes=[
+                    self._k8s_home_volume(bot),
+                    k8s.V1Volume(
+                        name="tmp",
+                        empty_dir=k8s.V1EmptyDirVolumeSource(medium="Memory", size_limit="256Mi"),
+                    ),
+                    # Chromium crashes with the default 64Mi /dev/shm.
+                    k8s.V1Volume(
+                        name="dshm",
+                        empty_dir=k8s.V1EmptyDirVolumeSource(medium="Memory", size_limit="512Mi"),
+                    ),
+                ],
+            ),
+        )
+        return pod
+
+    def _k8s_service_manifest(self, bot: Bot, name: str):
+        from kubernetes import client as k8s
+
+        settings = self.settings
+        ports = [
+            k8s.V1ServicePort(name="stream", port=K8S_STREAM_PORT, target_port="stream", protocol="TCP"),
+            k8s.V1ServicePort(name="control", port=K8S_CONTROL_PORT, target_port="control", protocol="TCP"),
+        ]
+        return k8s.V1Service(
+            metadata=k8s.V1ObjectMeta(
+                name=name,
+                labels={"app.kubernetes.io/name": "nesq-bot-desktop", "nesqbot.bot_id": str(bot.id)},
+            ),
+            spec=k8s.V1ServiceSpec(
+                type=str(settings.k8s_service_type),
+                selector={"app.kubernetes.io/name": "nesq-bot-desktop", "nesqbot.bot_id": str(bot.id)},
+                ports=ports,
+            ),
+        )
+
+    def _k8s_urls(self, name: str, service) -> dict[str, str]:
+        """Stream/control URLs for a created Service.
+
+        ClusterIP -> cluster-local DNS, stable for the Service's lifetime and
+        only reachable from inside the cluster (or the self-hoster's own
+        ingress - out of scope here). NodePort -> `k8s_public_host` plus
+        whichever node port the API server assigned (or the one requested).
+        """
+        namespace = str(self.settings.k8s_namespace)
+        if str(self.settings.k8s_service_type) == "NodePort":
+            host = str(self.settings.k8s_public_host).strip()
+            node_ports = {p.name: p.node_port for p in (service.spec.ports or [])}
+            return {
+                "stream_url": f"http://{host}:{node_ports.get('stream')}",
+                "control_url": f"http://{host}:{node_ports.get('control')}",
+            }
+        dns = f"{name}.{namespace}.svc.cluster.local"
+        return {
+            "stream_url": f"http://{dns}:{K8S_STREAM_PORT}",
+            "control_url": f"http://{dns}:{K8S_CONTROL_PORT}",
+        }
+
+    def _k8s_delete_pod_and_service(self, core, name: str) -> None:
+        """Idempotent teardown of the Pod and Service. Never the PVC - see `stop`.
+
+        Catches broadly and never raises, like `_docker_stop` and `_aci_delete`:
+        teardown never fails a request, and `start` also calls this to clear a
+        stale Pod/Service before creating fresh ones, where a delete failure
+        must not block a legitimate start.
+        """
+        from kubernetes.client.rest import ApiException
+
+        namespace = str(self.settings.k8s_namespace)
+        for delete, kind in (
+            (core.delete_namespaced_service, "service"),
+            (core.delete_namespaced_pod, "pod"),
+        ):
+            try:
+                delete(name, namespace)
+            except ApiException as exc:
+                if exc.status != 404:
+                    logger.warning("k8s %s delete failed for %s: %s", kind, name, exc)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("k8s %s delete failed for %s: %s", kind, name, exc)
+
+    def _k8s_delete_pvc(self, core, bot: Bot) -> None:
+        """Never raises - `stop` calls this unguarded, same contract as above."""
+        from kubernetes.client.rest import ApiException
+
+        try:
+            core.delete_namespaced_persistent_volume_claim(
+                k8s_pvc_name(bot), str(self.settings.k8s_namespace)
+            )
+        except ApiException as exc:
+            if exc.status != 404:
+                logger.warning("k8s pvc delete failed for bot %s: %s", bot.id, exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("k8s pvc delete failed for bot %s: %s", bot.id, exc)
+
+    async def _k8s_start(self, bot: Bot) -> dict[str, str]:
+        """Create this bot's Pod (+ PVC, + Service) and wait for it to be ready.
+
+        Idempotent the same way `_docker_start` is: a stale Pod/Service with
+        this bot's name is removed first rather than left to collide, since a
+        `start` after an ungraceful `stop` (API restart mid-teardown, say)
+        must not fail just because the old objects are still terminating.
+        """
+        self._k8s_require_config()
+        name = k8s_resource_name(bot)
+        core = await asyncio.to_thread(self._k8s_client)
+        await asyncio.to_thread(self._k8s_delete_pod_and_service, core, name)
+        if str(self.settings.k8s_storage_class or "").strip():
+            await asyncio.to_thread(self._k8s_ensure_pvc, core, bot)
+        pod = self._k8s_pod_manifest(bot, name)
+        service = self._k8s_service_manifest(bot, name)
+        namespace = str(self.settings.k8s_namespace)
+        await asyncio.to_thread(core.create_namespaced_pod, namespace, pod)
+        created_service = await asyncio.to_thread(core.create_namespaced_service, namespace, service)
+        return await self._k8s_wait_for_running(core, name, created_service)
+
+    async def _k8s_wait_for_running(self, core, name: str, service) -> dict[str, str]:
+        budget = max(float(self.settings.k8s_start_timeout_seconds), 0.0)
+        namespace = str(self.settings.k8s_namespace)
+        started = time.monotonic()
+        deadline = started + budget
+        pod = None
+        while True:
+            try:
+                pod = await asyncio.to_thread(core.read_namespaced_pod, name, namespace)
+            except Exception as exc:  # noqa: BLE001 - a 404 right after create is normal
+                logger.debug("k8s pod %s not readable yet: %s", name, exc)
+                pod = None
+
+            if pod is not None and k8s_pod_ready(pod):
+                urls = self._k8s_urls(name, service)
+                return {"container_id": name, **urls}
+
+            if time.monotonic() >= deadline:
+                waited = time.monotonic() - started
+                raise K8sStartError(
+                    f"pod {name} did not become ready within {budget:.0f}s: "
+                    f"{k8s_start_failure_reason(pod, str(self.settings.bot_desktop_image), waited)}."
+                    f" It was left in place for diagnosis (kubectl -n {namespace} describe pod {name}).",
+                    container_id=name,
+                )
+            await asyncio.sleep(K8S_POLL_INTERVAL_SECONDS)
+
+    async def _k8s_resume(self, db: AsyncSession, bot_id: uuid.UUID, name: str) -> dict[str, str]:
+        """k8s resume: recreate the Pod + Service, reattaching the same home
+        volume by name. Unlike `docker` pause/unpause this is a cold start -
+        the running processes and the X session are gone - but unlike `aci`
+        the bot's home directory (PVC or hostPath) survives, so it is a cold
+        start onto the same filesystem, not a blank one.
+        """
+        bot = await db.get(Bot, bot_id)
+        if bot is None:
+            raise K8sStartError(f"bot {bot_id} no longer exists")
+        return await self._k8s_start(bot)
+
     def _home_dir(self, bot_id: uuid.UUID) -> Path | None:
         """Resolved home for a bot, or None when it escapes the configured root."""
         try:
@@ -1091,6 +1619,24 @@ class DesktopManager:
     def _wipe_home(self, bot_id: uuid.UUID) -> bool:
         home = self._home_dir(bot_id)
         if home is None or not home.exists():
+            return False
+        shutil.rmtree(home, ignore_errors=True)
+        return not home.exists()
+
+    def _k8s_wipe_hostpath_home(self, bot_id: uuid.UUID) -> bool:
+        """Wipe a hostPath home directory. Only correct when the API and the
+        cluster node share a filesystem - the single-node dev layout hostPath
+        targets. On a real multi-node cluster this deletes nothing on the node
+        the pod actually ran on; that gap is why `k8s_storage_class` exists."""
+        try:
+            root = Path(self.settings.k8s_host_path_root).resolve()
+            home = (root / str(bot_id)).resolve()
+        except OSError:
+            return False
+        if home == root or root not in home.parents:
+            logger.error("refusing to touch %s â€” outside k8s_host_path_root %s", home, root)
+            return False
+        if not home.exists():
             return False
         shutil.rmtree(home, ignore_errors=True)
         return not home.exists()
@@ -1114,6 +1660,14 @@ class DesktopManager:
             await asyncio.to_thread(self._docker_stop, desktop.container_id)
         elif self.settings.bot_desktop_mode == "aci" and desktop.container_id:
             await asyncio.to_thread(self._aci_delete, desktop.container_id)
+        elif self.settings.bot_desktop_mode == "k8s" and desktop.container_id:
+            bot = await db.get(Bot, bot_id)
+            core = await asyncio.to_thread(self._k8s_client)
+            await asyncio.to_thread(self._k8s_delete_pod_and_service, core, desktop.container_id)
+            # Unlike `aci`, a k8s desktop's home survives stop by default - the PVC
+            # (or hostPath directory) is untouched here. `wipe` below is what deletes it.
+            if wipe and bot is not None and str(self.settings.k8s_storage_class or "").strip():
+                await asyncio.to_thread(self._k8s_delete_pvc, core, bot)
         desktop.state = "absent"
         desktop.container_id = None
         desktop.stream_url = None
@@ -1125,6 +1679,13 @@ class DesktopManager:
                     "there is no separate home to wipe",
                     bot_id,
                 )
+            elif self.settings.bot_desktop_mode == "k8s":
+                if str(self.settings.k8s_storage_class or "").strip():
+                    logger.info("k8s desktop for bot %s: PVC deleted with the pod", bot_id)
+                else:
+                    wiped = await asyncio.to_thread(self._k8s_wipe_hostpath_home, bot_id)
+                    if not wiped:
+                        logger.warning("hostPath home wipe for bot %s did not complete", bot_id)
             else:
                 wiped = await asyncio.to_thread(self._wipe_home, bot_id)
                 if not wiped:
@@ -1186,6 +1747,21 @@ class DesktopManager:
             # stale URL could later point at a different bot's desktop.
             desktop.stream_url = None
             desktop.control_url = None
+        elif self.settings.bot_desktop_mode == "k8s" and desktop.container_id:
+            try:
+                core = await asyncio.to_thread(self._k8s_client)
+                await asyncio.to_thread(
+                    self._k8s_delete_pod_and_service, core, desktop.container_id
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("k8s suspend failed for %s: %s", bot_id, exc)
+                return await self._fail(db, desktop, exc)
+            # The Pod and Service are gone - the running processes and the X
+            # session with them - but the PVC/hostPath home is untouched, so
+            # `resume` comes back onto the same filesystem, just not the same
+            # in-memory state. Same caveat as `aci`, minus the data loss.
+            desktop.stream_url = None
+            desktop.control_url = None
         desktop.state = "suspended"
         await db.commit()
         await db.refresh(desktop)
@@ -1209,6 +1785,15 @@ class DesktopManager:
                 return await self._fail(db, desktop, exc)
             # A restarted group can come back on a different private IP, so the
             # stream and control URLs are re-derived rather than reused.
+            desktop.container_id = info["container_id"]
+            desktop.stream_url = info["stream_url"]
+            desktop.control_url = info["control_url"]
+        elif self.settings.bot_desktop_mode == "k8s" and desktop.container_id:
+            try:
+                info = await self._k8s_resume(db, bot_id, desktop.container_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("k8s resume failed for %s: %s", bot_id, exc)
+                return await self._fail(db, desktop, exc)
             desktop.container_id = info["container_id"]
             desktop.stream_url = info["stream_url"]
             desktop.control_url = info["control_url"]

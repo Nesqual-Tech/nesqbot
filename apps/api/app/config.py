@@ -214,6 +214,24 @@ class Settings(BaseSettings):
     anthropic_model_reason: str = ""
     anthropic_model_embed: str = ""
 
+    # ---- Google (Gemini) -------------------------------------------------------
+    #
+    # One fixed endpoint, same shape as the Anthropic block above: a shared
+    # key/model with per-tier overrides, translated to and from the OpenAI wire
+    # shape by ModelRouter._google_client() / the adapter classes next to it.
+    google_api_key: str = ""
+    google_api_key_nano: str = ""
+    google_api_key_mini: str = ""
+    google_api_key_reason: str = ""
+    google_api_key_embed: str = ""
+    # Real model names - e.g. "gemini-3.5-flash". No default, same reasoning as
+    # openai_model_*/anthropic_model_*: an unconfigured tier cannot be resolved
+    # and falls back to mock rather than guessing at a model name.
+    google_model_nano: str = ""
+    google_model_mini: str = ""
+    google_model_reason: str = ""
+    google_model_embed: str = ""
+
     # ---- what a vision step costs -------------------------------------------
     #
     # Three settings, one problem: a desktop agent that looks at its screen on
@@ -307,7 +325,7 @@ class Settings(BaseSettings):
     agent_effort_opening: str = "low"
     agent_effort_recover: str = ""
 
-    bot_desktop_mode: str = "docker"  # docker | mock | aci | aks
+    bot_desktop_mode: str = "docker"  # docker | mock | aci | k8s | aks
     bot_desktop_image: str = "nesqbot/bot-desktop:local"
     bot_desktop_network: str = "nesqbot_default"
     bot_desktop_home_root: str = "./data/bot-homes"
@@ -330,6 +348,39 @@ class Settings(BaseSettings):
     aci_registry_server: str = ""
     aci_registry_identity: str = ""  # user-assigned identity with AcrPull
     aci_start_timeout_seconds: int = 180  # cold pull of the desktop image
+
+    # Generic self-hosted Kubernetes backing for per-bot desktops (bot_desktop_mode
+    # = "k8s"). One Pod per bot against whatever cluster the kubeconfig points at -
+    # k3s, kind, EKS, GKE, bare metal, anything. Unlike `aci`, which is Azure-only
+    # and always destructive on stop, k8s desktops get real persistence: a
+    # PersistentVolumeClaim when k8s_storage_class is set, or a hostPath directory
+    # (single-node/dev only) when it is not.
+    k8s_namespace: str = "nesqbot"
+    # Empty -> in-cluster config when the API itself runs in the cluster, else the
+    # default kubeconfig (~/.kube/config). Set to point at a specific kubeconfig
+    # file when the API runs outside the cluster it manages desktops in.
+    k8s_kubeconfig_path: str = ""
+    k8s_context: str = ""  # empty -> kubeconfig's current-context
+    # Empty -> hostPath fallback at k8s_host_path_root, documented dev/single-node
+    # only: the volume is pinned to whichever node the pod lands on, so a
+    # multi-node cluster needs a real StorageClass here instead.
+    k8s_storage_class: str = ""
+    k8s_host_path_root: str = "/var/lib/nesqbot/bot-homes"
+    k8s_pvc_size_gi: int = 5
+    k8s_cpu_request: str = "250m"
+    k8s_cpu_limit: str = "2"
+    k8s_memory_request: str = "512Mi"
+    k8s_memory_limit: str = "4Gi"
+    k8s_image_pull_secret: str = ""  # name of an existing imagePullSecret, if any
+    k8s_service_type: str = "ClusterIP"  # ClusterIP | NodePort
+    # Required when k8s_service_type is NodePort: the host/IP a client outside the
+    # cluster reaches a node at. A ClusterIP desktop is only reachable from inside
+    # the cluster (or via the self-hoster's own ingress), which is why this is a
+    # hard requirement rather than a fallback - an unset public host on NodePort
+    # would otherwise silently hand back an unreachable URL.
+    k8s_public_host: str = ""
+    k8s_start_timeout_seconds: int = 180  # cold pull of the desktop image
+
     # Shared secret for the bot-desktop sidecar. When empty the sidecar runs
     # open (local dev) and we send no auth header at all.
     nesq_sidecar_token: str = ""

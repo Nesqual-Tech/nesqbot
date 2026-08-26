@@ -18,11 +18,13 @@ import type {
   DeviceRegistration,
   HealthOut,
   Message,
+  ProvidersOut,
   ResumeRunOut,
   Run,
   RunStatus,
   Thread,
   TokenOut,
+  UpdateBotInput,
   UsageOut,
   User,
   WorkItem,
@@ -83,6 +85,16 @@ export const bots = {
       body: { daily_budget_usd: dailyBudgetUsd },
       ...opts,
     }),
+  /**
+   * Pin (or clear) which provider/model this bot talks to for every task it
+   * runs, bypassing the router's tier system. `null` on both fields clears
+   * the override and reverts to tier routing; one without the other is a 422
+   * (`incomplete_model_override`) — see `apps/api/app/routers/bots.py`.
+   */
+  setModel: (botId: string, input: Pick<UpdateBotInput, "model_provider" | "model_name">, opts?: Opts): Promise<Bot> =>
+    request<Bot>(`/bots/${botId}`, { method: "PATCH", body: input, ...opts }),
+  /** Which providers this deployment can actually reach right now — a live credential resolved, not just a name this build recognises. */
+  providers: (opts?: Opts): Promise<ProvidersOut> => request<ProvidersOut>("/bots/providers", { ...opts }),
 }
 
 /* ---------------------------------------------------------- threads/messages */

@@ -27,7 +27,9 @@ export type {
   DesktopStreamTicket,
   DesktopWindow,
   Message,
+  ModelProvider,
   ModelTier,
+  ProvidersOut,
   RiskClass,
   Run,
   RunStatus,
@@ -50,6 +52,7 @@ export type {
   ResumeRunIn,
   ResumeRunOut,
   TokenOut,
+  UpdateBotInput,
   UsageEntry,
   UsageOut,
   // approval payloads

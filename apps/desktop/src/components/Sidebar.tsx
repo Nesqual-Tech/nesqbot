@@ -26,6 +26,8 @@ const TABS: Array<{ id: PanelTab; label: string; glyph: IconName }> = [
   { id: "integrations", label: "Integrations", glyph: "plug" },
   { id: "routines", label: "Routines", glyph: "repeat" },
   { id: "usage", label: "Usage", glyph: "chart" },
+  { id: "audit", label: "Audit", glyph: "list" },
+  { id: "knowledge", label: "Knowledge", glyph: "book" },
   { id: "builder", label: "Builder", glyph: "blocks" },
 ]
 

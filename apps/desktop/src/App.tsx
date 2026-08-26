@@ -5,12 +5,14 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { REQUIRES_SIGN_IN } from "./api/client"
 import { getHealth } from "./api/endpoints"
 import { ApprovalsPanel } from "./components/ApprovalsPanel"
+import { AuditPanel } from "./components/AuditPanel"
 import { BuilderPanel } from "./components/BuilderPanel"
 import { ChatPane } from "./components/ChatPane"
 import { DesktopPane } from "./components/DesktopPane"
 import { ErrorBoundary } from "./components/ErrorBoundary"
 import { Icon, type IconName } from "./components/Icon"
 import { IntegrationsPanel } from "./components/IntegrationsPanel"
+import { KnowledgePanel } from "./components/KnowledgePanel"
 import { PaneSplitter } from "./components/PaneSplitter"
 import { RoutinesPanel } from "./components/RoutinesPanel"
 import { SessionBootScreen, SignInScreen } from "./components/SignInScreen"
@@ -31,28 +33,41 @@ import { CommandPalette, type Command } from "./components/CommandPalette"
 import { AppProviders, useSelection, useToast, type PanelTab } from "./state/AppState"
 import { hasCompletedSetup, resetSetupCompletion } from "./state/setup"
 import { useTakeover } from "./state/takeover"
-import { useTheme } from "./state/theme"
+import { ThemeProvider, useTheme } from "./state/theme"
 import type { TakeoverRequest } from "./lib/takeover"
 import type { HealthOut } from "./types"
 
 export function App() {
   return (
-    <SetupGate>
+    // `ThemeProvider` outside everything: the wizard renders themed UI
+    // (`NesqualLockup` et al.) before setup is done, so theme — pure
+    // localStorage/DOM state, no API side effects — has to be safe to mount
+    // unconditionally.
+    //
+    // `AppProviders` outside `SetupGate`, not inside it: steps 2 and 3 of the
+    // wizard (providers, per-bot model) call real protected endpoints
+    // (`GET /bots/providers`, `GET /bots`, `PATCH /bots/{id}`) and need a
+    // session to do it — see `SignInStep` in `SetupWizard.tsx`. This is safe
+    // to mount before setup completes: `AuthProvider.restore()` only ever
+    // makes a network call when a session token is already in the OS
+    // credential store, and the rest of `AppProviders` (toast, selection,
+    // takeover, recorder) is inert local state. What must not mount early is
+    // `Shell` — it starts polling bots/approvals/health immediately — and
+    // `SetupGate` still keeps that from happening: `AuthGate` (which renders
+    // `Shell`) only appears once setup is `done`.
+    <ThemeProvider>
       <AppProviders>
-        <AuthGate />
+        <SetupGate>
+          <AuthGate />
+        </SetupGate>
       </AppProviders>
-    </SetupGate>
+    </ThemeProvider>
   )
 }
 
 /**
- * Runs the setup wizard before anything that could fire a request exists.
- *
- * `AppProviders` (and the auth provider it wraps) starts calling the API the
- * moment it mounts. Gating outside it, rather than showing the wizard as a
- * screen *within* the shell, is what stops that from happening against
- * whatever `API_BASE` happened to default to while someone is still typing
- * their real backend's address into step 1.
+ * Runs the setup wizard before `Shell` (and its immediate API polling) can
+ * mount.
  *
  * `key={resetCount}` remounts the wizard (fresh internal step state) when
  * `openSetup` reopens it from the running app — see `Shell`'s "Setup" command
@@ -88,7 +103,7 @@ export function openSetup(): void {
  * agree about which section is third, and three separate literal lists is how
  * they stop agreeing.
  */
-const TAB_ORDER: PanelTab[] = ["chat", "approvals", "integrations", "routines", "usage", "builder"]
+const TAB_ORDER: PanelTab[] = ["chat", "approvals", "integrations", "routines", "usage", "audit", "knowledge", "builder"]
 
 const TAB_LABELS: Record<PanelTab, string> = {
   chat: "Chat",
@@ -96,6 +111,8 @@ const TAB_LABELS: Record<PanelTab, string> = {
   integrations: "Integrations",
   routines: "Routines",
   usage: "Usage",
+  audit: "Audit",
+  knowledge: "Knowledge",
   builder: "Builder",
 }
 
@@ -105,6 +122,8 @@ const TAB_GLYPHS: Record<PanelTab, IconName> = {
   integrations: "plug",
   routines: "repeat",
   usage: "chart",
+  audit: "list",
+  knowledge: "book",
   builder: "blocks",
 }
 
@@ -612,6 +631,18 @@ function Shell() {
         {tab === "usage" ? (
           <ErrorBoundary label="Usage">
             <UsagePanel refreshKey={usageRefresh} />
+          </ErrorBoundary>
+        ) : null}
+
+        {tab === "audit" ? (
+          <ErrorBoundary label="Audit">
+            <AuditPanel bots={bots.bots} />
+          </ErrorBoundary>
+        ) : null}
+
+        {tab === "knowledge" ? (
+          <ErrorBoundary label="Knowledge">
+            <KnowledgePanel />
           </ErrorBoundary>
         ) : null}
 

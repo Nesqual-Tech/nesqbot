@@ -2610,6 +2610,133 @@ legend {
   margin-bottom: var(--space-xs);
 }
 
+/* --------------------------------------------------------------- audit -- */
+
+.audit-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.audit-row + .audit-row {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.audit-row__summary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  border: 0;
+  background: none;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+
+.audit-row__summary:hover:not(:disabled) {
+  background: var(--surface-alt);
+}
+
+.audit-row__summary:disabled {
+  cursor: default;
+}
+
+.audit-row__icon {
+  flex-shrink: 0;
+  color: var(--text-dim);
+}
+
+.audit-row__type {
+  font-weight: 600;
+  text-transform: capitalize;
+}
+
+.audit-row__bot {
+  color: var(--text-muted);
+  font-size: var(--text-caption-size);
+}
+
+.audit-row__time {
+  margin-left: auto;
+  color: var(--text-dim);
+  font-size: var(--text-caption-size);
+  white-space: nowrap;
+}
+
+.audit-row__chevron {
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.audit-row__detail {
+  margin: 0;
+  padding: var(--space-sm) var(--space-md) var(--space-md) calc(var(--space-md) + 16px + var(--space-sm));
+  background: var(--surface-alt);
+  border-top: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-size: var(--text-caption-size);
+  white-space: pre-wrap;
+  word-break: break-word;
+  animation: reveal var(--duration-base) var(--ease-entrance) both;
+}
+
+.audit-load-more {
+  margin-top: var(--space-md);
+}
+
+/* ----------------------------------------------------------- knowledge -- */
+
+.kb-editor {
+  margin-bottom: var(--space-lg);
+  gap: var(--space-md);
+  display: flex;
+  flex-direction: column;
+}
+
+.kb-grid {
+  margin-top: var(--space-md);
+}
+
+.kb-card {
+  gap: var(--space-sm);
+}
+
+.kb-card__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-sm);
+}
+
+.kb-card__title {
+  margin: 0;
+  font-size: var(--text-subheading-size);
+  color: var(--text);
+}
+
+.kb-card__time {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  font-size: var(--text-caption-size);
+  white-space: nowrap;
+}
+
+.kb-card__body {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line);
+  white-space: pre-wrap;
+}
+
 .approval__steps {
   margin: var(--space-sm) 0 0 var(--space-lg);
   padding: 0;
@@ -5826,6 +5953,91 @@ legend {
 .builder__requirement {
   font-size: var(--text-caption-size);
   color: var(--text-dim);
+}
+
+.builder__memories {
+  margin-top: var(--space-lg);
+  width: 100%;
+}
+
+.builder__memories-body {
+  margin-top: var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.builder__memory-add {
+  display: flex;
+  gap: var(--space-sm);
+}
+
+.builder__memory-add .select {
+  flex: 0 0 auto;
+}
+
+.builder__memory-add .input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.builder__memory-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.builder__memory-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+}
+
+.builder__memory-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-caption-size);
+}
+
+.builder__memory-time {
+  flex-shrink: 0;
+  color: var(--text-dim);
+  font-size: var(--text-caption-size);
+  white-space: nowrap;
+}
+
+.builder__templates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  margin-bottom: var(--space-md);
+}
+
+.builder__templates .chip {
+  cursor: pointer;
+  background: var(--surface);
+  transition: background var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard);
+}
+
+.builder__templates .chip:hover {
+  background: var(--surface-alt);
+  border-color: var(--border-strong);
+}
+
+.builder__templates .chip--active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
+  font-weight: 700;
 }
 
 .teammate-preview {

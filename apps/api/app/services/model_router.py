@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import importlib
 import json
 import logging
@@ -29,11 +31,10 @@ logger = logging.getLogger(__name__)
 
 Tier = Literal["nano", "mini", "reason", "embed"]
 
-#: `google` is an accepted config value but has no client implementation yet -
-#: see ModelRouter.client(). Selecting it is honest about that (falls back to
-#: mock, same as an unconfigured Azure tier) rather than silently mis-routing
-#: to a provider that was never actually built. `azure`/`openai`/`anthropic`
-#: are all real.
+#: All four are real - `azure`/`openai`/`anthropic`/`google` each have a live
+#: client (see ModelRouter.client()). An unrecognised string still falls back
+#: to mock (`_provider_for`), same as an unconfigured tier, rather than
+#: raising - a typo in config should not crash the router.
 Provider = Literal["azure", "openai", "anthropic", "google"]
 _OPENAI_PROTOCOL_PROVIDERS = frozenset({"azure", "openai"})
 TaskClass = Literal[
@@ -61,6 +62,84 @@ TIER_PRICES: dict[Tier, tuple[float, float]] = {
     "mini": (0.75, 4.50),
     "reason": (0.20, 0.50),
     "embed": (0.02, 0.0),
+}
+
+# ---------------------------------------------------------------------------
+# Per-model pricing, for a bot pinned to a provider/model (`bots.model_provider`
+# / `model_name`) — TIER_PRICES has no idea what such a bot actually costs, and
+# without this table `estimate_cost_usd` would silently bill it at whichever
+# Azure tier the task class happens to map to (`_warn_tier_pricing_may_not_
+# match_provider` exists precisely because that is usually wrong).
+#
+# USD per 1M tokens, (input, output), keyed by the exact API model id — real
+# OpenAI ids for `openai`-provider bots, real Claude API ids for `anthropic`-
+# provider bots. A bot pinned to a model not listed here still gets the loud
+# tier-based warning and estimate; this table narrows, rather than closes,
+# that gap — it is not realistic to keep pace with every model a self-hoster
+# might type in.
+#
+# Fetched live from openai.com/api/pricing and platform.claude.com/docs/en/
+# about-claude/pricing on 2026-08-26. Re-check before trusting a budget built
+# on an entry here; prices move, and a self-hosted OpenAI-compatible "local
+# model" server has no real per-token cost this table could state at all.
+MODEL_PRICES: dict[str, tuple[float, float]] = {
+    # ---- OpenAI ----
+    "gpt-5.6-sol": (4.00, 20.00),
+    "gpt-5.6-terra": (2.00, 12.00),
+    "gpt-5.6-luna": (0.20, 1.20),
+    "gpt-5.5": (5.00, 30.00),
+    "gpt-5.5-pro": (30.00, 180.00),
+    "gpt-5.4": (2.50, 15.00),
+    "gpt-5.4-mini": (0.75, 4.50),
+    "gpt-5.4-nano": (0.20, 1.25),
+    "gpt-5.4-pro": (30.00, 180.00),
+    "gpt-5.2": (1.75, 14.00),
+    "gpt-5.2-pro": (21.00, 168.00),
+    "gpt-5.1": (1.25, 10.00),
+    "gpt-5": (1.25, 10.00),
+    "gpt-5-mini": (0.25, 2.00),
+    "gpt-5-nano": (0.05, 0.40),
+    "gpt-5-pro": (15.00, 120.00),
+    "gpt-4.1": (2.00, 8.00),
+    "gpt-4.1-mini": (0.40, 1.60),
+    "gpt-4.1-nano": (0.10, 0.40),
+    "gpt-4o": (2.50, 10.00),
+    "gpt-4o-2024-05-13": (5.00, 15.00),
+    "gpt-4o-mini": (0.15, 0.60),
+    "o1": (15.00, 60.00),
+    "o1-pro": (150.00, 600.00),
+    "o3-pro": (20.00, 80.00),
+    "o3": (2.00, 8.00),
+    "o4-mini": (1.10, 4.40),
+    "o3-mini": (1.10, 4.40),
+    "gpt-4-turbo-2024-04-09": (10.00, 30.00),
+    "gpt-4-0613": (30.00, 60.00),
+    "gpt-3.5-turbo": (0.50, 1.50),
+    "gpt-3.5-turbo-0125": (0.50, 1.50),
+    "gpt-3.5-turbo-1106": (1.00, 2.00),
+    "gpt-3.5-turbo-instruct": (1.50, 2.00),
+    "davinci-002": (2.00, 2.00),
+    "babbage-002": (0.40, 0.40),
+    # ---- Anthropic (current lineup; base input rate, not a cache-write or
+    # cache-read multiplier — see cached_prompt_tokens for the read-side
+    # discount this table does not itself apply) ----
+    "claude-fable-5": (10.00, 50.00),
+    "claude-opus-5": (5.00, 25.00),
+    "claude-sonnet-5": (2.00, 10.00),
+    "claude-haiku-4-5-20251001": (1.00, 5.00),
+    "claude-haiku-4-5": (1.00, 5.00),
+    # ---- Google (Gemini). Fetched from ai.google.dev/gemini-api/docs/pricing
+    # on 2026-08-26 — these are promotional rates through 2026-12-31; higher
+    # rates apply from 2027-01-01, so re-check this block past that date. ----
+    "gemini-3.7-flash": (0.75, 3.75),
+    "gemini-3.6-flash": (0.75, 3.75),
+    "gemini-3.5-flash": (1.50, 9.00),
+    "gemini-3.5-flash-lite": (0.30, 2.50),
+    "gemini-3.1-flash-lite": (0.25, 1.50),
+    "gemini-3.1-pro-preview": (2.00, 12.00),
+    "gemini-2.5-pro": (1.25, 10.00),
+    "gemini-2.5-flash": (0.30, 2.50),
+    "gemini-2.5-flash-lite": (0.10, 0.40),
 }
 
 RETRY_ATTEMPTS = 3
@@ -306,6 +385,8 @@ def estimate_cost_usd(
     input_tokens: int,
     output_tokens: int,
     image_tokens: int = 0,
+    *,
+    model: str | None = None,
 ) -> Decimal:
     """USD for one call. Image tokens bill at the *input* rate, and are added.
 
@@ -320,8 +401,16 @@ def estimate_cost_usd(
     live path passes zero and puts the estimate on `ChatResult.image_tokens`
     for visibility; the keyless/mock path has no usage block and passes the
     estimate here.
+
+    `model`, when given, is looked up in `MODEL_PRICES` first — this is the
+    accurate price for a bot pinned via `bots.model_provider`/`model_name`
+    (see `ModelRouter._bot_override`). Absent, or naming a model this table
+    does not have, this falls back to `TIER_PRICES[tier]`, the same estimate
+    every call made before per-bot pinning existed — which is Azure pricing,
+    and `_warn_tier_pricing_may_not_match_provider` is the caller's job to
+    call in that case, not this function's.
     """
-    inp, out = TIER_PRICES[tier]
+    inp, out = MODEL_PRICES.get(model or "") or TIER_PRICES[tier]
     billed_input = max(int(input_tokens), 0) + max(int(image_tokens), 0)
     return Decimal(str((billed_input / 1_000_000) * inp + (output_tokens / 1_000_000) * out))
 
@@ -399,9 +488,6 @@ def image_content_part(
 
 def _decode_data_url_head(url: str) -> bytes:
     """Enough leading bytes of a base64 data URL to read an image header."""
-    import base64
-    import binascii
-
     if not url.startswith(_DATA_URL_PREFIX) or ";base64," not in url:
         return b""
     payload = url.split(";base64,", 1)[1]
@@ -883,17 +969,40 @@ def _anthropic_tool_choice(tool_choice: str | dict[str, Any] | None) -> dict[str
     return {"type": "auto"}
 
 
+#: Extended-thinking budgets, in tokens, per graded effort. There is no
+#: exchange rate between "how hard gpt-5.x deliberates" and "how many tokens
+#: Claude may spend thinking" — this is a reasonable monotonic mapping so the
+#: same four-value vocabulary the rest of the router uses still means "more"
+#: and "less" here too, not a claim that "medium" means the same thing on
+#: both providers. "none" (or no effort at all) omits `thinking` entirely,
+#: which is the SDK default (thinking off) — there is nothing to map it to.
+#: Anthropic requires >=1024 to enable thinking at all.
+_ANTHROPIC_THINKING_BUDGET: dict[str, int] = {
+    "minimal": 1024,
+    "low": 2048,
+    "medium": 4096,
+    "high": 8192,
+}
+
+#: Anthropic requires `max_tokens` to exceed `thinking.budget_tokens` — the
+#: headroom left over is what the actual reply, after thinking, may spend.
+_ANTHROPIC_OUTPUT_HEADROOM = 4096
+
+
 def _anthropic_request(kwargs: dict[str, Any]) -> dict[str, Any]:
     """The exact kwargs `_request_kwargs` builds -> an Anthropic Messages API request.
 
-    `reasoning_effort` is deliberately dropped, not mapped. Anthropic's
-    equivalent — extended thinking — is a differently-shaped `thinking` param
-    (`{"type":"enabled","budget_tokens":N}`), not a graded string, and
-    mapping one onto the other is a separate feature this adapter does not
-    attempt. Silently dropping it here is intentional and safe: `_create`'s
-    existing rejected-effort machinery exists for the case of a deployment
-    that rejects an unknown parameter with a 400, but that machinery is for
-    parameters this adapter *sends*, and this one simply never does.
+    `reasoning_effort` maps to Anthropic's differently-shaped extended-
+    thinking param (`{"type":"enabled","budget_tokens":N}`, not a graded
+    string) via `_ANTHROPIC_THINKING_BUDGET`. `max_tokens` grows to give the
+    reply room beyond the thinking budget — Anthropic 400s otherwise.
+    Unrecognised or `"none"` efforts leave `thinking` unset, same as omitting
+    the argument entirely.
+
+    Extended thinking forbids a *forced* tool choice — only `"auto"` (or
+    omitted) is legal alongside it — so a forced `tool_choice` is dropped
+    when thinking turns on rather than shipping a request Anthropic would
+    400 on the combination.
     """
     system, messages = _anthropic_messages(kwargs["messages"])
     request: dict[str, Any] = {
@@ -909,6 +1018,14 @@ def _anthropic_request(kwargs: dict[str, Any]) -> dict[str, Any]:
     tool_choice = _anthropic_tool_choice(kwargs.get("tool_choice"))
     if tool_choice:
         request["tool_choice"] = tool_choice
+
+    budget = _ANTHROPIC_THINKING_BUDGET.get(normalise_effort(kwargs.get("reasoning_effort")) or "")
+    if budget:
+        request["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        request["max_tokens"] = budget + _ANTHROPIC_OUTPUT_HEADROOM
+        if tool_choice and tool_choice.get("type") != "auto":
+            request.pop("tool_choice", None)
+
     return request
 
 
@@ -1101,6 +1218,389 @@ class _AnthropicAdapter:
         self.chat = SimpleNamespace(completions=_AnthropicCompletions(client))
 
 
+# ---------------------------------------------------------------------------
+# Google (Gemini) — a third wire format, translated the same way as Anthropic
+# ---------------------------------------------------------------------------
+#
+# Built against the `google-genai` SDK's `models.generate_content` /
+# `generate_content_stream` — the mature, strongly-typed entry point (every
+# field name below is read off the installed `google-genai` 2.20.0 SDK's own
+# pydantic `model_fields`, not guessed or taken from documentation prose).
+# `google-genai` also exposes a newer `client.interactions.create` surface
+# (an OpenAI-Responses-API-shaped, loosely-typed `**body: Any` method) which
+# this adapter deliberately does not use — `generate_content` is the
+# long-standing, strongly-typed surface and is far easier to build a
+# reliable, testable translation against.
+#
+# Differences from OpenAI's shape, same spirit as the Anthropic section
+# above: the system prompt is `GenerateContentConfig.system_instruction`, not
+# a message role; turns are `Content(role="user"|"model", parts=[...])`, not
+# `messages` (Gemini's assistant role is literally named `"model"`); a reply
+# is `candidates[0].content.parts` (`Part.text` / `Part.function_call`), not
+# `message.content` + `message.tool_calls`; usage is
+# `usage_metadata.prompt_token_count` / `.candidates_token_count`, not
+# `prompt_tokens` / `completion_tokens`; a function call's arguments arrive as
+# an already-parsed `dict` (`FunctionCall.args`), never a fragmented JSON
+# string the way Anthropic's `input_json_delta` streams it — so unlike the
+# Anthropic streaming translator, this one never has to accumulate partial
+# JSON, it just emits one complete arguments string per call the moment its
+# containing chunk arrives.
+#
+# See `tests/services/test_model_router_google.py`.
+
+
+def _google_content(content: Any) -> list[dict[str, Any]]:
+    """An OpenAI-shaped message `content` value -> a list of Gemini `Part` dicts.
+
+    A plain string becomes a single text part. A content-part list (vision
+    turns — see `image_content_part`) has its `image_url` parts rewritten:
+    OpenAI inlines a data URL; Gemini's `Part.inline_data` (a `Blob`) wants
+    the raw bytes and the mime type as separate fields, so the base64 payload
+    is decoded here rather than passed through as text. A part this function
+    does not recognise is dropped rather than sent malformed, same rule
+    `_anthropic_content` follows.
+    """
+    if not isinstance(content, list):
+        return [{"text": message_text(content)}]
+    out: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        ptype = part.get("type")
+        if ptype == "text":
+            out.append({"text": str(part.get("text") or "")})
+        elif ptype == "image_url":
+            node = part.get("image_url")
+            url = node.get("url", "") if isinstance(node, dict) else str(node or "")
+            if url.startswith(_DATA_URL_PREFIX) and ";base64," in url:
+                header, _, payload = url.partition(";base64,")
+                media_type = header[len(_DATA_URL_PREFIX) :] or "image/png"
+                try:
+                    raw = base64.b64decode(payload, validate=False)
+                except (ValueError, binascii.Error):
+                    continue
+                out.append({"inline_data": {"data": raw, "mime_type": media_type}})
+    return out
+
+
+def _google_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    """OpenAI-shaped `messages` -> Gemini's `(system_instruction, contents)`.
+
+    Only the first `system` message becomes `system_instruction` — Gemini
+    takes exactly one, the same one-only rule `_anthropic_messages` follows
+    for Anthropic's `system` param. A second one is folded into the
+    conversation as a user turn rather than dropped.
+
+    A `tool` role (`tool_result_message`) becomes a `"user"` turn carrying a
+    `function_response` part — Gemini has no `tool` role, matching Anthropic's
+    `tool_result`-as-user-turn shape. An assistant message carrying
+    `tool_calls` (`assistant_tool_call_message`) becomes a `"model"` turn
+    whose parts are the text, if any, then one `function_call` part per call,
+    arguments parsed back from the JSON string `assistant_tool_call_message`
+    encoded them as — arriving as a `dict` is what `FunctionCall.args` wants
+    natively, unlike Anthropic's `tool_use.input` which takes the same dict
+    but through a differently-named field.
+    """
+    system = ""
+    out: list[dict[str, Any]] = []
+    for message in messages:
+        role = message.get("role")
+        if role == "system":
+            if not system:
+                system = message_text(message.get("content"))
+                continue
+            out.append({"role": "user", "parts": [{"text": message_text(message.get("content"))}]})
+            continue
+        if role == "tool":
+            out.append(
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "function_response": {
+                                "id": str(message.get("tool_call_id") or ""),
+                                "name": str(message.get("name") or ""),
+                                "response": {"output": message.get("content") or ""},
+                            }
+                        }
+                    ],
+                }
+            )
+            continue
+        if role == "assistant" and message.get("tool_calls"):
+            parts: list[dict[str, Any]] = []
+            text = message.get("content")
+            if text:
+                parts.append({"text": str(text)})
+            for call in message["tool_calls"]:
+                function = call.get("function") or {}
+                arguments, _ = decode_tool_arguments(function.get("arguments"))
+                parts.append(
+                    {
+                        "function_call": {
+                            "id": str(call.get("id") or ""),
+                            "name": str(function.get("name") or ""),
+                            "args": arguments,
+                        }
+                    }
+                )
+            out.append({"role": "model", "parts": parts})
+            continue
+        out.append(
+            {
+                "role": "model" if role == "assistant" else "user",
+                "parts": _google_content(message.get("content")),
+            }
+        )
+    return system, out
+
+
+def _google_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+    """OpenAI function-tool defs -> one Gemini `Tool` carrying every
+    `function_declarations` entry — Gemini groups all callable functions
+    under a single `Tool`, unlike Anthropic/OpenAI's one-entry-per-tool list.
+    """
+    if not tools:
+        return None
+    declarations = []
+    for tool in tools:
+        function = tool.get("function") or {}
+        declarations.append(
+            {
+                "name": function.get("name") or "",
+                "description": function.get("description") or "",
+                "parameters": (
+                    function["parameters"]
+                    if function.get("parameters") is not None
+                    else {"type": "object", "properties": {}}
+                ),
+            }
+        )
+    return [{"function_declarations": declarations}]
+
+
+def _google_tool_config(tool_choice: str | dict[str, Any] | None) -> dict[str, Any] | None:
+    """OpenAI `tool_choice` -> Gemini's `ToolConfig.function_calling_config`.
+
+    `"auto"` is Gemini's own default the moment `tools` is set, so it maps to
+    omitting `tool_config` entirely rather than sending `mode: "AUTO"`
+    explicitly — one fewer field on the common path. `"none"` -> `mode:
+    "NONE"`. A forced single-function choice -> `mode: "ANY"` restricted to
+    that name via `allowed_function_names`, Gemini's equivalent of OpenAI's
+    `{"type":"function","function":{"name":...}}`.
+    """
+    if tool_choice is None or tool_choice == "auto":
+        return None
+    if tool_choice == "none":
+        return {"function_calling_config": {"mode": "NONE"}}
+    if isinstance(tool_choice, dict):
+        name = (tool_choice.get("function") or {}).get("name")
+        if name:
+            return {"function_calling_config": {"mode": "ANY", "allowed_function_names": [name]}}
+    return None
+
+
+def _google_thinking_config(reasoning_effort: str | None) -> dict[str, Any] | None:
+    """`reasoning_effort` -> Gemini's `ThinkingConfig.thinking_level`.
+
+    Unlike Anthropic's `budget_tokens` (an arbitrary token count this router
+    has to guess a reasonable value for — see `_ANTHROPIC_THINKING_BUDGET`),
+    Gemini's `ThinkingLevel` enum is `MINIMAL`/`LOW`/`MEDIUM`/`HIGH` — the
+    exact same four graded values `REASONING_EFFORTS` already uses, just
+    upper-cased. No mapping table, no judgment call about token budgets: this
+    is the one provider where the vocabulary lines up natively. `"none"` (or
+    unset) omits `thinking_config`, the model's own default.
+    """
+    effort = normalise_effort(reasoning_effort)
+    if not effort or effort == "none":
+        return None
+    return {"thinking_level": effort.upper()}
+
+
+def _google_request(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """The exact kwargs `_request_kwargs` builds -> a `generate_content` call's
+    `(model, contents, config)`.
+
+    No `max_output_tokens` default the way `_anthropic_request` sets one:
+    Anthropic's Messages API requires `max_tokens` on every request and 400s
+    without it; Gemini does not, each model has its own sane default, and
+    setting an arbitrary one here would risk truncating a real reply for no
+    reason this adapter can justify.
+    """
+    system, contents = _google_messages(kwargs["messages"])
+    config: dict[str, Any] = {}
+    if system:
+        config["system_instruction"] = system
+    tools = _google_tools(kwargs.get("tools"))
+    if tools:
+        config["tools"] = tools
+    tool_config = _google_tool_config(kwargs.get("tool_choice"))
+    if tool_config:
+        config["tool_config"] = tool_config
+    thinking = _google_thinking_config(kwargs.get("reasoning_effort"))
+    if thinking:
+        config["thinking_config"] = thinking
+    return {"model": kwargs["model"], "contents": contents, "config": config}
+
+
+def _google_parts_to_openai(parts: Any) -> tuple[str, list[dict[str, Any]]]:
+    """`Candidate.content.parts` -> `(text, tool_calls)`, the same pair
+    `_anthropic_response_to_openai_shape` extracts from Anthropic's content
+    blocks. `FunctionCall.args` is already a parsed dict (see the module
+    docstring above) — JSON-encoded here only because `parse_tool_calls`
+    expects `.function.arguments` as a string and decodes it straight back
+    with `decode_tool_arguments`, the same round trip OpenAI's own response
+    already takes.
+    """
+    text_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+    for part in parts or []:
+        text = getattr(part, "text", None)
+        if text:
+            text_parts.append(str(text))
+        call = getattr(part, "function_call", None)
+        if call is not None:
+            tool_calls.append(
+                {
+                    "id": getattr(call, "id", "") or "",
+                    "name": getattr(call, "name", "") or "",
+                    "input": getattr(call, "args", None) or {},
+                }
+            )
+    return "".join(text_parts), tool_calls
+
+
+def _google_response_to_openai_shape(response: Any) -> SimpleNamespace:
+    """A `GenerateContentResponse` -> an object shaped like an OpenAI chat
+    completion — see `_anthropic_response_to_openai_shape` for the identical
+    pattern against Anthropic's `Message`.
+
+    `usage_metadata.cached_content_token_count`, when present, becomes
+    `prompt_tokens_details.cached_tokens` — the same field
+    `cached_prompt_tokens()` already reads for Azure's own prompt cache and
+    `_anthropic_response_to_openai_shape` reads for Anthropic's.
+    """
+    candidate = (response.candidates or [None])[0]
+    parts = candidate.content.parts if candidate is not None and candidate.content is not None else []
+    text, tool_calls = _google_parts_to_openai(parts)
+    usage = response.usage_metadata
+    prompt_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
+    completion_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
+    total_tokens = int(getattr(usage, "total_token_count", 0) or 0) or (prompt_tokens + completion_tokens)
+    cached = int(getattr(usage, "cached_content_token_count", 0) or 0)
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=_openai_shaped_message(text, tool_calls))],
+        usage=SimpleNamespace(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=cached),
+        ),
+    )
+
+
+async def _google_stream_to_openai_chunks(responses: Any) -> AsyncIterator[SimpleNamespace]:
+    """`generate_content_stream`'s `GenerateContentResponse` chunks -> the
+    OpenAI-shaped chunks `stream_chat` already knows how to fold
+    (`_accumulate_tool_call_deltas`) and price (`billable_output_tokens`,
+    `cached_prompt_tokens`).
+
+    Each chunk's `candidates[0].content.parts` is whatever text/function-call
+    content that chunk contributed — never a fragment of one JSON string the
+    way Anthropic's `input_json_delta` streams a call's arguments character
+    by character (see the module docstring above), so a function-call part is
+    translated as one complete tool-call delta the moment its chunk arrives,
+    with a fresh index per call so parallel calls in the same response do not
+    collide in `_accumulate_tool_call_deltas`'s index-keyed buffer.
+
+    `usage_metadata` is not guaranteed on every chunk; whatever the most
+    recent chunk reported is re-yielded as a trailing usage-only chunk
+    (`choices=[]`) after the stream ends, the same pattern
+    `_anthropic_stream_to_openai_chunks` uses for Anthropic's `message_delta`.
+    """
+    prompt_tokens = 0
+    completion_tokens = 0
+    cached_tokens = 0
+    call_index = 0
+    async for response in responses:
+        usage = getattr(response, "usage_metadata", None)
+        if usage is not None:
+            prompt_tokens = int(getattr(usage, "prompt_token_count", 0) or 0) or prompt_tokens
+            completion_tokens = int(getattr(usage, "candidates_token_count", 0) or 0) or completion_tokens
+            cached_tokens = int(getattr(usage, "cached_content_token_count", 0) or 0) or cached_tokens
+        candidates = getattr(response, "candidates", None) or []
+        candidate = candidates[0] if candidates else None
+        content = getattr(candidate, "content", None) if candidate is not None else None
+        parts = getattr(content, "parts", None) or []
+        for part in parts:
+            text = getattr(part, "text", None)
+            if text:
+                yield SimpleNamespace(
+                    usage=None,
+                    choices=[SimpleNamespace(delta=SimpleNamespace(content=str(text), tool_calls=None))],
+                )
+            call = getattr(part, "function_call", None)
+            if call is not None:
+                yield SimpleNamespace(
+                    usage=None,
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(
+                                content=None,
+                                tool_calls=[
+                                    SimpleNamespace(
+                                        index=call_index,
+                                        id=str(getattr(call, "id", "") or ""),
+                                        function=SimpleNamespace(
+                                            name=str(getattr(call, "name", "") or ""),
+                                            arguments=json.dumps(getattr(call, "args", None) or {}),
+                                        ),
+                                    )
+                                ],
+                            )
+                        )
+                    ],
+                )
+                call_index += 1
+
+    yield SimpleNamespace(
+        usage=SimpleNamespace(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=cached_tokens),
+        ),
+        choices=[],
+    )
+
+
+class _GoogleCompletions:
+    """`.create(**kwargs)` — the one method `_create()` ever calls."""
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    async def create(self, **kwargs: Any) -> Any:
+        request = _google_request(kwargs)
+        if kwargs.get("stream"):
+            stream = self._client.aio.models.generate_content_stream(**request)
+            return _google_stream_to_openai_chunks(stream)
+        return _google_response_to_openai_shape(await self._client.aio.models.generate_content(**request))
+
+
+class _GoogleAdapter:
+    """Wraps a real `genai.Client` so `.chat.completions.create(**kwargs)`
+    behaves exactly like the OpenAI SDK client `_create()` already expects —
+    see the module-level docstring above the Google section for why."""
+
+    def __init__(self, client: Any) -> None:
+        self.chat = SimpleNamespace(completions=_GoogleCompletions(client))
+
+
+#: Any of the four providers' clients — see `client()` for what each one is.
+ProviderClient = AsyncAzureOpenAI | AsyncOpenAI | _AnthropicAdapter | _GoogleAdapter
+
+
 class ModelRouter:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
@@ -1109,12 +1609,12 @@ class ModelRouter:
         #: connection pool and its token cache — while a tier pointed at the
         #: xAI account gets its own. Keyed rather than counted so adding a
         #: third account is a config change and not a code change.
-        self._clients: dict[tuple[str, str], AsyncAzureOpenAI | AsyncOpenAI | _AnthropicAdapter | None] = {}
+        self._clients: dict[tuple[str, str], ProviderClient | None] = {}
         #: An explicit override that serves *every* tier, ignoring the endpoint
         #: table entirely. Set by tests and by anything that has already built
         #: a client; a router handed one talks to that and nothing else, which
         #: is the only behaviour a caller who set it could reasonably expect.
-        self._client: AsyncAzureOpenAI | AsyncOpenAI | _AnthropicAdapter | None = None
+        self._client: ProviderClient | None = None
         self.last_result: ChatResult | None = None
         #: Set by `client()`; None until it has been called at least once. With
         #: more than one endpoint in play this is the mode of the *most recent*
@@ -1186,13 +1686,20 @@ class ModelRouter:
             "embed": self.settings.anthropic_model_embed,
         }[tier]
 
+    def _google_model(self, tier: Tier) -> str:
+        return {
+            "nano": self.settings.google_model_nano,
+            "mini": self.settings.google_model_mini,
+            "reason": self.settings.google_model_reason,
+            "embed": self.settings.google_model_embed,
+        }[tier]
+
     def model_name(self, tier: Tier) -> str:
         """The model/deployment name `tier` resolves to under its active provider.
 
-        Empty for `google` (no client implementation yet, see `client()`) or
-        for `openai`/`anthropic` with no model name configured - both read as
-        "cannot be resolved", the same outcome an Azure tier with no
-        deployment name would produce.
+        Empty for `openai`/`anthropic`/`google` with no model name configured
+        - reads as "cannot be resolved", the same outcome an Azure tier with
+        no deployment name would produce.
         """
         provider = self._provider_for(tier)
         if provider == "azure":
@@ -1201,6 +1708,8 @@ class ModelRouter:
             return self._openai_model(tier)
         if provider == "anthropic":
             return self._anthropic_model(tier)
+        if provider == "google":
+            return self._google_model(tier)
         return ""
 
     def _provider_for(self, tier: Tier | None) -> Provider:
@@ -1242,6 +1751,15 @@ class ModelRouter:
         if tier is None:
             return shared
         return (getattr(self.settings, f"anthropic_api_key_{tier}", "") or "").strip() or shared
+
+    def _google_config_for(self, tier: Tier | None) -> str:
+        """The api key for one tier on the `google` provider - same shape as
+        `_anthropic_config_for`, one fixed endpoint, nothing to route besides
+        the key."""
+        shared = (self.settings.google_api_key or "").strip()
+        if tier is None:
+            return shared
+        return (getattr(self.settings, f"google_api_key_{tier}", "") or "").strip() or shared
 
     def _endpoint_for(self, tier: Tier | None) -> tuple[str, str, str]:
         """`(endpoint, api_key, api_version)` for one tier.
@@ -1296,7 +1814,7 @@ class ModelRouter:
             return None
         return provider, model  # type: ignore[return-value]
 
-    def _client_for(self, provider: Provider) -> AsyncAzureOpenAI | AsyncOpenAI | _AnthropicAdapter | None:
+    def _client_for(self, provider: Provider) -> ProviderClient | None:
         """The client for a bare provider name, independent of any tier.
 
         A bot override is not tied to a tier - there is one account per
@@ -1312,6 +1830,8 @@ class ModelRouter:
             return self._azure_client(None)
         if provider == "anthropic":
             return self._anthropic_client(None)
+        if provider == "google":
+            return self._google_client(None)
         detail = f"provider {provider!r} has no client implementation yet"
         self._note_auth(f"{provider}::bot-override", "mock", detail)
         return None
@@ -1327,16 +1847,16 @@ class ModelRouter:
         """
         return self._client_for(provider) is not None
 
-    def client(self, tier: Tier | None = None) -> AsyncAzureOpenAI | AsyncOpenAI | _AnthropicAdapter | None:
+    def client(self, tier: Tier | None = None) -> ProviderClient | None:
         """The client for `tier`'s active provider, or None when there is
         nothing to talk to.
 
         Dispatches on `_provider_for(tier)` first; everything else in this
         class (`_request_kwargs`, `parse_tool_calls`, `billable_output_tokens`,
         the streaming delta accumulator) reads the OpenAI response shape that
-        `AsyncAzureOpenAI`, `AsyncOpenAI`, and `_AnthropicAdapter` all return,
-        so nothing downstream of this method needs to know which provider
-        produced a `ChatResult`.
+        `AsyncAzureOpenAI`, `AsyncOpenAI`, `_AnthropicAdapter`, and
+        `_GoogleAdapter` all return, so nothing downstream of this method
+        needs to know which provider produced a `ChatResult`.
 
         * **azure** — see `_azure_client`: api_key, managed_identity, or mock.
         * **openai** — see `_openai_client`: real OpenAI (api key required) or
@@ -1345,9 +1865,8 @@ class ModelRouter:
         * **anthropic** — see `_anthropic_client`: api_key or mock. Request/
           response translated to and from the OpenAI shape at the edges - see
           the `_Anthropic*` section above this class.
-        * **google** — accepted config value, no client implementation yet.
-          Falls back to mock rather than guessing at a wire format nobody has
-          built.
+        * **google** — see `_google_client`: api_key or mock. Same translation
+          pattern as anthropic - see the `_Google*` section above this class.
         """
         if self._client is not None:
             return self._client
@@ -1355,12 +1874,14 @@ class ModelRouter:
         provider = self._provider_for(tier)
         if provider == "anthropic":
             return self._anthropic_client(tier)
+        if provider == "google":
+            return self._google_client(tier)
         if provider == "openai":
             return self._openai_client(tier)
         if provider != "azure":
-            detail = f"provider {provider!r} has no client implementation yet"
-            self._note_auth(f"{provider}::{tier}", "mock", detail)
-            return None
+            detail = f"provider {provider!r} has no client implementation yet"  # pragma: no cover
+            self._note_auth(f"{provider}::{tier}", "mock", detail)  # pragma: no cover
+            return None  # pragma: no cover
         return self._azure_client(tier)
 
     def _azure_client(self, tier: Tier | None) -> AsyncAzureOpenAI | None:
@@ -1515,6 +2036,41 @@ class ModelRouter:
         self._note_auth("anthropic", "api_key", "configured")
         return adapter
 
+    def _google_client(self, tier: Tier | None) -> _GoogleAdapter | None:
+        """A real `genai.Client` wrapped in `_GoogleAdapter`, or None when no
+        key is configured — same shape as `_anthropic_client`, one fixed
+        endpoint that always requires a key, cached on the resolved key
+        itself rather than on `tier`.
+        """
+        api_key = self._google_config_for(tier)
+        cache_key = (f"google::{api_key}", "")
+        if cache_key in self._clients:
+            cached = self._clients[cache_key]
+            self.auth_mode = self.auth_modes.get("google", "mock")
+            return cast("_GoogleAdapter | None", cached)
+
+        if not api_key:
+            self._clients[cache_key] = None
+            self._note_auth("google", "mock", "no GOOGLE_API_KEY")
+            return None
+
+        if tier is not None:
+            _warn_tier_pricing_may_not_match_provider(tier, "google")
+
+        # Lazy import, same pattern as `_anthropic_client`'s `anthropic`
+        # import: a deployment that never configures Google never pays to
+        # import this SDK, even though it is a hard `requirements.txt` pin.
+        from google import genai
+
+        client = genai.Client(
+            api_key=api_key,
+            http_options={"timeout": int(self.settings.request_timeout_seconds * 1000)},
+        )
+        adapter = _GoogleAdapter(client)
+        self._clients[cache_key] = adapter
+        self._note_auth("google", "api_key", "configured")
+        return adapter
+
     def _note_auth(self, endpoint: str, mode: AuthMode, detail: str) -> None:
         self.auth_mode = mode
         self.auth_modes[endpoint] = mode
@@ -1543,7 +2099,7 @@ class ModelRouter:
         )
 
     def _estimated_result(
-        self, tier: Tier, messages: list[dict[str, Any]], content: str
+        self, tier: Tier, messages: list[dict[str, Any]], content: str, *, model: str | None = None
     ) -> ChatResult:
         """A ChatResult for a call with no usage block, images priced in."""
         text_tokens = count_text_tokens(messages)
@@ -1554,7 +2110,7 @@ class ModelRouter:
             tier,
             text_tokens + image_tokens,
             out_tokens,
-            estimate_cost_usd(tier, text_tokens, out_tokens, image_tokens=image_tokens),
+            estimate_cost_usd(tier, text_tokens, out_tokens, image_tokens=image_tokens, model=model),
             image_tokens=image_tokens,
         )
 
@@ -1634,10 +2190,10 @@ class ModelRouter:
         if override is not None:
             provider, model_override = override
             client = self._client_for(provider)
-            # cost_ledger still bills this call at the task's ordinary tier
-            # price - there is no way to know a bot-pinned model's real price
-            # from here, same limitation as a tier-level provider override.
-            _warn_tier_pricing_may_not_match_provider(tier, f"{provider} (bot override)")
+            if model_override not in MODEL_PRICES:
+                # cost_ledger falls back to the task's ordinary tier price -
+                # accurate for the models in MODEL_PRICES, a guess otherwise.
+                _warn_tier_pricing_may_not_match_provider(tier, f"{provider} (bot override)")
         else:
             model_override = None
             client = self.client(tier)
@@ -1645,7 +2201,9 @@ class ModelRouter:
             # Local mock — deterministic helpful reply without Azure keys.
             # Deliberately no `tool_calls`: a mock that invented function calls
             # would make the agent loop act on instructions nobody gave it.
-            result = self._estimated_result(tier, messages, self._mock_content(tier, messages))
+            result = self._estimated_result(
+                tier, messages, self._mock_content(tier, messages), model=model_override
+            )
             self.last_result = result
             return result
 
@@ -1661,7 +2219,7 @@ class ModelRouter:
         # see how much of the prompt was pixels.
         images = count_image_tokens(messages)
         if usage is None:
-            result = self._estimated_result(tier, messages, content)
+            result = self._estimated_result(tier, messages, content, model=model_override)
             result.raw = resp
         else:
             in_tok = usage.prompt_tokens or 0
@@ -1671,7 +2229,7 @@ class ModelRouter:
                 tier,
                 in_tok,
                 out_tok,
-                estimate_cost_usd(tier, in_tok, out_tok),
+                estimate_cost_usd(tier, in_tok, out_tok, model=model_override),
                 raw=resp,
                 image_tokens=images,
                 cached_tokens=cached_prompt_tokens(usage),
@@ -1703,7 +2261,8 @@ class ModelRouter:
         if override is not None:
             provider, model_override = override
             client = self._client_for(provider)
-            _warn_tier_pricing_may_not_match_provider(tier, f"{provider} (bot override)")
+            if model_override not in MODEL_PRICES:
+                _warn_tier_pricing_may_not_match_provider(tier, f"{provider} (bot override)")
         else:
             model_override = None
             client = self.client(tier)
@@ -1713,7 +2272,7 @@ class ModelRouter:
             words = content.split(" ")
             for index, word in enumerate(words):
                 yield word if index == 0 else " " + word
-            self.last_result = self._estimated_result(tier, messages, content)
+            self.last_result = self._estimated_result(tier, messages, content, model=model_override)
             return
 
         kwargs = self._request_kwargs(tier, messages, tools, tool_choice, reasoning_effort, model_override)
@@ -1747,7 +2306,7 @@ class ModelRouter:
         if not in_tok:
             # No usage block came back, so nothing counted the images either —
             # price them here rather than letting a vision turn bill as text.
-            result = self._estimated_result(tier, messages, content)
+            result = self._estimated_result(tier, messages, content, model=model_override)
             result.tool_calls = calls
             self.last_result = result
             return
@@ -1758,7 +2317,7 @@ class ModelRouter:
             tier,
             in_tok,
             out_tok,
-            estimate_cost_usd(tier, in_tok, out_tok),
+            estimate_cost_usd(tier, in_tok, out_tok, model=model_override),
             image_tokens=count_image_tokens(messages),
             tool_calls=calls,
             cached_tokens=cached_tok,
