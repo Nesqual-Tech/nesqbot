@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app.auth import prune_expired_revocations
 from app.config import get_settings
@@ -80,7 +81,28 @@ async def lifespan(_app: FastAPI):
     settings = get_settings()
     try:
         await ensure_schema(engine)
+    except Exception:  # noqa: BLE001 - logged, and fatal in production
+        logger.exception("startup failed: schema migration did not complete")
+        if settings.nesq_env == "production":
+            # Fail loudly so the container never passes its health check with a
+            # half-initialised database.
+            raise
+        logger.warning(
+            "continuing without a verified schema because NESQ_ENV=%s", settings.nesq_env
+        )
+
+    reaped: list = []
+    pruned = 0
+    try:
         async with SessionLocal() as db:
+            # Session-level, not LOCAL: this connection is reused across every
+            # commit below (seed_system, the reaper, the pruner all commit
+            # independently on the same session), and a Postgres SET LOCAL
+            # only survives to the end of the *current* transaction. Same
+            # reasoning as ensure_schema()'s own lock_timeout - a table lock
+            # held by another session must not be able to hang boot
+            # indefinitely with no exception to catch.
+            await db.execute(text("SET lock_timeout = '5s'"))
             await seed_system(db)
             # Reclaim runs whose process went away — most often this very deploy.
             # Age-based and idempotent, so it is safe with several replicas; see
@@ -94,15 +116,16 @@ async def lifespan(_app: FastAPI):
             len(reaped),
             pruned,
         )
-    except Exception:  # noqa: BLE001 - logged, and fatal in production
-        logger.exception("startup failed: schema migration or seeding did not complete")
-        if settings.nesq_env == "production":
-            # Fail loudly so the container never passes its health check with a
-            # half-initialised database.
-            raise
-        logger.warning(
-            "continuing without a verified schema because NESQ_ENV=%s", settings.nesq_env
-        )
+    except Exception:  # noqa: BLE001
+        # Deliberately never fatal, unlike ensure_schema() above: seeding,
+        # reaping and pruning are all retry-at-the-next-boot operations, not
+        # "the app cannot possibly run without this." A transient lock on
+        # `bots`/`runs` from another session (real production traffic, or a
+        # concurrently-deploying replica) must not be able to crash-loop the
+        # whole container the way it did before this split existed - see the
+        # `lock_timeout` above, which turns that lock wait into exactly this
+        # exception instead of an indefinite hang.
+        logger.exception("startup: seeding/reaping/pruning did not complete - will retry next boot")
     yield
 
 
