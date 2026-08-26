@@ -303,12 +303,12 @@ async def test_list_provider_credentials_starts_empty(authed):
 
 
 async def test_set_provider_credential_then_it_shows_up_as_configured(authed):
-    put = await authed.put(
+    saved = await authed.post(
         "/api/bots/providers/openai/credential",
         json={"api_key": "sk-test-abcdef1234", "base_url": "https://openrouter.ai/api/v1"},
     )
-    assert put.status_code == 200
-    body = put.json()
+    assert saved.status_code == 200
+    body = saved.json()
     assert body["provider"] == "openai"
     assert body["configured"] is True
     assert body["key_hint"] == "…1234"
@@ -321,15 +321,15 @@ async def test_set_provider_credential_then_it_shows_up_as_configured(authed):
 
 
 async def test_set_provider_credential_never_returns_the_raw_key(authed):
-    put = await authed.put(
+    saved = await authed.post(
         "/api/bots/providers/anthropic/credential",
         json={"api_key": "sk-ant-do-not-leak-this"},
     )
-    assert "sk-ant-do-not-leak-this" not in put.text
+    assert "sk-ant-do-not-leak-this" not in saved.text
 
 
 async def test_set_provider_credential_rejects_an_unknown_provider(authed):
-    response = await authed.put(
+    response = await authed.post(
         "/api/bots/providers/wat/credential",
         json={"api_key": "sk-whatever"},
     )
@@ -338,7 +338,7 @@ async def test_set_provider_credential_rejects_an_unknown_provider(authed):
 
 
 async def test_set_provider_credential_rejects_a_blank_key(authed):
-    response = await authed.put(
+    response = await authed.post(
         "/api/bots/providers/google/credential",
         json={"api_key": "   "},
     )
@@ -347,7 +347,7 @@ async def test_set_provider_credential_rejects_a_blank_key(authed):
 
 
 async def test_delete_provider_credential_clears_it(authed):
-    await authed.put("/api/bots/providers/google/credential", json={"api_key": "sk-to-remove"})
+    await authed.post("/api/bots/providers/google/credential", json={"api_key": "sk-to-remove"})
     delete = await authed.delete("/api/bots/providers/google/credential")
     assert delete.status_code == 200
     assert delete.json()["ok"] is True
@@ -364,7 +364,7 @@ async def test_a_saved_credential_makes_the_provider_available(authed):
     before = await authed.get("/api/bots/providers")
     assert before.json()["anthropic"] is False
 
-    await authed.put("/api/bots/providers/anthropic/credential", json={"api_key": "sk-ant-live"})
+    await authed.post("/api/bots/providers/anthropic/credential", json={"api_key": "sk-ant-live"})
 
     after = await authed.get("/api/bots/providers")
     assert after.json()["anthropic"] is True
@@ -384,6 +384,6 @@ async def test_provider_credential_endpoints_require_auth_in_production(app, mon
     async with _client_for(app) as bare:
         assert (await bare.get("/api/bots/providers/credentials")).status_code == 401
         assert (
-            await bare.put("/api/bots/providers/openai/credential", json={"api_key": "x"})
+            await bare.post("/api/bots/providers/openai/credential", json={"api_key": "x"})
         ).status_code == 401
         assert (await bare.delete("/api/bots/providers/openai/credential")).status_code == 401

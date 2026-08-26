@@ -104,8 +104,11 @@ export const getProviders = (signal?: AbortSignal) => get<ProvidersOut>("/bots/p
 export const reseedSystemBots = () => post<{ ok: boolean; detail?: string }>("/bots/system/reseed")
 export const listProviderCredentials = (signal?: AbortSignal) =>
   get<ProviderCredentialsOut>("/bots/providers/credentials", undefined, signal)
+// POST, not PUT — Azure Container Apps' ingress CORS policy predates this
+// endpoint and does not allow PUT, so a PUT preflight from the packaged app
+// never reaches the API at all. See the comment on the route in bots.py.
 export const setProviderCredential = (provider: string, input: SetProviderCredentialRequest) =>
-  request<ProviderCredentialOut>(`/bots/providers/${provider}/credential`, { method: "PUT", body: input })
+  request<ProviderCredentialOut>(`/bots/providers/${provider}/credential`, { method: "POST", body: input })
 export const deleteProviderCredential = (provider: string) => del<void>(`/bots/providers/${provider}/credential`)
 
 /* -------------------------------------------------------- threads/messages */

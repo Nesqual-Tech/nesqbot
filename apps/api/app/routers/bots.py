@@ -168,7 +168,15 @@ async def list_provider_credentials(
     return ProviderCredentialsOut(credentials=out)
 
 
-@router.put("/bots/providers/{provider}/credential", response_model=ProviderCredentialOut)
+#: POST, not PUT, despite this being a plain upsert — PUT is not in
+#: `infra/azure/main.bicep`'s Container Apps ingress `corsPolicy.allowedMethods`
+#: (`['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS']`, set before this endpoint
+#: existed), which is a separate, edge-level CORS check ahead of the FastAPI
+#: `CORSMiddleware` in main.py — the app's own `allow_methods=["*"]` never even
+#: sees a PUT preflight the ingress has already answered without it. Changing
+#: the bicep and redeploying the whole template is the "real" fix; POST avoids
+#: it entirely and ships as a plain image update.
+@router.post("/bots/providers/{provider}/credential", response_model=ProviderCredentialOut)
 async def set_provider_credential(
     provider: str,
     body: ProviderCredentialIn,
