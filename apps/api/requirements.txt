@@ -12,6 +12,13 @@ passlib[bcrypt]==1.7.4
 docker==7.1.0
 temporalio==1.9.0
 openai==1.70.0
+# Lazily imported inside ModelRouter._anthropic_client(), so a deployment that
+# never configures MODEL_PROVIDER=anthropic never pays to load it - same
+# pattern as azure-identity below. Pinned to the version verified against
+# services/model_router.py's `_anthropic_*` translation layer (field names on
+# Message/Usage/the streaming event types were read off this exact version's
+# type definitions, not guessed).
+anthropic==1.0.0
 pyyaml==6.0.2
 python-multipart==0.0.20
 orjson==3.10.16

@@ -194,6 +194,26 @@ class Settings(BaseSettings):
     openai_model_reason: str = ""
     openai_model_embed: str = ""
 
+    # ---- Anthropic ------------------------------------------------------------
+    #
+    # One fixed endpoint (api.anthropic.com), so unlike the openai block above
+    # there is no base_url. Everything else mirrors it: a shared key/model with
+    # per-tier overrides, translated to and from the OpenAI wire shape by
+    # ModelRouter._anthropic_client() / the adapter classes next to it, so nothing
+    # downstream of client() needs a third branch.
+    anthropic_api_key: str = ""
+    anthropic_api_key_nano: str = ""
+    anthropic_api_key_mini: str = ""
+    anthropic_api_key_reason: str = ""
+    anthropic_api_key_embed: str = ""
+    # Real model names - e.g. "claude-opus-4-5-20251101". No default, same
+    # reasoning as openai_model_*: an unconfigured tier cannot be resolved and
+    # falls back to mock rather than guessing at a model name.
+    anthropic_model_nano: str = ""
+    anthropic_model_mini: str = ""
+    anthropic_model_reason: str = ""
+    anthropic_model_embed: str = ""
+
     # ---- what a vision step costs -------------------------------------------
     #
     # Three settings, one problem: a desktop agent that looks at its screen on

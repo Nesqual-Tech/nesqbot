@@ -4,6 +4,33 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+#: Mirrors `Provider` in `app/services/model_router.py`. Hand-synced rather
+#: than imported so this leaf module stays dependency-free of `app.services`;
+#: a value outside this set is caught here as a 422 rather than surfacing
+#: later as "this bot silently mocks", which `ModelRouter._provider_for`
+#: would otherwise degrade to.
+KNOWN_MODEL_PROVIDERS = frozenset({"azure", "openai", "anthropic", "google"})
+
+
+def _validate_model_override(model: Any) -> Any:
+    """Shared by `CreateCustomBotIn` and `UpdateBotIn`.
+
+    `model_provider` set with no `model_name` resolves to an empty model name
+    at call time (`ModelRouter.model_name`) and the bot silently falls back to
+    mock — correct behaviour for the router, a confusing one for whoever just
+    configured this bot in the setup wizard and got no error. Caught here
+    instead, as a 422 naming exactly what is missing.
+    """
+    if model.model_provider is not None and model.model_provider not in KNOWN_MODEL_PROVIDERS:
+        raise ValueError(
+            f"model_provider must be one of {sorted(KNOWN_MODEL_PROVIDERS)}, got {model.model_provider!r}"
+        )
+    if model.model_provider is not None and not (model.model_name or "").strip():
+        raise ValueError("model_name is required when model_provider is set")
+    if model.model_name is not None and model.model_provider is None:
+        raise ValueError("model_provider is required when model_name is set")
+    return model
+
 
 class UserOut(BaseModel):
     id: UUID
@@ -22,6 +49,10 @@ class BotOut(BaseModel):
     is_system: bool
     daily_budget_usd: float
     desktop_profile: str
+    #: NULL means "the router's tier routing decides" — the historical and
+    #: still-default behaviour. See Bot.model_provider in models.py.
+    model_provider: str | None = None
+    model_name: str | None = None
     created_at: datetime
 
     class Config:
@@ -36,6 +67,27 @@ class CreateCustomBotIn(BaseModel):
     mcp_ids: list[UUID] = []
     desktop_profile: str = "xfce"
     daily_budget_usd: float = 5.0
+    model_provider: str | None = None
+    model_name: str | None = None
+
+    @model_validator(mode="after")
+    def _provider_and_model_travel_together(self) -> "CreateCustomBotIn":
+        return _validate_model_override(self)
+
+
+class ProvidersOut(BaseModel):
+    """Which providers this deployment can actually reach right now.
+
+    A live credential resolved, not just a name this build recognises — see
+    `ModelRouter.provider_available`. For the setup wizard: which providers
+    can be offered per bot before a self-hoster hits "this bot mocks" because
+    nobody set `ANTHROPIC_API_KEY`.
+    """
+
+    azure: bool
+    openai: bool
+    anthropic: bool
+    google: bool
 
 
 class ThreadOut(BaseModel):
@@ -336,6 +388,32 @@ class UpdateBotIn(BaseModel):
     system_prompt: str | None = None
     daily_budget_usd: float | None = Field(default=None, ge=0)
     desktop_profile: str | None = None
+    #: Unlike every other field here, `null` is meaningful and distinct from
+    #: "not sent": sending `model_provider: null` clears the override and
+    #: reverts this bot to tier routing. See update_bot's handling of these
+    #: two fields specifically.
+    model_provider: str | None = None
+    model_name: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _known_model_provider(cls, data: Any) -> Any:
+        """Enum check only. Unlike `CreateCustomBotIn`, this cannot also
+        enforce "both or neither": a PATCH sending only `model_name` to swap
+        the model under an already-configured provider (or only
+        `model_provider` to clear an already-consistent one) is legitimate
+        and this validator has no DB row to check the other field against.
+        `update_bot` enforces the pairing against the *resulting* row instead,
+        after the change is applied — see there.
+        """
+        if not isinstance(data, dict):
+            return data
+        provider = data.get("model_provider")
+        if "model_provider" in data and provider is not None and provider not in KNOWN_MODEL_PROVIDERS:
+            raise ValueError(
+                f"model_provider must be one of {sorted(KNOWN_MODEL_PROVIDERS)}, got {provider!r}"
+            )
+        return data
 
 
 class BudgetIn(BaseModel):

@@ -1,7 +1,7 @@
 /**
  * Composition only. Every behaviour lives in `hooks/`, `state/` or a component.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { REQUIRES_SIGN_IN } from "./api/client"
 import { getHealth } from "./api/endpoints"
 import { ApprovalsPanel } from "./components/ApprovalsPanel"
@@ -14,6 +14,7 @@ import { IntegrationsPanel } from "./components/IntegrationsPanel"
 import { PaneSplitter } from "./components/PaneSplitter"
 import { RoutinesPanel } from "./components/RoutinesPanel"
 import { SessionBootScreen, SignInScreen } from "./components/SignInScreen"
+import { SetupWizard } from "./components/SetupWizard"
 import { Sidebar } from "./components/Sidebar"
 import { TakeoverBeacon } from "./components/TakeoverBeacon"
 import { ToastViewport } from "./components/Toast"
@@ -28,6 +29,7 @@ import { dur, ease, gsap, useGSAP } from "./lib/motion"
 import { onShellEvent, parseDeepLink } from "./lib/tauri"
 import { CommandPalette, type Command } from "./components/CommandPalette"
 import { AppProviders, useSelection, useToast, type PanelTab } from "./state/AppState"
+import { hasCompletedSetup, resetSetupCompletion } from "./state/setup"
 import { useTakeover } from "./state/takeover"
 import { useTheme } from "./state/theme"
 import type { TakeoverRequest } from "./lib/takeover"
@@ -35,10 +37,48 @@ import type { HealthOut } from "./types"
 
 export function App() {
   return (
-    <AppProviders>
-      <AuthGate />
-    </AppProviders>
+    <SetupGate>
+      <AppProviders>
+        <AuthGate />
+      </AppProviders>
+    </SetupGate>
   )
+}
+
+/**
+ * Runs the setup wizard before anything that could fire a request exists.
+ *
+ * `AppProviders` (and the auth provider it wraps) starts calling the API the
+ * moment it mounts. Gating outside it, rather than showing the wizard as a
+ * screen *within* the shell, is what stops that from happening against
+ * whatever `API_BASE` happened to default to while someone is still typing
+ * their real backend's address into step 1.
+ *
+ * `key={resetCount}` remounts the wizard (fresh internal step state) when
+ * `openSetup` reopens it from the running app — see `Shell`'s "Setup" command
+ * and sidebar entry.
+ */
+function SetupGate({ children }: { children: ReactNode }) {
+  const [done, setDone] = useState(hasCompletedSetup())
+  const [resetCount, setResetCount] = useState(0)
+
+  useEffect(() => {
+    const reopen = () => {
+      resetSetupCompletion()
+      setResetCount((n) => n + 1)
+      setDone(false)
+    }
+    window.addEventListener("nesq:open-setup", reopen)
+    return () => window.removeEventListener("nesq:open-setup", reopen)
+  }, [])
+
+  if (!done) return <SetupWizard key={resetCount} onDone={() => setDone(true)} />
+  return <>{children}</>
+}
+
+/** Reopens the setup wizard from anywhere inside the shell — see `SetupGate`. */
+export function openSetup(): void {
+  window.dispatchEvent(new Event("nesq:open-setup"))
 }
 
 /**
@@ -436,6 +476,14 @@ function Shell() {
         glyph: "moon",
         keywords: "dark light appearance",
         run: toggleTheme,
+      },
+      {
+        id: "act-setup",
+        label: "Open setup",
+        group: "Actions",
+        glyph: "plug",
+        keywords: "backend endpoint provider model configure wizard",
+        run: openSetup,
       },
       {
         id: "act-refresh",

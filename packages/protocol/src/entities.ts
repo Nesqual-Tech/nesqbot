@@ -17,6 +17,7 @@ import type {
   IsoDateTime,
   McpTransport,
   MessageRole,
+  ModelProvider,
   ModelTier,
   RiskClass,
   RunStatus,
@@ -59,6 +60,15 @@ export interface Bot {
   is_system: boolean
   daily_budget_usd: number
   desktop_profile: DesktopProfile
+  /**
+   * Both set pins this bot to one provider/model for every task it runs,
+   * bypassing tier routing; both null (the default for every bot created
+   * before this field existed) means tier routing decides. Never one without
+   * the other — the API rejects that combination. See
+   * `services.model_router.ModelRouter.chat`'s `bot=` parameter.
+   */
+  model_provider: ModelProvider | null
+  model_name: string | null
   created_at: string
   /** Null for system bots; set for custom bots created through `POST /bots`. */
   owner_user_id?: Uuid | null

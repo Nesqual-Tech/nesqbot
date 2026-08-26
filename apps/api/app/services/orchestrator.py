@@ -857,7 +857,7 @@ REPROMPT_FOR_ACTION = (
 # stops working. The same key makes a parked delegated run resumable by that
 # person — `resolve_run_owner` reads it off `runs.context_ledger`. What the
 # audit gains instead of "the sales bot did it" is the whole path:
-# `avery → lead_generator → sales`.
+# `norbert → lead_generator → sales`.
 #
 # **Delegation is a new way to spend money with no human turn in between**, so
 # it is bounded three ways at once and each bound answers a different shape of
@@ -948,8 +948,8 @@ RUN_REQUESTED_BY_KEY = "requested_by"
 def _actor_label(user: User) -> str:
     """Short name for the human at the head of a chain, for the audit path.
 
-    The local part of the address, not the display name: `avery` reads as an
-    identity in `avery → lead_generator → sales`, where "Avery Vandenberg"
+    The local part of the address, not the display name: `norbert` reads as an
+    identity in `norbert → lead_generator → sales`, where "Norbert Vandenberg"
     reads as prose, and the address is the field that is always populated.
     Never the full address — an audit path is rendered in UIs and in logs, and
     a chain is not a place to spray a contact detail.
@@ -2543,6 +2543,7 @@ class Orchestrator:
                     messages=messages,
                     tools=tools,
                     reasoning_effort=AGENT_EFFORT_OPENING,
+                    bot=primary,
                 ):
                     yield await self._emit(thread.id, "token", {"delta": delta})
                 result = self.router.last_result
@@ -2554,6 +2555,7 @@ class Orchestrator:
                     messages=messages,
                     tools=tools,
                     reasoning_effort=AGENT_EFFORT_OPENING,
+                    bot=primary,
                 )
             await self.router.record_cost(db, primary.id, result)
 
@@ -2582,7 +2584,7 @@ class Orchestrator:
             if (
                 not calls
                 and connector_directive is None
-                and self.router.supports_tools
+                and self.router.supports_tools_for(primary)
                 and self._announces_action(result.content)
             ):
                 # The reported bug, exactly: a turn that announces a first step
@@ -2598,6 +2600,7 @@ class Orchestrator:
                     messages=convo,
                     tools=tools,
                     reasoning_effort=AGENT_EFFORT_RECOVER,
+                    bot=primary,
                 )
                 await self.router.record_cost(db, primary.id, retry)
                 turn_cost_usd += retry.cost_usd
@@ -4730,6 +4733,7 @@ class Orchestrator:
                     if consecutive_failures or unchanged_screens
                     else AGENT_EFFORT_STEP
                 ),
+                bot=bot,
             )
             await self.router.record_cost(db, bot.id, follow)
             session.cost_usd += follow.cost_usd
@@ -4747,9 +4751,9 @@ class Orchestrator:
                 # the bug this rewrite exists to kill, so it gets exactly one
                 # explicit second chance and then an honest report — never a
                 # plan presented as progress.
-                if reprompted or not self.router.supports_tools:
+                if reprompted or not self.router.supports_tools_for(bot):
                     session.prose = self._prose(follow.content) or session.prose
-                    if self.router.supports_tools:
+                    if self.router.supports_tools_for(bot):
                         notes.append(
                             "I described what I would do next instead of doing it, and I did "
                             "not act when asked again. Nothing further ran."
@@ -4770,6 +4774,7 @@ class Orchestrator:
                     # in this loop where more thinking has ever earned its
                     # latency, so this call — and only this call — pays for it.
                     reasoning_effort=AGENT_EFFORT_RECOVER,
+                    bot=bot,
                 )
                 await self.router.record_cost(db, bot.id, retry)
                 session.cost_usd += retry.cost_usd
@@ -5249,7 +5254,7 @@ class Orchestrator:
                     "from_slug": parent_bot.slug,
                     "to_slug": target.slug,
                     # The whole path, so one field answers "on whose behalf":
-                    # `avery → lead_generator → sales`.
+                    # `norbert → lead_generator → sales`.
                     "chain": chain.audit_path,
                     "depth": chain.depth,
                     "delegations_used": chain.spent[0],
@@ -5329,6 +5334,7 @@ class Orchestrator:
                 )
             ),
             reasoning_effort=AGENT_EFFORT_OPENING,
+            bot=target,
         )
         await self.router.record_cost(db, target.id, opening)
 
@@ -5625,6 +5631,13 @@ class Orchestrator:
         prune_screenshots(convo)
         compact_conversation(convo)
         try:
+            # Deliberately not `bot=bot`: a bot's model pin is what it talks
+            # and acts with, not what every internal accounting call the
+            # orchestrator makes on its behalf runs on. This summary is
+            # explicitly the cheapest tier there is - see the docstring above
+            # - and a bot pinned to an expensive model must not pay that price
+            # on every closing summary just because it also has an opinion
+            # about the model it talks with.
             asked = await self.router.chat(
                 task=SUMMARY_TASK,
                 messages=[
@@ -6049,6 +6062,7 @@ class Orchestrator:
                 # the shape of decision worth reasoning about, and the reason
                 # tier cannot be asked for graded effort anyway.
                 reasoning_effort=AGENT_EFFORT_RECOVER,
+                bot=bot,
             )
             await self.router.record_cost(db, bot.id, opening)
             session.cost_usd += opening.cost_usd
@@ -6058,7 +6072,7 @@ class Orchestrator:
                 session.notes.append(
                     "I was handed the screen back but did not act on it. Nothing further ran."
                 )
-                session.outcome = "refused" if self.router.supports_tools else "completed"
+                session.outcome = "refused" if self.router.supports_tools_for(bot) else "completed"
                 session.compose(
                     self._compose_desktop_reply(session.prose, session.steps, session.notes)
                 )
@@ -6209,6 +6223,10 @@ class Orchestrator:
         if len(bots) <= 2 or self.router.client() is None:
             return None
 
+        # Deliberately no `bot=` here: this decides *which* bot should answer,
+        # so there is no single bot's model pin that could apply — it runs on
+        # the router's ordinary `route` tier regardless of what any candidate
+        # bot is pinned to.
         names = ", ".join(b.slug for b in bots)
         result = await self.router.chat(
             task="route",

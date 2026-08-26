@@ -4033,6 +4033,201 @@ legend {
   color: var(--text);
 }
 
+/* -------------------------------------------------------- setup wizard -- */
+/* Reuses `.signin-screen` as the full-bleed backdrop (same "nothing has
+   loaded yet" moment the sign-in screen owns) with its own wider card. */
+
+.setup-wizard {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-lg);
+  width: min(560px, 100%);
+  padding: var(--space-xxl);
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow-modal);
+  color: var(--text);
+  animation: rise var(--duration-slow) var(--ease-entrance) both;
+}
+
+.setup-wizard__steps {
+  display: flex;
+  gap: var(--space-lg);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-caption-size);
+  color: var(--text-dim);
+}
+
+.setup-wizard__steps li.is-active {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.setup-wizard__steps li.is-done::after {
+  content: " ✓";
+  color: var(--status-success-fg, var(--text-muted));
+}
+
+.setup-wizard__steps li[aria-disabled="true"] {
+  opacity: 0.5;
+}
+
+.setup-wizard__step {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-md);
+  width: 100%;
+  text-align: left;
+}
+
+.setup-wizard__headline {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-subheading-size);
+  line-height: var(--text-subheading-line);
+  font-weight: var(--text-subheading-weight);
+  color: var(--text);
+  text-align: center;
+}
+
+.setup-wizard__body {
+  margin: 0;
+  font-size: var(--text-body-size);
+  line-height: var(--text-body-line);
+  color: var(--text-muted);
+}
+
+.setup-wizard__body code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  padding: 0 0.3em;
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised, var(--bg));
+}
+
+.setup-wizard__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding-top: var(--space-sm);
+}
+
+.setup-wizard__actions-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  flex-wrap: wrap;
+}
+
+.setup-wizard__test-result {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: var(--text-caption-size);
+}
+
+.setup-wizard__test-result.is-ok {
+  color: var(--status-success-fg, var(--text));
+}
+
+.setup-wizard__test-result.is-error {
+  color: var(--status-danger-fg);
+}
+
+.setup-wizard__error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  background: var(--status-danger-bg);
+  border: 1px solid var(--status-danger-border);
+  color: var(--status-danger-fg);
+  font-size: var(--text-caption-size);
+  line-height: var(--text-caption-line);
+}
+
+.setup-wizard__providers {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.setup-wizard__provider {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-sm);
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.setup-wizard__provider.is-live {
+  border-color: var(--status-success-border, var(--border-strong));
+  color: var(--text);
+}
+
+.setup-wizard__provider-name {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.setup-wizard__provider-badge {
+  font-size: var(--text-caption-size);
+  font-weight: 400;
+  color: var(--text-dim);
+  padding: 0 var(--space-xs);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
+.setup-wizard__bots {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.setup-wizard__bot-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+}
+
+.setup-wizard__bot-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.setup-wizard__row-error {
+  grid-column: 1 / -1;
+  font-size: var(--text-caption-size);
+  color: var(--status-danger-fg);
+}
+
 /* ------------------------------------------------------------ animations */
 
 @keyframes spin {

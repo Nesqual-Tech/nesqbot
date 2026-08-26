@@ -82,6 +82,7 @@ import type {
   ExecuteConnectorActionRequest,
   OkResponse,
   PendingApprovalResponse,
+  ProvidersResponse,
   RegisterConnectorRequest,
   RegisterDeviceRequest,
   RegisterMcpRequest,
@@ -108,6 +109,7 @@ import type {
 
 export type UserOut = User
 export type BotOut = Bot
+export type ProvidersOut = ProvidersResponse
 export type ThreadOut = Thread
 export type MessageOut = Message
 export type RunOut = Run

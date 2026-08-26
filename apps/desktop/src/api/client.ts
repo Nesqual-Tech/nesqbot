@@ -9,7 +9,58 @@
  * - reports a 401 to the auth provider, which renews rather than signing out
  */
 
-export const API_BASE: string = (import.meta.env.VITE_API_URL || "http://localhost:8080/api").replace(/\/+$/, "")
+const BUILT_IN_API_BASE = (import.meta.env.VITE_API_URL || "http://localhost:8080/api").replace(/\/+$/, "")
+
+/**
+ * `nesq.api.base` in `localStorage` — non-secret config, same tier as the
+ * mobile app's own endpoint override (`apps/mobile/src/api/client.ts`) and
+ * `auth/storage.ts`'s `USER_CACHE_KEY`. Never an API key or a token: this key
+ * only ever holds a URL.
+ */
+const API_BASE_STORAGE_KEY = "nesq.api.base"
+
+function readApiBaseOverride(): string | null {
+  try {
+    const raw = localStorage.getItem(API_BASE_STORAGE_KEY)
+    return raw ? raw.replace(/\/+$/, "") : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The base URL every request in this module resolves against.
+ *
+ * A `let`, not a `const`: `setApiBase` below mutates it, and every caller —
+ * `buildUrl`, and therefore `get`/`post`/`patch`/`del` — reads this binding
+ * fresh on each call rather than a value captured once at import time, so a
+ * change from the setup wizard takes effect on the very next request with no
+ * reload required.
+ */
+export let API_BASE: string = readApiBaseOverride() ?? BUILT_IN_API_BASE
+
+/** The address this build ships with, before any override — what "Reset" in the setup wizard restores. */
+export const DEFAULT_API_BASE = BUILT_IN_API_BASE
+
+/**
+ * Point every subsequent request at a different backend.
+ *
+ * `persist: false` is for a connectivity probe during setup — try it, but do
+ * not commit to it until the caller confirms `/health` actually answers.
+ * `url: null` clears the override and reverts to `DEFAULT_API_BASE`.
+ */
+export function setApiBase(url: string | null, options: { persist?: boolean } = {}): void {
+  const { persist = true } = options
+  const next = url ? url.trim().replace(/\/+$/, "") : null
+  API_BASE = next || BUILT_IN_API_BASE
+  if (!persist) return
+  try {
+    if (next) localStorage.setItem(API_BASE_STORAGE_KEY, next)
+    else localStorage.removeItem(API_BASE_STORAGE_KEY)
+  } catch {
+    /* private mode / disabled storage — the override still applies for this session */
+  }
+}
 
 let memoryToken: string | null = null
 let lastRequestId: string | null = null

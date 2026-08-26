@@ -63,6 +63,12 @@ class Bot(Base):
     daily_budget_usd: Mapped[Decimal] = mapped_column(Numeric(10, 2), default=Decimal("5.00"))
     desktop_profile: Mapped[str] = mapped_column(Text, default="xfce")
     owner_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    #: Per-bot model override. NULL (both) means "use the router's tier
+    #: routing" - today's behaviour, unchanged. Set both to pin this bot to one
+    #: provider/model for every task class it runs, bypassing nano/mini/reason
+    #: tiering entirely - see ModelRouter.chat(bot=...).
+    model_provider: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.clock_timestamp())
 
 

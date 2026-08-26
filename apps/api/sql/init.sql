@@ -198,6 +198,10 @@ ALTER TABLE approvals    ADD COLUMN IF NOT EXISTS note TEXT;
 ALTER TABLE approvals    ADD COLUMN IF NOT EXISTS execution JSONB NOT NULL DEFAULT '{}';
 ALTER TABLE runs         ADD COLUMN IF NOT EXISTS error TEXT;
 ALTER TABLE runs         ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ;
+-- Per-bot model override. NULL (both) means "use the router tier routing" -
+-- see Bot.model_provider in models.py and ModelRouter.chat(bot=...).
+ALTER TABLE bots         ADD COLUMN IF NOT EXISTS model_provider TEXT;
+ALTER TABLE bots         ADD COLUMN IF NOT EXISTS model_name TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_user_devices_user ON user_devices(user_id);
 CREATE INDEX IF NOT EXISTS idx_memories_bot_user ON memories(bot_id, user_id, created_at DESC);

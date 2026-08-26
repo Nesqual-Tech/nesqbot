@@ -198,7 +198,7 @@ class _StaleRefRouter(ScriptedToolRouter):
         self.remembered = ""
 
     async def chat(self, *, task, messages, tools=None, tool_choice=None, fail_count=0,
-                   reasoning_effort=None):
+                   reasoning_effort=None, bot=None):
         self.step += 1
         if self.step == 1:
             self.script = [("", [call("browser_snapshot", viewport_only=False)])]
@@ -213,7 +213,7 @@ class _StaleRefRouter(ScriptedToolRouter):
             self.script = [("", [call(TOOL_TASK_COMPLETE, summary="Connected.")])]
         return await super().chat(
             task=task, messages=messages, tools=tools, fail_count=fail_count,
-            reasoning_effort=reasoning_effort,
+            reasoning_effort=reasoning_effort, bot=bot,
         )
 
 

@@ -8,6 +8,7 @@ import logging
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any, Literal, cast
 
 from openai import (
@@ -22,16 +23,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from app.config import Settings, get_settings
-from app.models import CostLedger
+from app.models import Bot, CostLedger
 
 logger = logging.getLogger(__name__)
 
 Tier = Literal["nano", "mini", "reason", "embed"]
 
-#: `anthropic` and `google` are accepted config values but have no client
-#: implementation yet - see ModelRouter.client(). Selecting one is honest about
-#: that (falls back to mock, same as an unconfigured Azure tier) rather than
-#: silently mis-routing to a provider that was never actually built.
+#: `google` is an accepted config value but has no client implementation yet -
+#: see ModelRouter.client(). Selecting it is honest about that (falls back to
+#: mock, same as an unconfigured Azure tier) rather than silently mis-routing
+#: to a provider that was never actually built. `azure`/`openai`/`anthropic`
+#: are all real.
 Provider = Literal["azure", "openai", "anthropic", "google"]
 _OPENAI_PROTOCOL_PROVIDERS = frozenset({"azure", "openai"})
 TaskClass = Literal[
@@ -701,6 +703,404 @@ class ChatResult:
     cached_tokens: int = 0
 
 
+# ---------------------------------------------------------------------------
+# Anthropic — a genuinely different wire format, translated at the edges
+# ---------------------------------------------------------------------------
+#
+# Unlike `azure`/`openai`, which share one client shape because `AsyncOpenAI`
+# and `AsyncAzureOpenAI` are the same SDK, Anthropic's Messages API is not
+# OpenAI-compatible: the system prompt is a top-level `system` param, not a
+# message role; tool definitions are `{name, description, input_schema}`, not
+# OpenAI's `{type:"function", function:{...}}`; a reply's content is a list of
+# blocks (`text` / `tool_use`), not `message.content` + `message.tool_calls`;
+# usage is `input_tokens`/`output_tokens`, not `prompt_tokens`/
+# `completion_tokens`; streaming is SSE events (`message_start`,
+# `content_block_start`, `content_block_delta` carrying `text_delta` or
+# `input_json_delta`, `content_block_stop`, `message_delta` carrying the final
+# usage, `message_stop`), not OpenAI-shaped chunks.
+#
+# Rather than teach `_create`/`chat`/`stream_chat` a second wire format, this
+# translates at the edges: `_AnthropicAdapter` exposes
+# `.chat.completions.create(**kwargs)` taking the exact kwargs
+# `_request_kwargs` already builds, and returns objects shaped like the
+# OpenAI SDK's — so every line downstream of `client()` (`parse_tool_calls`,
+# `billable_output_tokens`, `_accumulate_tool_call_deltas`) stays exactly as
+# blind to the provider as it already is for azure vs openai. Verified against
+# the real `anthropic` 1.0.0 SDK's actual type definitions (field names below
+# are not guessed), never against a live account — see
+# `tests/services/test_model_router_anthropic.py`.
+
+#: The Messages API requires `max_tokens` on every request; the OpenAI-shaped
+#: `_request_kwargs` this adapter receives never sets one, because
+#: `chat.completions.create` does not require it. There is no per-tier signal
+#: to size this from — `_request_kwargs` deliberately does not pass `tier`
+#: into the kwargs dict, the same "the adapter cannot tell which tier it is"
+#: constraint that keeps it provider-blind — so one flat number, generous
+#: enough for a `reason`/`deep_plan` turn's longer replies without being
+#: unbounded.
+ANTHROPIC_DEFAULT_MAX_TOKENS = 8192
+
+
+def _anthropic_content(content: Any) -> Any:
+    """An OpenAI-shaped message `content` value, translated to Anthropic's.
+
+    A plain string passes through unchanged. A content-part list (vision
+    turns — see `image_content_part`) needs its `image_url` parts rewritten:
+    OpenAI inlines a data URL (`{type:"image_url", image_url:{url:"data:...
+    ;base64,X", detail}}`); Anthropic wants the media type and the base64
+    payload as separate fields (`{type:"image", source:{type:"base64",
+    media_type, data:X}}`). A part this function does not recognise (neither
+    `text` nor `image_url`) is dropped rather than sent malformed — better a
+    turn is missing one part than a 400 on the whole request.
+    """
+    if not isinstance(content, list):
+        return content
+    out: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        ptype = part.get("type")
+        if ptype == "text":
+            out.append({"type": "text", "text": str(part.get("text") or "")})
+        elif ptype == "image_url":
+            node = part.get("image_url")
+            url = node.get("url", "") if isinstance(node, dict) else str(node or "")
+            if url.startswith(_DATA_URL_PREFIX) and ";base64," in url:
+                header, _, payload = url.partition(";base64,")
+                media_type = header[len(_DATA_URL_PREFIX) :] or "image/png"
+                out.append(
+                    {
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": media_type, "data": payload},
+                    }
+                )
+    return out
+
+
+def _anthropic_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    """OpenAI-shaped `messages` -> Anthropic's `(system, messages)`.
+
+    Only the first `system` message becomes the top-level `system` param — the
+    Messages API takes exactly one. A second one (a caller composing messages
+    by hand, not something this codebase's own callers do today) is folded
+    into the conversation as a user turn rather than silently dropped, since
+    dropping a message an operator wrote is worse than misplacing it.
+
+    A `tool` role (see `tool_result_message`) becomes a user turn carrying a
+    `tool_result` block — Anthropic has no `tool` role. An assistant message
+    carrying `tool_calls` (see `assistant_tool_call_message`) becomes an
+    assistant turn whose content is a list of blocks: the text, if any, then
+    one `tool_use` block per call, arguments parsed back from the JSON string
+    `assistant_tool_call_message` encoded them as.
+    """
+    system = ""
+    out: list[dict[str, Any]] = []
+    for message in messages:
+        role = message.get("role")
+        if role == "system":
+            if not system:
+                system = message_text(message.get("content"))
+                continue
+            out.append({"role": "user", "content": message_text(message.get("content"))})
+            continue
+        if role == "tool":
+            out.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": str(message.get("tool_call_id") or ""),
+                            "content": message.get("content") or "",
+                        }
+                    ],
+                }
+            )
+            continue
+        if role == "assistant" and message.get("tool_calls"):
+            blocks: list[dict[str, Any]] = []
+            text = message.get("content")
+            if text:
+                blocks.append({"type": "text", "text": str(text)})
+            for call in message["tool_calls"]:
+                function = call.get("function") or {}
+                arguments, _ = decode_tool_arguments(function.get("arguments"))
+                blocks.append(
+                    {
+                        "type": "tool_use",
+                        "id": str(call.get("id") or ""),
+                        "name": str(function.get("name") or ""),
+                        "input": arguments,
+                    }
+                )
+            out.append({"role": "assistant", "content": blocks})
+            continue
+        out.append(
+            {
+                "role": role if role in ("user", "assistant") else "user",
+                "content": _anthropic_content(message.get("content")),
+            }
+        )
+    return system, out
+
+
+def _anthropic_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+    """OpenAI function-tool defs -> Anthropic's `{name, description, input_schema}`."""
+    if not tools:
+        return None
+    out = []
+    for tool in tools:
+        function = tool.get("function") or {}
+        out.append(
+            {
+                "name": function.get("name") or "",
+                "description": function.get("description") or "",
+                "input_schema": (
+                    function["parameters"]
+                    if function.get("parameters") is not None
+                    else {"type": "object", "properties": {}}
+                ),
+            }
+        )
+    return out
+
+
+def _anthropic_tool_choice(tool_choice: str | dict[str, Any] | None) -> dict[str, Any] | None:
+    """No caller in this codebase sets `tool_choice` today (grep confirms it —
+    every `chat()`/`stream_chat()` call site leaves it at the default `None`),
+    so this exists for completeness and whatever calls it next, not because
+    anything currently exercises it live."""
+    if tool_choice is None:
+        return None
+    if tool_choice == "auto":
+        return {"type": "auto"}
+    if tool_choice == "none":
+        return {"type": "none"}
+    if isinstance(tool_choice, dict):
+        name = ((tool_choice.get("function") or {}).get("name")) if isinstance(tool_choice, dict) else None
+        if name:
+            return {"type": "tool", "name": name}
+    return {"type": "auto"}
+
+
+def _anthropic_request(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """The exact kwargs `_request_kwargs` builds -> an Anthropic Messages API request.
+
+    `reasoning_effort` is deliberately dropped, not mapped. Anthropic's
+    equivalent — extended thinking — is a differently-shaped `thinking` param
+    (`{"type":"enabled","budget_tokens":N}`), not a graded string, and
+    mapping one onto the other is a separate feature this adapter does not
+    attempt. Silently dropping it here is intentional and safe: `_create`'s
+    existing rejected-effort machinery exists for the case of a deployment
+    that rejects an unknown parameter with a 400, but that machinery is for
+    parameters this adapter *sends*, and this one simply never does.
+    """
+    system, messages = _anthropic_messages(kwargs["messages"])
+    request: dict[str, Any] = {
+        "model": kwargs["model"],
+        "messages": messages,
+        "max_tokens": ANTHROPIC_DEFAULT_MAX_TOKENS,
+    }
+    if system:
+        request["system"] = system
+    tools = _anthropic_tools(kwargs.get("tools"))
+    if tools:
+        request["tools"] = tools
+    tool_choice = _anthropic_tool_choice(kwargs.get("tool_choice"))
+    if tool_choice:
+        request["tool_choice"] = tool_choice
+    return request
+
+
+def _openai_shaped_message(text: str, tool_calls: list[dict[str, Any]]) -> SimpleNamespace:
+    return SimpleNamespace(
+        content=text,
+        tool_calls=[
+            SimpleNamespace(
+                id=str(call.get("id") or ""),
+                function=SimpleNamespace(
+                    name=str(call.get("name") or ""),
+                    arguments=json.dumps(call.get("input") or {}),
+                ),
+            )
+            for call in tool_calls
+        ]
+        or None,
+    )
+
+
+def _anthropic_response_to_openai_shape(message: Any) -> SimpleNamespace:
+    """An Anthropic `Message` -> an object shaped like an OpenAI chat completion.
+
+    `message.content` is a list of blocks (`TextBlock`/`ToolUseBlock`); text
+    blocks concatenate into `.choices[0].message.content`, `tool_use` blocks
+    become `.choices[0].message.tool_calls` with JSON-encoded arguments —
+    `parse_tool_calls` decodes that same string straight back with
+    `decode_tool_arguments`, the same round trip an OpenAI response already
+    takes. `usage.input_tokens`/`.output_tokens` map onto
+    `prompt_tokens`/`completion_tokens`; `cache_read_input_tokens`, when
+    present, becomes `prompt_tokens_details.cached_tokens` — the same field
+    `cached_prompt_tokens()` already reads for Azure's own prompt cache.
+    """
+    text_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] = []
+    for block in message.content:
+        block_type = getattr(block, "type", None)
+        if block_type == "text":
+            text_parts.append(str(getattr(block, "text", "") or ""))
+        elif block_type == "tool_use":
+            tool_calls.append(
+                {
+                    "id": getattr(block, "id", ""),
+                    "name": getattr(block, "name", ""),
+                    "input": getattr(block, "input", {}),
+                }
+            )
+    usage = message.usage
+    input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+    output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+    cached = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=_openai_shaped_message("".join(text_parts), tool_calls))],
+        usage=SimpleNamespace(
+            prompt_tokens=input_tokens,
+            completion_tokens=output_tokens,
+            total_tokens=input_tokens + output_tokens,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=cached),
+        ),
+    )
+
+
+async def _anthropic_stream_to_openai_chunks(events: Any) -> AsyncIterator[SimpleNamespace]:
+    """Anthropic SSE events -> the OpenAI-shaped chunks `stream_chat` already
+    knows how to fold (`_accumulate_tool_call_deltas`) and price
+    (`billable_output_tokens`, `cached_prompt_tokens`).
+
+    * `message_start` carries the prompt's `input_tokens` (and any cache-read
+      count) up front; captured and re-attached to the usage chunk this
+      yields at the end, since `message_delta` — the event that actually
+      carries `output_tokens` — does not reliably repeat it.
+    * `content_block_start` on a `tool_use` block is the one place a tool
+      call's `id`/`name` are known; translated to a chunk carrying them with
+      empty `arguments`, matching the first chunk of an OpenAI streamed tool
+      call.
+    * `content_block_delta` splits on `delta.type`: `text_delta` is a content
+      chunk, `input_json_delta` is an arguments-fragment chunk for the tool
+      call at the same block `index` — `_accumulate_tool_call_deltas` keys its
+      buffer on exactly that index, so Anthropic's own content-block index is
+      reused unchanged rather than remapped.
+    * `message_delta` carries the final usage; yielded as a usage-only chunk
+      (`choices=[]`) so `stream_chat`'s `getattr(chunk, "usage", None)` check
+      picks it up without also (incorrectly) trying to read a `.delta` off it.
+    * `content_block_stop`, `message_stop`, and anything else unrecognised
+      carry nothing this router reads and are skipped.
+    """
+    input_tokens = 0
+    output_tokens = 0
+    cached_tokens = 0
+    async for event in events:
+        etype = getattr(event, "type", None)
+        if etype == "message_start":
+            usage = getattr(event.message, "usage", None)
+            if usage is not None:
+                input_tokens = int(getattr(usage, "input_tokens", 0) or 0) or input_tokens
+                cached_tokens = int(getattr(usage, "cache_read_input_tokens", 0) or 0) or cached_tokens
+            continue
+        if etype == "content_block_start":
+            block = event.content_block
+            if getattr(block, "type", None) == "tool_use":
+                yield SimpleNamespace(
+                    usage=None,
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(
+                                content=None,
+                                tool_calls=[
+                                    SimpleNamespace(
+                                        index=event.index,
+                                        id=str(getattr(block, "id", "") or ""),
+                                        function=SimpleNamespace(
+                                            name=str(getattr(block, "name", "") or ""), arguments=""
+                                        ),
+                                    )
+                                ],
+                            )
+                        )
+                    ],
+                )
+            continue
+        if etype == "content_block_delta":
+            delta = event.delta
+            dtype = getattr(delta, "type", None)
+            if dtype == "text_delta":
+                text = str(getattr(delta, "text", "") or "")
+                yield SimpleNamespace(
+                    usage=None,
+                    choices=[SimpleNamespace(delta=SimpleNamespace(content=text, tool_calls=None))],
+                )
+            elif dtype == "input_json_delta":
+                yield SimpleNamespace(
+                    usage=None,
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(
+                                content=None,
+                                tool_calls=[
+                                    SimpleNamespace(
+                                        index=event.index,
+                                        id=None,
+                                        function=SimpleNamespace(
+                                            name=None, arguments=str(getattr(delta, "partial_json", "") or "")
+                                        ),
+                                    )
+                                ],
+                            )
+                        )
+                    ],
+                )
+            continue
+        if etype == "message_delta":
+            usage = getattr(event, "usage", None)
+            if usage is not None:
+                output_tokens = int(getattr(usage, "output_tokens", 0) or 0) or output_tokens
+                input_tokens = int(getattr(usage, "input_tokens", 0) or 0) or input_tokens
+                cached_tokens = int(getattr(usage, "cache_read_input_tokens", 0) or 0) or cached_tokens
+            yield SimpleNamespace(
+                usage=SimpleNamespace(
+                    prompt_tokens=input_tokens,
+                    completion_tokens=output_tokens,
+                    total_tokens=input_tokens + output_tokens,
+                    prompt_tokens_details=SimpleNamespace(cached_tokens=cached_tokens),
+                ),
+                choices=[],
+            )
+            continue
+        # content_block_stop, message_stop, ping: nothing to translate.
+
+
+class _AnthropicCompletions:
+    """`.create(**kwargs)` — the one method `_create()` ever calls."""
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    async def create(self, **kwargs: Any) -> Any:
+        request = _anthropic_request(kwargs)
+        if kwargs.get("stream"):
+            raw = await self._client.messages.create(**request, stream=True)
+            return _anthropic_stream_to_openai_chunks(raw)
+        return _anthropic_response_to_openai_shape(await self._client.messages.create(**request))
+
+
+class _AnthropicAdapter:
+    """Wraps a real `AsyncAnthropic` so `.chat.completions.create(**kwargs)`
+    behaves exactly like the OpenAI SDK client `_create()` already expects —
+    see the module-level docstring above this class for why."""
+
+    def __init__(self, client: Any) -> None:
+        self.chat = SimpleNamespace(completions=_AnthropicCompletions(client))
+
+
 class ModelRouter:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
@@ -709,12 +1109,12 @@ class ModelRouter:
         #: connection pool and its token cache — while a tier pointed at the
         #: xAI account gets its own. Keyed rather than counted so adding a
         #: third account is a config change and not a code change.
-        self._clients: dict[tuple[str, str], AsyncAzureOpenAI | AsyncOpenAI | None] = {}
+        self._clients: dict[tuple[str, str], AsyncAzureOpenAI | AsyncOpenAI | _AnthropicAdapter | None] = {}
         #: An explicit override that serves *every* tier, ignoring the endpoint
         #: table entirely. Set by tests and by anything that has already built
         #: a client; a router handed one talks to that and nothing else, which
         #: is the only behaviour a caller who set it could reasonably expect.
-        self._client: AsyncAzureOpenAI | AsyncOpenAI | None = None
+        self._client: AsyncAzureOpenAI | AsyncOpenAI | _AnthropicAdapter | None = None
         self.last_result: ChatResult | None = None
         #: Set by `client()`; None until it has been called at least once. With
         #: more than one endpoint in play this is the mode of the *most recent*
@@ -746,6 +1146,22 @@ class ModelRouter:
         """
         return self.client(route_task(AGENT_LOOP_TASK)) is not None
 
+    def supports_tools_for(self, bot: Bot | None = None) -> bool:
+        """`supports_tools`, but honouring a bot's own provider/model pin.
+
+        A self-hosted deployment can run entirely on a non-Azure provider —
+        `AZURE_OPENAI_ENDPOINT` genuinely empty, on purpose — in which case
+        the plain `supports_tools` property (always the default tier's
+        account) reads False for every bot even when a bot's own override
+        provider is live and perfectly capable of tool calls. Callers that
+        have a bot in hand should use this instead.
+        """
+        override = self._bot_override(bot)
+        if override is None:
+            return self.supports_tools
+        provider, _ = override
+        return self._client_for(provider) is not None
+
     def _deployment(self, tier: Tier) -> str:
         return {
             "nano": self.settings.azure_deployment_nano,
@@ -762,12 +1178,20 @@ class ModelRouter:
             "embed": self.settings.openai_model_embed,
         }[tier]
 
+    def _anthropic_model(self, tier: Tier) -> str:
+        return {
+            "nano": self.settings.anthropic_model_nano,
+            "mini": self.settings.anthropic_model_mini,
+            "reason": self.settings.anthropic_model_reason,
+            "embed": self.settings.anthropic_model_embed,
+        }[tier]
+
     def model_name(self, tier: Tier) -> str:
         """The model/deployment name `tier` resolves to under its active provider.
 
-        Empty for `anthropic`/`google` (no client implementation yet, see
-        `client()`) or for `openai` with no model name configured - both read
-        as "cannot be resolved", the same outcome an Azure tier with no
+        Empty for `google` (no client implementation yet, see `client()`) or
+        for `openai`/`anthropic` with no model name configured - both read as
+        "cannot be resolved", the same outcome an Azure tier with no
         deployment name would produce.
         """
         provider = self._provider_for(tier)
@@ -775,6 +1199,8 @@ class ModelRouter:
             return self._deployment(tier)
         if provider == "openai":
             return self._openai_model(tier)
+        if provider == "anthropic":
+            return self._anthropic_model(tier)
         return ""
 
     def _provider_for(self, tier: Tier | None) -> Provider:
@@ -804,6 +1230,18 @@ class ModelRouter:
         url = (getattr(self.settings, f"openai_base_url_{tier}", "") or "").strip() or shared_url
         key = (getattr(self.settings, f"openai_api_key_{tier}", "") or "").strip() or shared_key
         return url, key
+
+    def _anthropic_config_for(self, tier: Tier | None) -> str:
+        """The api key for one tier on the `anthropic` provider.
+
+        No base_url counterpart: unlike `openai` (which also has to cover a
+        self-hosted server), Anthropic is one fixed endpoint, so there is
+        nothing here to route besides the key.
+        """
+        shared = (self.settings.anthropic_api_key or "").strip()
+        if tier is None:
+            return shared
+        return (getattr(self.settings, f"anthropic_api_key_{tier}", "") or "").strip() or shared
 
     def _endpoint_for(self, tier: Tier | None) -> tuple[str, str, str]:
         """`(endpoint, api_key, api_version)` for one tier.
@@ -836,28 +1274,87 @@ class ModelRouter:
         _warn_tier_is_off_the_default_account(tier, override, self._deployment(tier))
         return override, (getattr(self.settings, f"azure_openai_api_key_{tier}", "") or "").strip(), version
 
-    def client(self, tier: Tier | None = None) -> AsyncAzureOpenAI | AsyncOpenAI | None:
+    @staticmethod
+    def _bot_override(bot: Bot | None) -> tuple[Provider, str] | None:
+        """`(provider, model)` a bot has pinned itself to, or None to use tier
+        routing - the default, and the only behaviour for every bot that
+        predates this column.
+
+        Both `model_provider` and `model_name` must be set: one without the
+        other cannot be resolved to a model (the API layer already rejects
+        this combination at write time — `schemas._validate_model_override` —
+        this is the read-time half of the same rule, for rows written before
+        that validation existed, or written directly against the database).
+        An unrecognised `model_provider` string is treated the same as unset,
+        for the same reason.
+        """
+        if bot is None:
+            return None
+        provider = (bot.model_provider or "").strip().lower()
+        model = (bot.model_name or "").strip()
+        if not provider or not model or provider not in ("azure", "openai", "anthropic", "google"):
+            return None
+        return provider, model  # type: ignore[return-value]
+
+    def _client_for(self, provider: Provider) -> AsyncAzureOpenAI | AsyncOpenAI | _AnthropicAdapter | None:
+        """The client for a bare provider name, independent of any tier.
+
+        A bot override is not tied to a tier - there is one account per
+        provider (the same global `AZURE_OPENAI_*`/`OPENAI_*`/`ANTHROPIC_*`
+        settings tier routing already uses), so this always resolves the
+        *shared* account, the same `tier=None` case
+        `_azure_client`/`_openai_client`/`_anthropic_client` already handle
+        for their tier-agnostic callers.
+        """
+        if provider == "openai":
+            return self._openai_client(None)
+        if provider == "azure":
+            return self._azure_client(None)
+        if provider == "anthropic":
+            return self._anthropic_client(None)
+        detail = f"provider {provider!r} has no client implementation yet"
+        self._note_auth(f"{provider}::bot-override", "mock", detail)
+        return None
+
+    def provider_available(self, provider: Provider) -> bool:
+        """Whether `provider` can actually be reached right now — a live
+        credential resolves, not just an accepted config value.
+
+        For the setup wizard and `GET /bots/providers`: a self-hoster should
+        see which providers this deployment can actually use before being
+        offered them per bot, rather than discovering "anthropic" quietly
+        mocks because nobody set `ANTHROPIC_API_KEY`.
+        """
+        return self._client_for(provider) is not None
+
+    def client(self, tier: Tier | None = None) -> AsyncAzureOpenAI | AsyncOpenAI | _AnthropicAdapter | None:
         """The client for `tier`'s active provider, or None when there is
         nothing to talk to.
 
         Dispatches on `_provider_for(tier)` first; everything else in this
         class (`_request_kwargs`, `parse_tool_calls`, `billable_output_tokens`,
         the streaming delta accumulator) reads the OpenAI response shape that
-        both `AsyncAzureOpenAI` and `AsyncOpenAI` return, so nothing downstream
-        of this method needs to know which provider produced a `ChatResult`.
+        `AsyncAzureOpenAI`, `AsyncOpenAI`, and `_AnthropicAdapter` all return,
+        so nothing downstream of this method needs to know which provider
+        produced a `ChatResult`.
 
         * **azure** — see `_azure_client`: api_key, managed_identity, or mock.
         * **openai** — see `_openai_client`: real OpenAI (api key required) or
           a self-hosted OpenAI-compatible server, "local models" included -
           same client, different `base_url`.
-        * **anthropic** / **google** — accepted config values, no client
-          implementation yet. Falls back to mock rather than guessing at a
-          wire format nobody has built.
+        * **anthropic** — see `_anthropic_client`: api_key or mock. Request/
+          response translated to and from the OpenAI shape at the edges - see
+          the `_Anthropic*` section above this class.
+        * **google** — accepted config value, no client implementation yet.
+          Falls back to mock rather than guessing at a wire format nobody has
+          built.
         """
         if self._client is not None:
             return self._client
 
         provider = self._provider_for(tier)
+        if provider == "anthropic":
+            return self._anthropic_client(tier)
         if provider == "openai":
             return self._openai_client(tier)
         if provider != "azure":
@@ -978,6 +1475,46 @@ class ModelRouter:
         self._note_auth(base_url, "unauthenticated", f"base_url={base_url}")
         return client
 
+    def _anthropic_client(self, tier: Tier | None) -> _AnthropicAdapter | None:
+        """A real `AsyncAnthropic` client wrapped in `_AnthropicAdapter`, or
+        None when no key is configured - there is no keyless outcome for
+        Anthropic the way `_openai_client` has "unauthenticated" for a
+        self-hosted server, since Anthropic's API is one fixed endpoint that
+        always requires a key.
+
+        Cached on the resolved key itself, not on `tier`: two tiers sharing
+        the shared key (the common case - no per-tier override) must share
+        one client and its connection pool, the same rule `_azure_client`/
+        `_openai_client` follow, just keyed differently since there is no
+        `base_url` to key on here.
+        """
+        api_key = self._anthropic_config_for(tier)
+        cache_key = (f"anthropic::{api_key}", "")
+        if cache_key in self._clients:
+            cached = self._clients[cache_key]
+            self.auth_mode = self.auth_modes.get("anthropic", "mock")
+            return cast("_AnthropicAdapter | None", cached)
+
+        if not api_key:
+            self._clients[cache_key] = None
+            self._note_auth("anthropic", "mock", "no ANTHROPIC_API_KEY")
+            return None
+
+        if tier is not None:
+            _warn_tier_pricing_may_not_match_provider(tier, "anthropic")
+
+        # Lazy import, same pattern as `_bearer_token_provider`'s
+        # `azure.identity` and `services/secrets.py`'s Key Vault client: a
+        # deployment that never configures Anthropic never pays to import it,
+        # even though it is a hard `requirements.txt` pin like `openai` is.
+        from anthropic import AsyncAnthropic
+
+        client = AsyncAnthropic(api_key=api_key, timeout=self.settings.request_timeout_seconds)
+        adapter = _AnthropicAdapter(client)
+        self._clients[cache_key] = adapter
+        self._note_auth("anthropic", "api_key", "configured")
+        return adapter
+
     def _note_auth(self, endpoint: str, mode: AuthMode, detail: str) -> None:
         self.auth_mode = mode
         self.auth_modes[endpoint] = mode
@@ -1028,8 +1565,9 @@ class ModelRouter:
         tools: list[dict[str, Any]] | None,
         tool_choice: str | dict[str, Any] | None,
         reasoning_effort: str | None,
+        model_override: str | None = None,
     ) -> dict[str, Any]:
-        model = self.model_name(tier)
+        model = model_override or self.model_name(tier)
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -1089,9 +1627,20 @@ class ModelRouter:
         tool_choice: str | dict[str, Any] | None = None,
         fail_count: int = 0,
         reasoning_effort: str | None = None,
+        bot: Bot | None = None,
     ) -> ChatResult:
         tier = route_task(task, fail_count)
-        client = self.client(tier)
+        override = self._bot_override(bot)
+        if override is not None:
+            provider, model_override = override
+            client = self._client_for(provider)
+            # cost_ledger still bills this call at the task's ordinary tier
+            # price - there is no way to know a bot-pinned model's real price
+            # from here, same limitation as a tier-level provider override.
+            _warn_tier_pricing_may_not_match_provider(tier, f"{provider} (bot override)")
+        else:
+            model_override = None
+            client = self.client(tier)
         if client is None:
             # Local mock — deterministic helpful reply without Azure keys.
             # Deliberately no `tool_calls`: a mock that invented function calls
@@ -1100,7 +1649,7 @@ class ModelRouter:
             self.last_result = result
             return result
 
-        kwargs = self._request_kwargs(tier, messages, tools, tool_choice, reasoning_effort)
+        kwargs = self._request_kwargs(tier, messages, tools, tool_choice, reasoning_effort, model_override)
         resp = await self._create(client, kwargs)
 
         choice = resp.choices[0].message
@@ -1140,6 +1689,7 @@ class ModelRouter:
         tool_choice: str | dict[str, Any] | None = None,
         fail_count: int = 0,
         reasoning_effort: str | None = None,
+        bot: Bot | None = None,
     ) -> AsyncIterator[str]:
         """Yield content deltas. `self.last_result` holds the ChatResult once exhausted.
 
@@ -1149,7 +1699,14 @@ class ModelRouter:
         """
         tier = route_task(task, fail_count)
         self.last_result = None
-        client = self.client(tier)
+        override = self._bot_override(bot)
+        if override is not None:
+            provider, model_override = override
+            client = self._client_for(provider)
+            _warn_tier_pricing_may_not_match_provider(tier, f"{provider} (bot override)")
+        else:
+            model_override = None
+            client = self.client(tier)
 
         if client is None:
             content = self._mock_content(tier, messages)
@@ -1159,7 +1716,7 @@ class ModelRouter:
             self.last_result = self._estimated_result(tier, messages, content)
             return
 
-        kwargs = self._request_kwargs(tier, messages, tools, tool_choice, reasoning_effort)
+        kwargs = self._request_kwargs(tier, messages, tools, tool_choice, reasoning_effort, model_override)
         kwargs["stream"] = True
         kwargs["stream_options"] = {"include_usage": True}
         stream = await self._create(client, kwargs)

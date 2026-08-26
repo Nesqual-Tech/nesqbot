@@ -22,9 +22,10 @@ All list endpoints are scoped to the calling user where an owner column exists.
 | --- | --- | --- |
 | GET | `/bots` | list |
 | POST | `/bots` | create custom |
+| GET | `/bots/providers` | `{azure, openai, anthropic, google}` — which providers this deployment can actually reach right now (live credential resolved), for the setup wizard's and Builder's provider picker |
 | POST | `/bots/system/reseed` | re-run system-bot seeding from `bots/*.yaml` without restarting the API; creates new slugs, reconciles existing system bots, never touches a custom bot |
 | GET | `/bots/{bot_id}` | single, 404 if missing |
-| PATCH | `/bots/{bot_id}` | `UpdateBotIn`: name/role/system_prompt/daily_budget_usd/desktop_profile; 403 changing prompt/slug on system bots |
+| PATCH | `/bots/{bot_id}` | `UpdateBotIn`: name/role/system_prompt/daily_budget_usd/desktop_profile/model_provider/model_name; 403 changing prompt/slug on system bots. `model_provider`/`model_name` (`azure`\|`openai`\|`anthropic`\|`google`) pin this bot to one provider/model, bypassing tier routing; `null` on both reverts to tier routing; setting one without the other is a 422 |
 | DELETE | `/bots/{bot_id}` | custom bots only (403 on `is_system`); stops desktop first |
 
 ### Bots working together

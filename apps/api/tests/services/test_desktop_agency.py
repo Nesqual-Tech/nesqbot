@@ -82,7 +82,15 @@ class ScriptedRouter(ModelRouter):
         self.efforts: list[str | None] = []
 
     async def chat(
-        self, *, task, messages, tools=None, tool_choice=None, fail_count=0, reasoning_effort=None
+        self,
+        *,
+        task,
+        messages,
+        tools=None,
+        tool_choice=None,
+        fail_count=0,
+        reasoning_effort=None,
+        bot=None,
     ) -> ChatResult:
         self.seen.append(messages)
         self.efforts.append(reasoning_effort)
@@ -92,7 +100,15 @@ class ScriptedRouter(ModelRouter):
         return result
 
     async def stream_chat(
-        self, *, task, messages, tools=None, tool_choice=None, fail_count=0, reasoning_effort=None
+        self,
+        *,
+        task,
+        messages,
+        tools=None,
+        tool_choice=None,
+        fail_count=0,
+        reasoning_effort=None,
+        bot=None,
     ):
         result = await self.chat(
             task=task,
@@ -100,6 +116,7 @@ class ScriptedRouter(ModelRouter):
             tools=tools,
             fail_count=fail_count,
             reasoning_effort=reasoning_effort,
+            bot=bot,
         )
         yield result.content
 
@@ -394,7 +411,7 @@ async def test_every_desktop_effect_goes_through_the_chokepoint(
 async def test_every_desktop_step_writes_an_audit_row(
     orchestrator_with, db, user_a, make_thread, desk_bot, varying_screens
 ):
-    """`docs/architecture.md` claims an audit row per desktop action."""
+    """`docs/competitive-analysis.md` claims an audit row per desktop action."""
     from app.models import AuditEvent
 
     orchestrator = orchestrator_with(

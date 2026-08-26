@@ -27,8 +27,9 @@ from app.routers.deps import (
     bot_visibility_clause,
     desktop_mgr,
     get_visible_bot,
+    model_router,
 )
-from app.schemas import BotOut, BudgetIn, CreateCustomBotIn, OkOut, UpdateBotIn
+from app.schemas import BotOut, BudgetIn, CreateCustomBotIn, OkOut, ProvidersOut, UpdateBotIn
 from app.services import mcp_registry
 from app.services.seed import seed_system
 
@@ -50,6 +51,8 @@ def _bot_out(bot: Bot) -> BotOut:
         is_system=bot.is_system,
         daily_budget_usd=float(bot.daily_budget_usd),
         desktop_profile=bot.desktop_profile,
+        model_provider=bot.model_provider,
+        model_name=bot.model_name,
         created_at=bot.created_at,
     )
 
@@ -85,6 +88,8 @@ async def create_custom_bot(
         owner_user_id=user.id,
         desktop_profile=body.desktop_profile,
         daily_budget_usd=Decimal(str(body.daily_budget_usd)),
+        model_provider=body.model_provider,
+        model_name=body.model_name,
     )
     db.add(bot)
     await db.commit()
@@ -95,6 +100,23 @@ async def create_custom_bot(
         await mcp_registry.attach_mcp(db, bot.id, mid)
     await db.commit()
     return _bot_out(bot)
+
+
+@router.get("/bots/providers", response_model=ProvidersOut)
+async def list_available_providers(
+    user: User = Depends(get_current_user),
+) -> ProvidersOut:
+    """Which of `azure`/`openai`/`anthropic`/`google` this deployment can
+    actually reach — a live credential resolved, not just an accepted config
+    value. Drives the setup wizard's and the Builder's provider picker: a
+    bot should never be offered a provider that will silently mock.
+    """
+    return ProvidersOut(
+        azure=model_router.provider_available("azure"),
+        openai=model_router.provider_available("openai"),
+        anthropic=model_router.provider_available("anthropic"),
+        google=model_router.provider_available("google"),
+    )
 
 
 @router.post("/bots/system/reseed", response_model=OkOut)
@@ -164,8 +186,26 @@ async def update_bot(
         changes["daily_budget_usd"] = Decimal(str(changes["daily_budget_usd"]))
 
     for field, value in changes.items():
+        if field in ("model_provider", "model_name"):
+            # `None` is meaningful here, unlike every other field: it clears
+            # the override and reverts this bot to tier routing.
+            setattr(bot, field, value)
+            continue
         if value is not None:
             setattr(bot, field, value)
+
+    if ("model_provider" in changes or "model_name" in changes) and bool(bot.model_provider) != bool(
+        bot.model_name
+    ):
+        # Checked against the *resulting* row, not the request body: a PATCH
+        # touching only one of the two fields is legitimate when the other
+        # was already set from an earlier request (see UpdateBotIn's
+        # validator), so only a genuinely inconsistent outcome is rejected.
+        raise AppError(
+            422,
+            "incomplete_model_override",
+            "model_provider and model_name must both be set or both be null",
+        )
 
     db.add(
         AuditEvent(

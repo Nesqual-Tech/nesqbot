@@ -285,7 +285,7 @@ class _RefFollowingRouter(ScriptedToolRouter):
         self.step = 0
 
     async def chat(self, *, task, messages, tools=None, tool_choice=None, fail_count=0,
-                   reasoning_effort=None):
+                   reasoning_effort=None, bot=None):
         self.step += 1
         if self.step == 1:
             self.script = [("", [call("browser_navigate", url=BENCH_URL)])]
@@ -303,7 +303,7 @@ class _RefFollowingRouter(ScriptedToolRouter):
             self.script = [("", [call(TOOL_TASK_COMPLETE, summary="Finished on the bench page.")])]
         return await super().chat(
             task=task, messages=messages, tools=tools, fail_count=fail_count,
-            reasoning_effort=reasoning_effort,
+            reasoning_effort=reasoning_effort, bot=bot,
         )
 
 

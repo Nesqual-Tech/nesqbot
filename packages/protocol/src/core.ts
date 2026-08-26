@@ -101,6 +101,21 @@ export function isModelTier(value: unknown): value is ModelTier {
   return typeof value === "string" && (MODEL_TIERS as readonly string[]).includes(value)
 }
 
+/**
+ * Mirrors `Provider` in `apps/api/app/services/model_router.py` and
+ * `KNOWN_MODEL_PROVIDERS` in `apps/api/app/schemas.py`. `anthropic`/`google`
+ * are valid values a bot can be pinned to — the API accepts them — but have
+ * no live client yet; `GET /bots/providers` is how a caller learns which of
+ * the four are actually reachable in a given deployment.
+ */
+export type ModelProvider = "azure" | "openai" | "anthropic" | "google"
+
+export const MODEL_PROVIDERS = ["azure", "openai", "anthropic", "google"] as const satisfies readonly ModelProvider[]
+
+export function isModelProvider(value: unknown): value is ModelProvider {
+  return typeof value === "string" && (MODEL_PROVIDERS as readonly string[]).includes(value)
+}
+
 /* ------------------------------------------------------------------ *
  * Runs
  * ------------------------------------------------------------------ */

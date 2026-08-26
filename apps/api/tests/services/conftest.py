@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from typing import Any
 
 import pytest
 
@@ -71,13 +72,24 @@ class ScriptedToolRouter(ModelRouter):
         #: The `reasoning_effort` each call asked for, in order. `None` means
         #: the caller sent none.
         self.efforts: list[str | None] = []
+        #: The `bot` each call was made for, in order — `None` when the caller
+        #: made a bot-agnostic call (routing, closing summary).
+        self.bots: list[Any] = []
 
     @property
     def supports_tools(self) -> bool:
         return True
 
     async def chat(
-        self, *, task, messages, tools=None, tool_choice=None, fail_count=0, reasoning_effort=None
+        self,
+        *,
+        task,
+        messages,
+        tools=None,
+        tool_choice=None,
+        fail_count=0,
+        reasoning_effort=None,
+        bot=None,
     ):
         # A *deep* copy of the content lists, not just the message dicts: the
         # screenshot pruner rewrites those lists in place before every call, so
@@ -87,6 +99,7 @@ class ScriptedToolRouter(ModelRouter):
         self.tools_seen.append(tools)
         self.tasks.append(task)
         self.efforts.append(reasoning_effort)
+        self.bots.append(bot)
         content, calls = self.script.pop(0) if self.script else self.tail
         result = self._estimated_result(route_task(task, fail_count), messages, content)
         result.tool_calls = list(calls)
@@ -94,7 +107,15 @@ class ScriptedToolRouter(ModelRouter):
         return result
 
     async def stream_chat(
-        self, *, task, messages, tools=None, tool_choice=None, fail_count=0, reasoning_effort=None
+        self,
+        *,
+        task,
+        messages,
+        tools=None,
+        tool_choice=None,
+        fail_count=0,
+        reasoning_effort=None,
+        bot=None,
     ):
         result = await self.chat(
             task=task,
@@ -102,6 +123,7 @@ class ScriptedToolRouter(ModelRouter):
             tools=tools,
             fail_count=fail_count,
             reasoning_effort=reasoning_effort,
+            bot=bot,
         )
         if result.content:
             yield result.content

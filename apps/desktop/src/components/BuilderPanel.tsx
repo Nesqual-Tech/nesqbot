@@ -1,6 +1,7 @@
 import { useEffect, useState, type CSSProperties } from "react"
 import { getBotColor, riskLabels } from "@nesqbot/ui"
 import { errorMessage } from "../api/client"
+import { getProviders } from "../api/endpoints"
 import type { BotsApi } from "../hooks/useBots"
 import { cx, initials, usd } from "../lib/format"
 import { GATED_RISKS } from "../lib/risk"
@@ -8,7 +9,27 @@ import { useToast } from "../state/AppState"
 import { EmptyState, ErrorState } from "./EmptyState"
 import { Icon } from "./Icon"
 import { Spinner } from "./Spinner"
-import type { Bot, DesktopProfile } from "../types"
+import type { Bot, DesktopProfile, ModelProvider } from "../types"
+
+const PROVIDER_LABEL: Record<ModelProvider, string> = {
+  azure: "Azure OpenAI",
+  openai: "OpenAI / local model",
+  anthropic: "Anthropic",
+  google: "Google",
+}
+
+/** Which providers the backend can actually reach — same source `SetupWizard` reads, cached for this panel's lifetime. */
+function useAvailableProviders(): ModelProvider[] {
+  const [providers, setProviders] = useState<ModelProvider[]>([])
+  useEffect(() => {
+    const controller = new AbortController()
+    getProviders(controller.signal)
+      .then((result) => setProviders((Object.keys(result) as ModelProvider[]).filter((key) => result[key])))
+      .catch(() => undefined)
+    return () => controller.abort()
+  }, [])
+  return providers
+}
 
 export interface BuilderPanelProps {
   bots: BotsApi
@@ -145,9 +166,17 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
   const [creating, setCreating] = useState(false)
 
   const selected: Bot | null = bots.bots.find((b) => b.id === activeBotId) ?? null
-  const [edit, setEdit] = useState({ name: "", role: "", system_prompt: "", daily_budget_usd: "" })
+  const [edit, setEdit] = useState({
+    name: "",
+    role: "",
+    system_prompt: "",
+    daily_budget_usd: "",
+    model_provider: "" as ModelProvider | "",
+    model_name: "",
+  })
   const [saving, setSaving] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const availableProviders = useAvailableProviders()
 
   useEffect(() => {
     if (!selected) return
@@ -157,8 +186,18 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
       role: selected.role,
       system_prompt: selected.system_prompt ?? "",
       daily_budget_usd: String(selected.daily_budget_usd ?? ""),
+      model_provider: selected.model_provider ?? "",
+      model_name: selected.model_name ?? "",
     })
-  }, [selected?.id, selected?.name, selected?.role, selected?.system_prompt, selected?.daily_budget_usd])
+  }, [
+    selected?.id,
+    selected?.name,
+    selected?.role,
+    selected?.system_prompt,
+    selected?.daily_budget_usd,
+    selected?.model_provider,
+    selected?.model_name,
+  ])
 
   /*
    * What is missing, said before the button is pressed.
@@ -199,8 +238,14 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
     }
   }
 
+  const modelOverrideInvalid = Boolean(edit.model_provider) && !edit.model_name.trim()
+
   const save = async () => {
     if (!selected) return
+    if (modelOverrideInvalid) {
+      toast.warning("Model name required", "Pick a provider and a model together, or clear both.")
+      return
+    }
     const budget = Number(edit.daily_budget_usd)
     setSaving(true)
     try {
@@ -209,6 +254,8 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
         role: edit.role.trim() || undefined,
         system_prompt: selected.is_system ? undefined : edit.system_prompt.trim() || undefined,
         daily_budget_usd: Number.isFinite(budget) && budget >= 0 ? budget : undefined,
+        model_provider: edit.model_provider || null,
+        model_name: edit.model_provider ? edit.model_name.trim() : null,
       })
       toast.success("Teammate updated", edit.name)
     } catch (err) {
@@ -397,6 +444,41 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
                       value={edit.daily_budget_usd}
                       onChange={(event) => setEdit({ ...edit, daily_budget_usd: event.target.value })}
                     />
+                  </label>
+                  <label className="field">
+                    <span className="field__label">Model</span>
+                    <select
+                      className="select"
+                      value={edit.model_provider}
+                      onChange={(event) =>
+                        setEdit({
+                          ...edit,
+                          model_provider: event.target.value as ModelProvider | "",
+                          model_name: event.target.value ? edit.model_name : "",
+                        })
+                      }
+                    >
+                      <option value="">Default (tier routing)</option>
+                      {availableProviders.map((key) => (
+                        <option key={key} value={key}>
+                          {PROVIDER_LABEL[key]}
+                        </option>
+                      ))}
+                    </select>
+                    {edit.model_provider ? (
+                      <input
+                        className={cx("input", modelOverrideInvalid && "input--invalid")}
+                        aria-invalid={modelOverrideInvalid}
+                        value={edit.model_name}
+                        onChange={(event) => setEdit({ ...edit, model_name: event.target.value })}
+                        placeholder="model name, e.g. claude-opus-4-5"
+                      />
+                    ) : (
+                      <span className="field__hint">
+                        Follows the router's ordinary tier routing. Pin a provider to send every one of this bot's
+                        calls to a specific model instead — see Setup for which providers this backend can reach.
+                      </span>
+                    )}
                   </label>
                 </div>
                 <label className="field">

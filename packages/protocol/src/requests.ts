@@ -11,6 +11,7 @@ import type {
   ConnectorBindingStatus,
   DesktopProfile,
   McpTransport,
+  ModelProvider,
   ModelTier,
   RiskClass,
   RunStatus,
@@ -61,11 +62,21 @@ export interface CreateCustomBotRequest {
   mcp_ids?: string[]
   desktop_profile?: "xfce" | "icewm"
   daily_budget_usd?: number
+  /** Both or neither — 422 on one without the other. See `Bot.model_provider`. */
+  model_provider?: ModelProvider | null
+  model_name?: string | null
 }
 
 /**
  * `PATCH /bots/{bot_id}`. Every field optional; only what you send changes.
  * Sending `system_prompt` or a slug change for a system bot answers 403.
+ *
+ * `model_provider`/`model_name` are the one pair here where `null` is a
+ * meaningful, distinct value from "not sent": send `null` on both to clear
+ * an override and revert to tier routing. Sending only one, in a request
+ * that leaves the *other* field inconsistent with what is already stored, is
+ * a 422 (`incomplete_model_override`) — but sending only `model_name` to
+ * swap the model under an already-configured provider is fine.
  */
 export interface UpdateBotRequest {
   name?: string
@@ -75,11 +86,21 @@ export interface UpdateBotRequest {
   system_prompt?: string
   daily_budget_usd?: number
   desktop_profile?: DesktopProfile
+  model_provider?: ModelProvider | null
+  model_name?: string | null
 }
 
 /** `PATCH /bots/{bot_id}/budget`. */
 export interface UpdateBudgetRequest {
   daily_budget_usd: number
+}
+
+/** `GET /bots/providers`. A live credential resolved, not just an accepted config value. */
+export interface ProvidersResponse {
+  azure: boolean
+  openai: boolean
+  anthropic: boolean
+  google: boolean
 }
 
 /* ------------------------------------------------------------------ *
@@ -444,7 +465,7 @@ export interface UpdateRunStatusRequest {
  * Body of `POST /runs/{run_id}/resume`.
  *
  * Everything the resumed run needs is already persisted on the run; `note` is
- * the one thing only the person at the screen knows ("logged in as avery@…").
+ * the one thing only the person at the screen knows ("logged in as norbert@…").
  * It goes into the transcript the model is rebuilt from, so it must never carry
  * a credential.
  */

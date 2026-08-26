@@ -40,6 +40,7 @@ import type {
   Message,
   ParkedRun,
   PendingApprovalOut,
+  ProvidersOut,
   RegisterConnectorInput,
   RegisterMcpInput,
   ResumeRunInput,
@@ -96,6 +97,8 @@ export const createBot = (input: CreateBotInput) => post<Bot>("/bots", input)
 export const getBot = (botId: string, signal?: AbortSignal) => get<Bot>(`/bots/${botId}`, undefined, signal)
 export const updateBot = (botId: string, input: UpdateBotInput) => patch<Bot>(`/bots/${botId}`, input)
 export const deleteBot = (botId: string) => del<void>(`/bots/${botId}`)
+export const getProviders = (signal?: AbortSignal) => get<ProvidersOut>("/bots/providers", undefined, signal)
+export const reseedSystemBots = () => post<{ ok: boolean; detail?: string }>("/bots/system/reseed")
 
 /* -------------------------------------------------------- threads/messages */
 
