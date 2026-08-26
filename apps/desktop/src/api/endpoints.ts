@@ -40,6 +40,8 @@ import type {
   Message,
   ParkedRun,
   PendingApprovalOut,
+  ProviderCredentialOut,
+  ProviderCredentialsOut,
   ProvidersOut,
   RegisterConnectorInput,
   RegisterMcpInput,
@@ -51,6 +53,7 @@ import type {
   RoutineRunStart,
   SendMessageInput,
   SendMessageResult,
+  SetProviderCredentialRequest,
   StandingApproval,
   StandingApprovalList,
   TeachRoutineInput,
@@ -99,6 +102,11 @@ export const updateBot = (botId: string, input: UpdateBotInput) => patch<Bot>(`/
 export const deleteBot = (botId: string) => del<void>(`/bots/${botId}`)
 export const getProviders = (signal?: AbortSignal) => get<ProvidersOut>("/bots/providers", undefined, signal)
 export const reseedSystemBots = () => post<{ ok: boolean; detail?: string }>("/bots/system/reseed")
+export const listProviderCredentials = (signal?: AbortSignal) =>
+  get<ProviderCredentialsOut>("/bots/providers/credentials", undefined, signal)
+export const setProviderCredential = (provider: string, input: SetProviderCredentialRequest) =>
+  request<ProviderCredentialOut>(`/bots/providers/${provider}/credential`, { method: "PUT", body: input })
+export const deleteProviderCredential = (provider: string) => del<void>(`/bots/providers/${provider}/credential`)
 
 /* -------------------------------------------------------- threads/messages */
 

@@ -1,7 +1,16 @@
 import { useCallback, useEffect, useState, type CSSProperties } from "react"
 import { getBotColor, riskLabels } from "@nesqbot/ui"
 import { errorMessage } from "../api/client"
-import { createMemory, deleteMemory, getProviders, listMemories, reseedSystemBots } from "../api/endpoints"
+import {
+  createMemory,
+  deleteMemory,
+  deleteProviderCredential,
+  getProviders,
+  listMemories,
+  listProviderCredentials,
+  reseedSystemBots,
+  setProviderCredential,
+} from "../api/endpoints"
 import type { BotsApi } from "../hooks/useBots"
 import { cx, initials, relativeTime, usd } from "../lib/format"
 import { GATED_RISKS } from "../lib/risk"
@@ -9,7 +18,7 @@ import { useToast } from "../state/AppState"
 import { EmptyState, ErrorState } from "./EmptyState"
 import { Icon } from "./Icon"
 import { Spinner } from "./Spinner"
-import type { Bot, DesktopProfile, Memory, MemoryKind, ModelProvider } from "../types"
+import type { Bot, DesktopProfile, Memory, MemoryKind, ModelProvider, ProviderCredentialOut } from "../types"
 
 const MEMORY_KINDS: MemoryKind[] = ["fact", "preference", "contact", "procedure", "note"]
 
@@ -227,17 +236,216 @@ const PROVIDER_LABEL: Record<ModelProvider, string> = {
   google: "Google",
 }
 
-/** Which providers the backend can actually reach — same source `SetupWizard` reads, cached for this panel's lifetime. */
-function useAvailableProviders(): ModelProvider[] {
+/**
+ * Which providers the backend can actually reach — same source `SetupWizard`
+ * reads. `refetch` lets `ProviderCredentialsSection` make a saved key show up
+ * in the dropdown immediately, instead of waiting for the next mount.
+ */
+function useAvailableProviders(): [ModelProvider[], () => void] {
   const [providers, setProviders] = useState<ModelProvider[]>([])
+  const [reloadKey, setReloadKey] = useState(0)
   useEffect(() => {
     const controller = new AbortController()
     getProviders(controller.signal)
       .then((result) => setProviders((Object.keys(result) as ModelProvider[]).filter((key) => result[key])))
       .catch(() => undefined)
     return () => controller.abort()
+  }, [reloadKey])
+  const refetch = useCallback(() => setReloadKey((n) => n + 1), [])
+  return [providers, refetch]
+}
+
+const PROVIDER_HINT: Record<ModelProvider, string> = {
+  azure: "Azure AI Foundry / Azure OpenAI. Needs both a key and its resource endpoint.",
+  openai: "Real OpenAI, or any self-hosted OpenAI-compatible server — Ollama, vLLM, LM Studio, OpenRouter. Set an endpoint to use one of those.",
+  anthropic: "Claude, via the Messages API. One fixed endpoint — just a key.",
+  google: "Gemini. One fixed endpoint — just a key.",
+}
+
+const PROVIDER_ORDER: ModelProvider[] = ["azure", "openai", "anthropic", "google"]
+
+/**
+ * Save a provider API key from the app, without touching the backend's own
+ * `.env` — for the self-hoster who wants "add the key and go" rather than
+ * editing a file and restarting a container. Additive only: this can only
+ * *add* a credential the backend does not otherwise have; an operator's env
+ * var for the same provider always wins (see `provider_credentials.py`), and
+ * this list never shows one — `configured: false` here can still mean "this
+ * provider is live," just via `.env`. `GET /bots/providers` (`onSaved`'s
+ * caller, `refetchAvailableProviders`) is the source of truth for that.
+ *
+ * Global, not per-bot — a provider's key is one account, not one per bot —
+ * but it lives inside the bot edit form because that is where someone
+ * discovers "the dropdown only has one option," the same reasoning
+ * `MemoriesSection` gives for living here instead of its own tab.
+ */
+function ProviderCredentialsSection({ onSaved }: { onSaved: () => void }) {
+  const toast = useToast()
+  const [rows, setRows] = useState<ProviderCredentialOut[] | null>(null)
+  const [error, setError] = useState<unknown>(null)
+  const [open, setOpen] = useState(false)
+  const [editing, setEditing] = useState<ModelProvider | null>(null)
+  const [apiKey, setApiKey] = useState("")
+  const [baseUrl, setBaseUrl] = useState("")
+  const [busy, setBusy] = useState(false)
+
+  const load = useCallback(() => {
+    setError(null)
+    listProviderCredentials()
+      .then((result) => setRows(result.credentials))
+      .catch((err) => setError(err))
   }, [])
-  return providers
+
+  useEffect(() => {
+    if (open && rows === null) load()
+  }, [open, rows, load])
+
+  const startEditing = (provider: ModelProvider) => {
+    setEditing(provider)
+    setApiKey("")
+    setBaseUrl(rows?.find((r) => r.provider === provider)?.base_url ?? "")
+  }
+
+  const save = async () => {
+    if (!editing || !apiKey.trim()) return
+    setBusy(true)
+    try {
+      await setProviderCredential(editing, { api_key: apiKey.trim(), base_url: baseUrl.trim() || null })
+      toast.success(`${PROVIDER_LABEL[editing]} key saved`)
+      setEditing(null)
+      setApiKey("")
+      setBaseUrl("")
+      load()
+      onSaved()
+    } catch (err) {
+      toast.error("Could not save the key", errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async (provider: ModelProvider) => {
+    setBusy(true)
+    try {
+      await deleteProviderCredential(provider)
+      toast.success(`${PROVIDER_LABEL[provider]} key removed`)
+      load()
+      onSaved()
+    } catch (err) {
+      toast.error("Could not remove the key", errorMessage(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="card builder__credentials">
+      <button
+        type="button"
+        className="disclosure"
+        aria-expanded={open}
+        onClick={() => setOpen((prev) => !prev)}
+      >
+        <Icon name={open ? "collapse" : "expand"} size={14} />
+        {open ? "Hide provider credentials" : "Add a provider API key"}
+      </button>
+
+      {open ? (
+        <div className="reveal builder__credentials-body">
+          <p className="field__hint">
+            Saved here, encrypted in the database — not written to the backend's environment. An operator's own env
+            var for a provider always takes priority over a key saved here.
+          </p>
+
+          {error ? <ErrorState error={error} title="Could not load credentials" onRetry={load} /> : null}
+
+          {rows === null && !error ? <Spinner inline label="Loading" /> : null}
+
+          {rows ? (
+            <ul className="builder__credential-list">
+              {PROVIDER_ORDER.map((provider) => {
+                const row = rows.find((r) => r.provider === provider)
+                const configured = Boolean(row?.configured)
+                return (
+                  <li key={provider} className="builder__credential-row">
+                    <div className="builder__credential-info">
+                      <span className="builder__credential-name">
+                        {PROVIDER_LABEL[provider]}
+                        {configured ? (
+                          <span className="chip chip--ok">key ending {row?.key_hint}</span>
+                        ) : null}
+                      </span>
+                      <span className="field__hint">{PROVIDER_HINT[provider]}</span>
+                    </div>
+
+                    {editing === provider ? (
+                      <div className="builder__credential-edit">
+                        <input
+                          className="input"
+                          type="password"
+                          autoComplete="off"
+                          value={apiKey}
+                          onChange={(event) => setApiKey(event.target.value)}
+                          placeholder="API key"
+                        />
+                        {provider === "azure" || provider === "openai" ? (
+                          <input
+                            className="input"
+                            value={baseUrl}
+                            onChange={(event) => setBaseUrl(event.target.value)}
+                            placeholder={provider === "azure" ? "https://your-resource.openai.azure.com" : "endpoint (optional)"}
+                          />
+                        ) : null}
+                        <div className="builder__credential-edit-actions">
+                          <button
+                            type="button"
+                            className="btn btn--primary btn--sm"
+                            onClick={() => void save()}
+                            disabled={busy || !apiKey.trim()}
+                          >
+                            {busy ? <Spinner inline label="Saving" /> : "Save"}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
+                            onClick={() => setEditing(null)}
+                            disabled={busy}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="builder__credential-edit-actions">
+                        <button
+                          type="button"
+                          className="btn btn--ghost btn--sm"
+                          onClick={() => startEditing(provider)}
+                          disabled={busy}
+                        >
+                          {configured ? "Replace" : "Add key"}
+                        </button>
+                        {configured ? (
+                          <button
+                            type="button"
+                            className="btn btn--ghost btn--sm"
+                            onClick={() => void remove(provider)}
+                            disabled={busy}
+                          >
+                            Remove
+                          </button>
+                        ) : null}
+                      </div>
+                    )}
+                  </li>
+                )
+              })}
+            </ul>
+          ) : null}
+        </div>
+      ) : null}
+    </section>
+  )
 }
 
 export interface BuilderPanelProps {
@@ -412,7 +620,7 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
   })
   const [saving, setSaving] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
-  const availableProviders = useAvailableProviders()
+  const [availableProviders, refetchAvailableProviders] = useAvailableProviders()
 
   useEffect(() => {
     if (!selected) return
@@ -741,6 +949,7 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
                     )}
                   </label>
                 </div>
+                <ProviderCredentialsSection onSaved={refetchAvailableProviders} />
                 <label className="field">
                   <span className="field__label">System prompt</span>
                   <textarea

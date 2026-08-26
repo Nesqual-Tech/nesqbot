@@ -8,6 +8,11 @@ pydantic-settings==2.8.1
 redis==5.2.1
 httpx==0.28.1
 python-jose[cryptography]==3.4.0
+# Direct dependency of app/services/provider_credentials.py (Fernet, for
+# app-typed provider API keys). Was already present transitively via
+# python-jose[cryptography] above; pinned directly so that relationship
+# changing under us cannot silently remove it.
+cryptography==50.0.1
 passlib[bcrypt]==1.7.4
 docker==7.1.0
 temporalio==1.9.0

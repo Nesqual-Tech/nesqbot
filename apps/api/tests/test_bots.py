@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import uuid
 
+from app.config import get_settings
+
 MISSING = uuid.UUID("00000000-0000-0000-0000-0000000000ff")
 
 
@@ -289,3 +291,99 @@ async def test_update_budget_route(authed, bot_a):
 async def test_update_budget_rejects_a_negative_cap(authed, bot_a):
     response = await authed.patch(f"/api/bots/{bot_a.id}/budget", json={"daily_budget_usd": -5})
     assert response.status_code == 422
+
+
+async def test_list_provider_credentials_starts_empty(authed):
+    response = await authed.get("/api/bots/providers/credentials")
+    assert response.status_code == 200
+    rows = response.json()["credentials"]
+    assert {r["provider"] for r in rows} == {"azure", "openai", "anthropic", "google"}
+    assert all(r["configured"] is False for r in rows)
+    assert all(r["key_hint"] is None for r in rows)
+
+
+async def test_set_provider_credential_then_it_shows_up_as_configured(authed):
+    put = await authed.put(
+        "/api/bots/providers/openai/credential",
+        json={"api_key": "sk-test-abcdef1234", "base_url": "https://openrouter.ai/api/v1"},
+    )
+    assert put.status_code == 200
+    body = put.json()
+    assert body["provider"] == "openai"
+    assert body["configured"] is True
+    assert body["key_hint"] == "…1234"
+    assert body["base_url"] == "https://openrouter.ai/api/v1"
+
+    listed = await authed.get("/api/bots/providers/credentials")
+    row = next(r for r in listed.json()["credentials"] if r["provider"] == "openai")
+    assert row["configured"] is True
+    assert row["key_hint"] == "…1234"
+
+
+async def test_set_provider_credential_never_returns_the_raw_key(authed):
+    put = await authed.put(
+        "/api/bots/providers/anthropic/credential",
+        json={"api_key": "sk-ant-do-not-leak-this"},
+    )
+    assert "sk-ant-do-not-leak-this" not in put.text
+
+
+async def test_set_provider_credential_rejects_an_unknown_provider(authed):
+    response = await authed.put(
+        "/api/bots/providers/wat/credential",
+        json={"api_key": "sk-whatever"},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "unknown_provider"
+
+
+async def test_set_provider_credential_rejects_a_blank_key(authed):
+    response = await authed.put(
+        "/api/bots/providers/google/credential",
+        json={"api_key": "   "},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "empty_api_key"
+
+
+async def test_delete_provider_credential_clears_it(authed):
+    await authed.put("/api/bots/providers/google/credential", json={"api_key": "sk-to-remove"})
+    delete = await authed.delete("/api/bots/providers/google/credential")
+    assert delete.status_code == 200
+    assert delete.json()["ok"] is True
+
+    listed = await authed.get("/api/bots/providers/credentials")
+    row = next(r for r in listed.json()["credentials"] if r["provider"] == "google")
+    assert row["configured"] is False
+
+
+async def test_a_saved_credential_makes_the_provider_available(authed):
+    """The whole point: `GET /bots/providers` reflects an app-typed key the
+    same way it reflects an env-configured one, because `model_router.py`
+    treats a stored override as a real fallback, not just a UI artifact."""
+    before = await authed.get("/api/bots/providers")
+    assert before.json()["anthropic"] is False
+
+    await authed.put("/api/bots/providers/anthropic/credential", json={"api_key": "sk-ant-live"})
+
+    after = await authed.get("/api/bots/providers")
+    assert after.json()["anthropic"] is True
+
+
+async def test_provider_credential_endpoints_require_auth_in_production(app, monkeypatch):
+    """Same guarantee `test_the_dev_bypass_is_unreachable_outside_development`
+    holds `GET /me` to: these endpoints read and write real credentials, so a
+    production deployment with no session must refuse them, not fall back to
+    the dev bypass."""
+    import app.auth as auth_module
+    from tests.conftest import _client_for
+
+    production = get_settings().model_copy(update={"nesq_env": "production"})
+    monkeypatch.setattr(auth_module, "get_settings", lambda: production)
+
+    async with _client_for(app) as bare:
+        assert (await bare.get("/api/bots/providers/credentials")).status_code == 401
+        assert (
+            await bare.put("/api/bots/providers/openai/credential", json={"api_key": "x"})
+        ).status_code == 401
+        assert (await bare.delete("/api/bots/providers/openai/credential")).status_code == 401

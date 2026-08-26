@@ -82,6 +82,8 @@ import type {
   ExecuteConnectorActionRequest,
   OkResponse,
   PendingApprovalResponse,
+  ProviderCredentialResponse,
+  ProviderCredentialsResponse,
   ProvidersResponse,
   RegisterConnectorRequest,
   RegisterDeviceRequest,
@@ -90,6 +92,7 @@ import type {
   ResumeRunResponse,
   RunEvalSuiteRequest,
   SendMessageRequest,
+  SetProviderCredentialRequest,
   TeachRoutineRequest,
   TokenResponse,
   UpdateBotRequest,
@@ -110,6 +113,8 @@ import type {
 export type UserOut = User
 export type BotOut = Bot
 export type ProvidersOut = ProvidersResponse
+export type ProviderCredentialOut = ProviderCredentialResponse
+export type ProviderCredentialsOut = ProviderCredentialsResponse
 export type ThreadOut = Thread
 export type MessageOut = Message
 export type RunOut = Run

@@ -26,6 +26,7 @@ from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait
 
 from app.config import Settings, get_settings
 from app.models import Bot, CostLedger
+from app.services import provider_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -1734,6 +1735,11 @@ class ModelRouter:
         """
         shared_url = (self.settings.openai_base_url or "").strip()
         shared_key = (self.settings.openai_api_key or "").strip()
+        if not shared_key:
+            cred_override = provider_credentials.get_override("openai")
+            if cred_override:
+                shared_key = cred_override["api_key"]
+                shared_url = shared_url or (cred_override["base_url"] or "")
         if tier is None:
             return shared_url, shared_key
         url = (getattr(self.settings, f"openai_base_url_{tier}", "") or "").strip() or shared_url
@@ -1748,6 +1754,10 @@ class ModelRouter:
         nothing here to route besides the key.
         """
         shared = (self.settings.anthropic_api_key or "").strip()
+        if not shared:
+            cred_override = provider_credentials.get_override("anthropic")
+            if cred_override:
+                shared = cred_override["api_key"]
         if tier is None:
             return shared
         return (getattr(self.settings, f"anthropic_api_key_{tier}", "") or "").strip() or shared
@@ -1757,6 +1767,10 @@ class ModelRouter:
         `_anthropic_config_for`, one fixed endpoint, nothing to route besides
         the key."""
         shared = (self.settings.google_api_key or "").strip()
+        if not shared:
+            cred_override = provider_credentials.get_override("google")
+            if cred_override:
+                shared = cred_override["api_key"]
         if tier is None:
             return shared
         return (getattr(self.settings, f"google_api_key_{tier}", "") or "").strip() or shared
@@ -1775,9 +1789,18 @@ class ModelRouter:
         `supports_tools`-style question a per-tier answer would over-specify.
         """
         shared = (self.settings.azure_openai_endpoint or "").strip()
+        shared_key = (self.settings.azure_openai_api_key or "").strip()
         shared_version = self.settings.azure_openai_api_version
+        if not shared or not shared_key:
+            # A key typed into the app, not an env var — see
+            # `provider_credentials.py`. Additive only: either half already set
+            # by the operator is left exactly as it was.
+            cred_override = provider_credentials.get_override("azure")
+            if cred_override:
+                shared = shared or (cred_override["base_url"] or "")
+                shared_key = shared_key or cred_override["api_key"]
         if tier is None:
-            return shared, (self.settings.azure_openai_api_key or "").strip(), shared_version
+            return shared, shared_key, shared_version
 
         override = (getattr(self.settings, f"azure_openai_endpoint_{tier}", "") or "").strip()
         version = (
@@ -1786,7 +1809,7 @@ class ModelRouter:
         if not override or override == shared:
             key = (
                 getattr(self.settings, f"azure_openai_api_key_{tier}", "") or ""
-            ).strip() or (self.settings.azure_openai_api_key or "").strip()
+            ).strip() or shared_key
             return shared, key, version
 
         _warn_tier_is_off_the_default_account(tier, override, self._deployment(tier))

@@ -6015,6 +6015,70 @@ legend {
   white-space: nowrap;
 }
 
+.builder__credentials {
+  margin-top: var(--space-lg);
+  width: 100%;
+}
+
+.builder__credentials-body {
+  margin-top: var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.builder__credential-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.builder__credential-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  padding: var(--space-sm);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+}
+
+.builder__credential-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.builder__credential-name {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  font-size: var(--text-caption-size);
+  font-weight: 600;
+}
+
+.builder__credential-edit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.builder__credential-edit .input {
+  min-width: 220px;
+}
+
+.builder__credential-edit-actions {
+  display: flex;
+  gap: var(--space-xs);
+  flex-shrink: 0;
+}
+
 .builder__templates {
   display: flex;
   flex-wrap: wrap;

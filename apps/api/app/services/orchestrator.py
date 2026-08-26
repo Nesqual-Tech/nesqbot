@@ -3840,10 +3840,13 @@ class Orchestrator:
             # one. Without this, the honest disclosure only reached actions that
             # happen to attach a screenshot — click, type, key, scroll and drag
             # do not — and the model reported work it never did.
-            lines.append(
-                "NOTE: this deployment has no real desktop (BOT_DESKTOP_MODE=mock) — nothing "
-                "actually happened on a screen. Do not describe this as if it were a real action."
-            )
+            #
+            # Kept to five words on purpose, not the screenshot note's length:
+            # this one repeats on every mock action in a run — a 35-step script
+            # pushed the average request over `AGENT_REQUEST_TOKEN_MEAN` at the
+            # longer wording (see test_agent_context_budget.py), where the
+            # screenshot note only ever appears once per screenshot taken.
+            lines.append("NOTE: mock desktop, not real.")
         if action == DESKTOP_WINDOWS:
             lines.append(self._windows_line(outcome_result))
         if action in (DESKTOP_START, DESKTOP_STOP):

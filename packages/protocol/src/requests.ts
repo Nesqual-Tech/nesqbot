@@ -103,6 +103,31 @@ export interface ProvidersResponse {
   google: boolean
 }
 
+/** `PUT /bots/providers/{provider}/credential`. */
+export interface SetProviderCredentialRequest {
+  api_key: string
+  base_url?: string | null
+}
+
+/**
+ * One row of `GET /bots/providers/credentials` / the `PUT` response — an
+ * app-typed key, never the key itself. `env`-configured providers do not
+ * appear as `configured` here even when live; cross-reference
+ * `ProvidersResponse` for the full picture.
+ */
+export interface ProviderCredentialResponse {
+  provider: "azure" | "openai" | "anthropic" | "google"
+  configured: boolean
+  key_hint: string | null
+  base_url: string | null
+  updated_at: string | null
+}
+
+/** `GET /bots/providers/credentials`. */
+export interface ProviderCredentialsResponse {
+  credentials: ProviderCredentialResponse[]
+}
+
 /* ------------------------------------------------------------------ *
  * Threads & messages
  * ------------------------------------------------------------------ */

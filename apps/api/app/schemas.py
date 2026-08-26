@@ -90,6 +90,32 @@ class ProvidersOut(BaseModel):
     google: bool
 
 
+class ProviderCredentialIn(BaseModel):
+    """A provider API key typed into the app — see `provider_credentials.py`."""
+
+    api_key: str = Field(min_length=1)
+    #: Azure needs its resource endpoint here too; OpenAI-compatible servers
+    #: (Ollama, vLLM, LM Studio, OpenRouter) use it to point off the real
+    #: OpenAI API. Ignored for anthropic/google, which are one fixed endpoint.
+    base_url: str | None = None
+
+
+class ProviderCredentialOut(BaseModel):
+    """What the app is allowed to know about a stored credential: never the
+    key itself, only whether one is set and enough of it to recognise which
+    key without being able to reconstruct it."""
+
+    provider: Literal["azure", "openai", "anthropic", "google"]
+    configured: bool
+    key_hint: str | None = None
+    base_url: str | None = None
+    updated_at: datetime | None = None
+
+
+class ProviderCredentialsOut(BaseModel):
+    credentials: list[ProviderCredentialOut]
+
+
 class ThreadOut(BaseModel):
     id: UUID
     title: str

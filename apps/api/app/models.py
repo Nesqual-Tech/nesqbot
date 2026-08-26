@@ -52,6 +52,31 @@ class RevokedToken(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class ProviderCredential(Base):
+    """A model-provider API key/endpoint a user typed into the app, rather
+    than something an operator set in the backend's own environment.
+
+    Deliberately additive, not authoritative: `model_router.py` only ever
+    reads a row here when the equivalent env var (`OPENAI_API_KEY`,
+    `ANTHROPIC_API_KEY`, ...) is unset — an operator's env config always wins.
+    See `app/services/provider_credentials.py`. `api_key_encrypted` is a
+    Fernet token, never plaintext; the key is derived from `JWT_SECRET`, so
+    rotating that secret invalidates every row here (by design — there is no
+    separate secret to manage for self-hosters who never touch this feature).
+    """
+
+    __tablename__ = "provider_credentials"
+    provider: Mapped[str] = mapped_column(Text, primary_key=True)
+    api_key_encrypted: Mapped[str] = mapped_column(Text)
+    base_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.clock_timestamp(), onupdate=func.clock_timestamp()
+    )
+    updated_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
+
+
 class Bot(Base):
     __tablename__ = "bots"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

@@ -29,8 +29,19 @@ from app.routers.deps import (
     get_visible_bot,
     model_router,
 )
-from app.schemas import BotOut, BudgetIn, CreateCustomBotIn, OkOut, ProvidersOut, UpdateBotIn
-from app.services import mcp_registry
+from app.schemas import (
+    BotOut,
+    BudgetIn,
+    CreateCustomBotIn,
+    OkOut,
+    ProviderCredentialIn,
+    ProviderCredentialOut,
+    ProviderCredentialsOut,
+    ProvidersOut,
+    UpdateBotIn,
+)
+from app.services import mcp_registry, provider_credentials
+from app.services.provider_credentials import KNOWN_PROVIDERS
 from app.services.seed import seed_system
 
 logger = logging.getLogger("nesqbot.bots")
@@ -117,6 +128,81 @@ async def list_available_providers(
         anthropic=model_router.provider_available("anthropic"),
         google=model_router.provider_available("google"),
     )
+
+
+def _key_hint(value: str) -> str:
+    """Enough to recognise a key by eye, never enough to use it."""
+    tail = value[-4:] if len(value) >= 4 else value
+    return f"…{tail}"
+
+
+@router.get("/bots/providers/credentials", response_model=ProviderCredentialsOut)
+async def list_provider_credentials(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ProviderCredentialsOut:
+    """Provider keys typed into the app — never the keys themselves, only
+    whether one is set. Env-configured providers (`OPENAI_API_KEY` and
+    friends) do not appear here even when live; this is only the app-writable
+    layer `provider_credentials.py` adds on top. Cross-reference with
+    `GET /bots/providers` for the full picture of what is actually reachable.
+    """
+    await provider_credentials.maybe_reload(db)
+    rows = {row.provider: row for row in await provider_credentials.list_credentials(db)}
+    out: list[ProviderCredentialOut] = []
+    for provider in KNOWN_PROVIDERS:
+        row = rows.get(provider)
+        if row is None:
+            out.append(ProviderCredentialOut(provider=provider, configured=False))
+            continue
+        override = provider_credentials.get_override(provider)
+        out.append(
+            ProviderCredentialOut(
+                provider=provider,
+                configured=True,
+                key_hint=_key_hint(override["api_key"]) if override else None,
+                base_url=row.base_url,
+                updated_at=row.updated_at,
+            )
+        )
+    return ProviderCredentialsOut(credentials=out)
+
+
+@router.put("/bots/providers/{provider}/credential", response_model=ProviderCredentialOut)
+async def set_provider_credential(
+    provider: str,
+    body: ProviderCredentialIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ProviderCredentialOut:
+    if provider not in KNOWN_PROVIDERS:
+        raise AppError(400, "unknown_provider", f"provider must be one of {sorted(KNOWN_PROVIDERS)}")
+    api_key = body.api_key.strip()
+    if not api_key:
+        raise AppError(400, "empty_api_key", "api_key cannot be blank")
+    base_url = (body.base_url or "").strip() or None
+    row = await provider_credentials.set_credential(
+        db, provider=provider, api_key=api_key, base_url=base_url, user_id=user.id
+    )
+    return ProviderCredentialOut(
+        provider=provider,  # type: ignore[arg-type]  # narrowed by the `not in KNOWN_PROVIDERS` raise above
+        configured=True,
+        key_hint=_key_hint(api_key),
+        base_url=row.base_url,
+        updated_at=row.updated_at,
+    )
+
+
+@router.delete("/bots/providers/{provider}/credential", response_model=OkOut)
+async def delete_provider_credential(
+    provider: str,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> OkOut:
+    if provider not in KNOWN_PROVIDERS:
+        raise AppError(400, "unknown_provider", f"provider must be one of {sorted(KNOWN_PROVIDERS)}")
+    await provider_credentials.delete_credential(db, provider=provider)
+    return OkOut(ok=True)
 
 
 @router.post("/bots/system/reseed", response_model=OkOut)

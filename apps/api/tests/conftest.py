@@ -717,6 +717,20 @@ def _reset_idempotency_cache():
     threads_module._idempotency_cache.clear()
 
 
+@pytest.fixture(autouse=True)
+def _reset_provider_credential_overrides():
+    """`provider_credentials._overrides` is a bare `dict[provider_name]`, not
+    keyed per-test like a row in the database is — a test that sets an
+    "openai" override and does not clean up would leak it into every test
+    that runs after it in the same process, including ones asserting every
+    provider reads unconfigured."""
+    from app.services import provider_credentials
+
+    provider_credentials.reset_cache()
+    yield
+    provider_credentials.reset_cache()
+
+
 class SSEProbe:
     """Drives one ASGI request by hand and parses the SSE frames as they arrive.
 

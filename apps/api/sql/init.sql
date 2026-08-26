@@ -661,6 +661,19 @@ CREATE TABLE IF NOT EXISTS revoked_tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires_at ON revoked_tokens(expires_at);
 
+-- A model-provider API key typed into the app rather than set by an operator
+-- in the backend environment itself. Additive only, never authoritative — see
+-- app/services/provider_credentials.py: an env var for the same provider
+-- always wins. api_key_encrypted is a Fernet token derived from JWT_SECRET,
+-- never plaintext.
+CREATE TABLE IF NOT EXISTS provider_credentials (
+  provider TEXT PRIMARY KEY,
+  api_key_encrypted TEXT NOT NULL,
+  base_url TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  updated_by_user_id UUID REFERENCES users(id)
+);
+
 -- ---------------------------------------------------------------------------
 -- `now()` is the transaction clock, not the row clock.
 --

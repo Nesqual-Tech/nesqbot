@@ -24,8 +24,7 @@ def _orchestrator() -> Orchestrator:
 def test_a_mock_action_result_discloses_it_is_not_real():
     text = _orchestrator()._tool_result_text("click", {"ok": True, "mock": True})
     assert "ran and reported success" in text
-    assert "no real desktop" in text
-    assert "BOT_DESKTOP_MODE=mock" in text
+    assert "mock desktop, not real" in text.lower()
 
 
 def test_a_real_action_result_carries_no_mock_disclosure():
@@ -47,4 +46,4 @@ def test_a_failed_action_reports_failure_before_any_mock_check():
     assert "boom" in text
     # A failure is already the honest answer; it does not also need the mock
     # caveat layered on top of it.
-    assert "no real desktop" not in text
+    assert "mock" not in text.lower()

@@ -14,6 +14,7 @@ from app.db import SessionLocal, engine
 from app.errors import register_error_handlers
 from app.middleware import RequestContextMiddleware
 from app.routers import API_VERSION, OPENAPI_TAGS, router
+from app.services.provider_credentials import load_overrides_from_db as load_provider_credential_overrides
 from app.services.reaper import reap_orphaned_runs
 from app.services.schema import ensure_schema
 from app.services.seed import seed_system
@@ -86,6 +87,7 @@ async def lifespan(_app: FastAPI):
             # services/reaper.py for why it never reaps a parked run.
             reaped = await reap_orphaned_runs(db)
             pruned = await prune_expired_revocations(db)
+            await load_provider_credential_overrides(db)
         logger.info(
             "schema ensured, system bots seeded, %d orphaned run(s) reclaimed, "
             "%d expired revocation(s) pruned",

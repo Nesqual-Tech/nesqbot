@@ -23,6 +23,9 @@ All list endpoints are scoped to the calling user where an owner column exists.
 | GET | `/bots` | list |
 | POST | `/bots` | create custom |
 | GET | `/bots/providers` | `{azure, openai, anthropic, google}` — which providers this deployment can actually reach right now (live credential resolved), for the setup wizard's and Builder's provider picker |
+| GET | `/bots/providers/credentials` | app-typed provider keys (`provider_credentials` table), never the key itself — `{provider, configured, key_hint, base_url, updated_at}` per provider. Env-configured providers never appear as `configured` here even when live; this is only the app-writable layer on top |
+| PUT | `/bots/providers/{provider}/credential` | `{api_key, base_url?}` — save a key from the app. Additive only: an operator's env var for the same provider always wins, see `services/provider_credentials.py`. Encrypted in Postgres with a key derived from `JWT_SECRET`; 400 on an unknown provider or a blank key |
+| DELETE | `/bots/providers/{provider}/credential` | remove an app-typed key |
 | POST | `/bots/system/reseed` | re-run system-bot seeding from `bots/*.yaml` without restarting the API; creates new slugs, reconciles existing system bots, never touches a custom bot |
 | GET | `/bots/{bot_id}` | single, 404 if missing |
 | PATCH | `/bots/{bot_id}` | `UpdateBotIn`: name/role/system_prompt/daily_budget_usd/desktop_profile/model_provider/model_name; 403 changing prompt/slug on system bots. `model_provider`/`model_name` (`azure`\|`openai`\|`anthropic`\|`google`) pin this bot to one provider/model, bypassing tier routing; `null` on both reverts to tier routing; setting one without the other is a 422 |
