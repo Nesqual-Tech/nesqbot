@@ -387,3 +387,39 @@ async def test_provider_credential_endpoints_require_auth_in_production(app, mon
             await bare.post("/api/bots/providers/openai/credential", json={"api_key": "x"})
         ).status_code == 401
         assert (await bare.delete("/api/bots/providers/openai/credential")).status_code == 401
+
+
+async def test_list_provider_models_returns_the_live_list(authed, monkeypatch):
+    from app.routers.deps import model_router
+
+    async def fake_list_models(provider):
+        assert provider == "anthropic"
+        return ["claude-opus-4-5", "claude-sonnet-4-5"]
+
+    monkeypatch.setattr(model_router, "list_models", fake_list_models)
+
+    response = await authed.get("/api/bots/providers/anthropic/models")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["provider"] == "anthropic"
+    assert body["models"] == ["claude-opus-4-5", "claude-sonnet-4-5"]
+
+
+async def test_list_provider_models_rejects_an_unknown_provider(authed):
+    response = await authed.get("/api/bots/providers/wat/models")
+    assert response.status_code == 400
+    assert response.json()["code"] == "unknown_provider"
+
+
+async def test_list_provider_models_surfaces_a_provider_failure_as_502(authed, monkeypatch):
+    from app.routers.deps import model_router
+
+    async def fake_list_models(provider):
+        raise RuntimeError("openai has no live credential to list models with")
+
+    monkeypatch.setattr(model_router, "list_models", fake_list_models)
+
+    response = await authed.get("/api/bots/providers/openai/models")
+    assert response.status_code == 502
+    assert response.json()["code"] == "provider_unreachable"
+    assert "no live credential" in response.json()["detail"]

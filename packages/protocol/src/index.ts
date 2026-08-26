@@ -84,6 +84,7 @@ import type {
   PendingApprovalResponse,
   ProviderCredentialResponse,
   ProviderCredentialsResponse,
+  ProviderModelsResponse,
   ProvidersResponse,
   RegisterConnectorRequest,
   RegisterDeviceRequest,
@@ -115,6 +116,7 @@ export type BotOut = Bot
 export type ProvidersOut = ProvidersResponse
 export type ProviderCredentialOut = ProviderCredentialResponse
 export type ProviderCredentialsOut = ProviderCredentialsResponse
+export type ProviderModelsOut = ProviderModelsResponse
 export type ThreadOut = Thread
 export type MessageOut = Message
 export type RunOut = Run

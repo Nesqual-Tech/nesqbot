@@ -116,6 +116,15 @@ class ProviderCredentialsOut(BaseModel):
     credentials: list[ProviderCredentialOut]
 
 
+class ProviderModelsOut(BaseModel):
+    """`GET /bots/providers/{provider}/models` — live-queried from the
+    provider itself using whichever credential resolves (env or an app-typed
+    override), not a hardcoded list. See `ModelRouter.list_models`."""
+
+    provider: Literal["azure", "openai", "anthropic", "google"]
+    models: list[str]
+
+
 class ThreadOut(BaseModel):
     id: UUID
     title: str

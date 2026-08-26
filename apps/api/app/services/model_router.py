@@ -1217,6 +1217,10 @@ class _AnthropicAdapter:
 
     def __init__(self, client: Any) -> None:
         self.chat = SimpleNamespace(completions=_AnthropicCompletions(client))
+        #: The unwrapped `AsyncAnthropic`, for callers that need the real SDK
+        #: surface rather than the OpenAI-shaped one above — `list_models`
+        #: is the only one today, for `client.models.list()`.
+        self.raw = client
 
 
 # ---------------------------------------------------------------------------
@@ -1596,6 +1600,10 @@ class _GoogleAdapter:
 
     def __init__(self, client: Any) -> None:
         self.chat = SimpleNamespace(completions=_GoogleCompletions(client))
+        #: The unwrapped `genai.Client`, for callers that need the real SDK
+        #: surface rather than the OpenAI-shaped one above — `list_models`
+        #: is the only one today, for `client.aio.models.list()`.
+        self.raw = client
 
 
 #: Any of the four providers' clients — see `client()` for what each one is.
@@ -1660,8 +1668,8 @@ class ModelRouter:
         override = self._bot_override(bot)
         if override is None:
             return self.supports_tools
-        provider, _ = override
-        return self._client_for(provider) is not None
+        provider, model = override
+        return self._client_for(provider, model) is not None
 
     def _deployment(self, tier: Tier) -> str:
         return {
@@ -1837,7 +1845,7 @@ class ModelRouter:
             return None
         return provider, model  # type: ignore[return-value]
 
-    def _client_for(self, provider: Provider) -> ProviderClient | None:
+    def _client_for(self, provider: Provider, model: str | None = None) -> ProviderClient | None:
         """The client for a bare provider name, independent of any tier.
 
         A bot override is not tied to a tier - there is one account per
@@ -1845,11 +1853,33 @@ class ModelRouter:
         settings tier routing already uses), so this always resolves the
         *shared* account, the same `tier=None` case
         `_azure_client`/`_openai_client`/`_anthropic_client` already handle
-        for their tier-agnostic callers.
+        for their tier-agnostic callers - **except** for `azure`, where a
+        second real account exists: the `reason` tier's endpoint override
+        (`AZURE_OPENAI_ENDPOINT_REASON`), pointed at a separate Foundry
+        resource for models the shared account does not carry — Grok, in
+        this deployment (`AZURE_DEPLOYMENT_REASON=grok-4-1-fast-reasoning`).
+        A bot pinned to `azure` with that exact model name has to land on
+        that account or the request 404s: the shared account has no such
+        deployment. `model` is matched against each tier's *configured*
+        deployment name — no live API call, since every candidate is already
+        known from settings — and only ever changes which of the *already
+        correctly authenticated* per-tier clients gets returned; a bot
+        pinned to a model the shared account actually has still resolves
+        there exactly as before.
         """
         if provider == "openai":
             return self._openai_client(None)
         if provider == "azure":
+            if model:
+                for tier in ("nano", "mini", "reason", "embed"):
+                    tier_typed = cast("Tier", tier)
+                    if self._deployment(tier_typed) == model:
+                        # A tier whose endpoint is not overridden resolves to
+                        # the same cached client as the shared-account
+                        # fallback below (`_azure_client` caches on the
+                        # resolved `(endpoint, api_version)`, not on `tier`),
+                        # so checking every tier uniformly costs nothing.
+                        return self._azure_client(tier_typed)
             return self._azure_client(None)
         if provider == "anthropic":
             return self._anthropic_client(None)
@@ -1869,6 +1899,97 @@ class ModelRouter:
         mocks because nobody set `ANTHROPIC_API_KEY`.
         """
         return self._client_for(provider) is not None
+
+    async def list_models(self, provider: Provider) -> list[str]:
+        """Model/deployment names live-queried from the provider itself —
+        what a bot's `model_name` override should actually be set to, for the
+        Builder's model dropdown.
+
+        Whichever credential `_client_for` would use to chat also answers
+        this — an app-typed override (`provider_credentials.py`) or an
+        operator's env var, api_key or managed identity, whichever resolves.
+        Raises `RuntimeError` when nothing does; callers turn that into an
+        error the person configuring a provider can act on, rather than an
+        empty list that reads as "you have no models," which is a different
+        and much more confusing claim.
+
+        Azure gets its own branch: `AsyncAzureOpenAI.models.list()` hits
+        `GET {endpoint}/openai/models`, the base-model *catalog* Azure offers
+        to deploy — not what this account actually has deployed, which is
+        `GET {endpoint}/openai/deployments` instead, reached here through the
+        SDK's own documented escape hatch for undocumented endpoints
+        (`client.get(path, cast_to=object)`) so the already-correct api_key /
+        managed-identity auth on that client applies unchanged. The other
+        three providers' `.models.list()` already return what an account can
+        actually call, so no branch is needed for them.
+        """
+        if provider == "azure":
+            return await self._azure_list_all_deployments()
+
+        if provider == "openai":
+            openai_client = self._openai_client(None)
+            if openai_client is None:
+                raise RuntimeError("openai has no live credential to list models with")
+            page = await openai_client.models.list()
+            return sorted({model.id async for model in page})
+
+        if provider == "anthropic":
+            anthropic_adapter = self._anthropic_client(None)
+            if anthropic_adapter is None:
+                raise RuntimeError("anthropic has no live credential to list models with")
+            page = await anthropic_adapter.raw.models.list()
+            return sorted({model.id async for model in page})
+
+        if provider == "google":
+            google_adapter = self._google_client(None)
+            if google_adapter is None:
+                raise RuntimeError("google has no live credential to list models with")
+            page = await google_adapter.raw.aio.models.list()
+            return sorted({model.name.removeprefix("models/") async for model in page if model.name})
+
+        raise ValueError(f"unknown provider {provider!r}")  # pragma: no cover - Provider is exhaustive
+
+    async def _azure_list_all_deployments(self) -> list[str]:
+        """Every deployment across every distinct Azure account this
+        deployment knows about — the shared default plus any tier whose
+        `AZURE_OPENAI_ENDPOINT_{tier}` override points somewhere else, merged
+        into one list. Real, live: this deployment's `reason` tier is
+        overridden to a separate Foundry resource carrying Grok
+        (`AZURE_OPENAI_ENDPOINT_REASON`), invisible to the shared account's
+        own `/deployments` and otherwise permanently absent from this
+        listing — see `_client_for`'s matching half, which is what actually
+        lets a bot get pinned to a model found this way.
+
+        Deduped by client instance identity, not by tier: `_azure_client`
+        caches on the resolved `(endpoint, api_version)`, so two tiers
+        sharing the shared account (the common case — no override) hand back
+        the identical cached client and are only queried once.
+        """
+        clients: dict[int, AsyncAzureOpenAI] = {}
+        shared = self._azure_client(None)
+        if shared is not None:
+            clients[id(shared)] = shared
+        for tier in ("nano", "mini", "reason", "embed"):
+            client = self._azure_client(cast("Tier", tier))
+            if client is not None:
+                clients[id(client)] = client
+
+        if not clients:
+            raise RuntimeError("azure has no live credential to list deployments with")
+
+        models: set[str] = set()
+        for client in clients.values():
+            # `cast_to=object` is the openai SDK's own documented escape hatch
+            # for an undocumented endpoint: it hands back the parsed JSON body
+            # as-is (a dict here), typed `object` because that is genuinely
+            # all the SDK can promise for a response shape it does not know.
+            body = cast("dict[str, Any]", await client.get(
+                "/deployments",
+                cast_to=object,
+                options={"params": {"api-version": self.settings.azure_openai_api_version}},
+            ))
+            models.update(row["id"] for row in (body.get("data") or []) if row.get("id"))
+        return sorted(models)
 
     def client(self, tier: Tier | None = None) -> ProviderClient | None:
         """The client for `tier`'s active provider, or None when there is
@@ -2212,7 +2333,7 @@ class ModelRouter:
         override = self._bot_override(bot)
         if override is not None:
             provider, model_override = override
-            client = self._client_for(provider)
+            client = self._client_for(provider, model_override)
             if model_override not in MODEL_PRICES:
                 # cost_ledger falls back to the task's ordinary tier price -
                 # accurate for the models in MODEL_PRICES, a guess otherwise.
@@ -2283,7 +2404,7 @@ class ModelRouter:
         override = self._bot_override(bot)
         if override is not None:
             provider, model_override = override
-            client = self._client_for(provider)
+            client = self._client_for(provider, model_override)
             if model_override not in MODEL_PRICES:
                 _warn_tier_pricing_may_not_match_provider(tier, f"{provider} (bot override)")
         else:

@@ -42,6 +42,7 @@ import type {
   PendingApprovalOut,
   ProviderCredentialOut,
   ProviderCredentialsOut,
+  ProviderModelsOut,
   ProvidersOut,
   RegisterConnectorInput,
   RegisterMcpInput,
@@ -110,6 +111,8 @@ export const listProviderCredentials = (signal?: AbortSignal) =>
 export const setProviderCredential = (provider: string, input: SetProviderCredentialRequest) =>
   request<ProviderCredentialOut>(`/bots/providers/${provider}/credential`, { method: "POST", body: input })
 export const deleteProviderCredential = (provider: string) => del<void>(`/bots/providers/${provider}/credential`)
+export const listProviderModels = (provider: string, signal?: AbortSignal) =>
+  get<ProviderModelsOut>(`/bots/providers/${provider}/models`, undefined, signal)
 
 /* -------------------------------------------------------- threads/messages */
 

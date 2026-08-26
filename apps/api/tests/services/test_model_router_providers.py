@@ -286,6 +286,65 @@ async def test_chat_falls_back_to_mock_for_a_bot_pinned_to_an_unimplemented_prov
     assert result.content.startswith("[mock:")
 
 
+async def test_chat_routes_a_bot_pinned_to_a_tier_override_models_deployment_to_that_account():
+    """The Grok scenario: `reason`'s deployment name (`gpt-5.6-sol` by
+    default here) lives on a *different* Azure account than the shared one
+    a plain `model_provider="azure"` bot would otherwise resolve to. Pinning
+    a bot to that exact model name must land the request on the account that
+    actually has it, not on the shared one where it 404s."""
+    router = ModelRouter(_settings())
+    bot = _bot(model_provider="azure", model_name=router.settings.azure_deployment_reason)
+
+    class _Recording:
+        def __init__(self, label):
+            self.label = label
+            self.calls = []
+            self.chat = SimpleNamespace(completions=self)
+
+        async def create(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=None))],
+                usage=SimpleNamespace(prompt_tokens=5, completion_tokens=2),
+            )
+
+    shared = _Recording("shared")
+    reason_account = _Recording("reason")
+    router._azure_client = lambda tier: reason_account if tier == "reason" else shared
+
+    await router.chat(task="agent_turn", messages=[{"role": "user", "content": "hi"}], bot=bot)
+
+    assert reason_account.calls, "the request should have gone to the reason-tier account"
+    assert not shared.calls, "not to the shared account, which has no such deployment"
+
+
+async def test_chat_still_uses_the_shared_account_for_a_model_it_actually_has():
+    """The common case, unaffected by the tier-override match above: a bot
+    pinned to a model on the shared account resolves there, exactly as
+    before this method learned about tier overrides at all."""
+    router = ModelRouter(_settings())
+    bot = _bot(model_provider="azure", model_name="a-model-only-the-shared-account-has")
+
+    class _Recording:
+        def __init__(self):
+            self.calls = []
+            self.chat = SimpleNamespace(completions=self)
+
+        async def create(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=None))],
+                usage=SimpleNamespace(prompt_tokens=5, completion_tokens=2),
+            )
+
+    shared = _Recording()
+    router._azure_client = lambda tier: shared if tier is None else None
+
+    await router.chat(task="agent_turn", messages=[{"role": "user", "content": "hi"}], bot=bot)
+
+    assert shared.calls
+
+
 def test_supports_tools_for_falls_back_to_the_plain_property_with_no_bot():
     router = ModelRouter(_settings())
     assert router.supports_tools_for(None) == router.supports_tools

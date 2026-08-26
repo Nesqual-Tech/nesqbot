@@ -103,7 +103,7 @@ export interface ProvidersResponse {
   google: boolean
 }
 
-/** `PUT /bots/providers/{provider}/credential`. */
+/** `POST /bots/providers/{provider}/credential`. */
 export interface SetProviderCredentialRequest {
   api_key: string
   base_url?: string | null
@@ -126,6 +126,16 @@ export interface ProviderCredentialResponse {
 /** `GET /bots/providers/credentials`. */
 export interface ProviderCredentialsResponse {
   credentials: ProviderCredentialResponse[]
+}
+
+/**
+ * `GET /bots/providers/{provider}/models` — live-queried from the provider
+ * itself (Azure: actual deployments, not the base-model catalog; the other
+ * three: whatever `.models.list()` returns), not a hardcoded list.
+ */
+export interface ProviderModelsResponse {
+  provider: "azure" | "openai" | "anthropic" | "google"
+  models: string[]
 }
 
 /* ------------------------------------------------------------------ *

@@ -8,6 +8,7 @@ import {
   getProviders,
   listMemories,
   listProviderCredentials,
+  listProviderModels,
   reseedSystemBots,
   setProviderCredential,
 } from "../api/endpoints"
@@ -253,6 +254,43 @@ function useAvailableProviders(): [ModelProvider[], () => void] {
   }, [reloadKey])
   const refetch = useCallback(() => setReloadKey((n) => n + 1), [])
   return [providers, refetch]
+}
+
+/**
+ * Model/deployment names live-queried from `provider` itself — Azure's
+ * actual deployments, not its base-model catalog; the other three, whatever
+ * their own `.models.list()` returns. Not every account can answer this
+ * (a self-hosted OpenAI-compatible server may not implement `/models`, a
+ * scoped key may lack the permission) — `error` is how the model field below
+ * knows to fall back to free text instead of showing an empty dropdown.
+ */
+function useProviderModels(provider: ModelProvider | ""): {
+  models: string[]
+  loading: boolean
+  error: unknown
+} {
+  const [models, setModels] = useState<string[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<unknown>(null)
+
+  useEffect(() => {
+    if (!provider) {
+      setModels([])
+      setError(null)
+      setLoading(false)
+      return
+    }
+    const controller = new AbortController()
+    setLoading(true)
+    setError(null)
+    listProviderModels(provider, controller.signal)
+      .then((result) => setModels(result.models))
+      .catch((err) => setError(err))
+      .finally(() => setLoading(false))
+    return () => controller.abort()
+  }, [provider])
+
+  return { models, loading, error }
 }
 
 const PROVIDER_HINT: Record<ModelProvider, string> = {
@@ -621,6 +659,9 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
   const [saving, setSaving] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [availableProviders, refetchAvailableProviders] = useAvailableProviders()
+  const providerModels = useProviderModels(edit.model_provider)
+  const [customModel, setCustomModel] = useState(false)
+  useEffect(() => setCustomModel(false), [edit.model_provider])
 
   useEffect(() => {
     if (!selected) return
@@ -934,13 +975,61 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
                       ))}
                     </select>
                     {edit.model_provider ? (
-                      <input
-                        className={cx("input", modelOverrideInvalid && "input--invalid")}
-                        aria-invalid={modelOverrideInvalid}
-                        value={edit.model_name}
-                        onChange={(event) => setEdit({ ...edit, model_name: event.target.value })}
-                        placeholder="model name, e.g. claude-opus-4-5"
-                      />
+                      <>
+                        {providerModels.loading ? (
+                          <Spinner inline label="Listing models…" />
+                        ) : providerModels.models.length > 0 && !customModel ? (
+                          <>
+                            <select
+                              className="select"
+                              aria-invalid={modelOverrideInvalid}
+                              value={
+                                providerModels.models.includes(edit.model_name) ? edit.model_name : ""
+                              }
+                              onChange={(event) => setEdit({ ...edit, model_name: event.target.value })}
+                            >
+                              <option value="" disabled>
+                                {edit.model_name ? `${edit.model_name} (not in the list below)` : "Choose a model…"}
+                              </option>
+                              {providerModels.models.map((name) => (
+                                <option key={name} value={name}>
+                                  {name}
+                                </option>
+                              ))}
+                            </select>
+                            <button
+                              type="button"
+                              className="btn btn--ghost btn--xs"
+                              onClick={() => setCustomModel(true)}
+                            >
+                              Type a model name instead
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <input
+                              className={cx("input", modelOverrideInvalid && "input--invalid")}
+                              aria-invalid={modelOverrideInvalid}
+                              value={edit.model_name}
+                              onChange={(event) => setEdit({ ...edit, model_name: event.target.value })}
+                              placeholder="model name, e.g. claude-opus-4-5"
+                            />
+                            {providerModels.error ? (
+                              <span className="field__hint">
+                                Could not list this account's models automatically ({errorMessage(providerModels.error)}) — type the name.
+                              </span>
+                            ) : providerModels.models.length > 0 ? (
+                              <button
+                                type="button"
+                                className="btn btn--ghost btn--xs"
+                                onClick={() => setCustomModel(false)}
+                              >
+                                Choose from {providerModels.models.length} deployed model(s) instead
+                              </button>
+                            ) : null}
+                          </>
+                        )}
+                      </>
                     ) : (
                       <span className="field__hint">
                         Follows the router's ordinary tier routing. Pin a provider to send every one of this bot's

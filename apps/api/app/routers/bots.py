@@ -37,6 +37,7 @@ from app.schemas import (
     ProviderCredentialIn,
     ProviderCredentialOut,
     ProviderCredentialsOut,
+    ProviderModelsOut,
     ProvidersOut,
     UpdateBotIn,
 )
@@ -128,6 +129,27 @@ async def list_available_providers(
         anthropic=model_router.provider_available("anthropic"),
         google=model_router.provider_available("google"),
     )
+
+
+@router.get("/bots/providers/{provider}/models", response_model=ProviderModelsOut)
+async def list_provider_models(
+    provider: str,
+    user: User = Depends(get_current_user),
+) -> ProviderModelsOut:
+    """Model/deployment names live-queried from `provider` itself, for the
+    Builder's model dropdown — not a hardcoded list, so it is only ever as
+    stale as the account it asks. 400 on an unrecognised provider name; 502
+    when the provider has no live credential or the provider's own API call
+    fails, carrying that failure's own detail rather than swallowing it into
+    an empty list a user would misread as "you have no models."
+    """
+    if provider not in KNOWN_PROVIDERS:
+        raise AppError(400, "unknown_provider", f"provider must be one of {sorted(KNOWN_PROVIDERS)}")
+    try:
+        models = await model_router.list_models(provider)  # type: ignore[arg-type]
+    except Exception as exc:  # noqa: BLE001 - surfaced to the caller, not swallowed
+        raise AppError(502, "provider_unreachable", f"could not list {provider} models: {exc}") from exc
+    return ProviderModelsOut(provider=provider, models=models)  # type: ignore[arg-type]
 
 
 def _key_hint(value: str) -> str:
