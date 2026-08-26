@@ -28,7 +28,7 @@ anthropic==1.0.0
 # `client.interactions.create` surface this SDK also exposes.
 google-genai==2.20.0
 pyyaml==6.0.2
-python-multipart==0.0.20
+python-multipart==0.0.32
 orjson==3.10.16
 tenacity==9.0.0
 azure-identity==1.21.0
