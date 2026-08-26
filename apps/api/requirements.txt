@@ -3,7 +3,11 @@ uvicorn[standard]==0.34.0
 sqlalchemy[asyncio]==2.0.40
 asyncpg==0.30.0
 alembic==1.15.2
-pydantic==2.11.1
+# 2.11.1 (the original pin) is incompatible with google-genai>=2.20.0, which
+# requires pydantic>=2.12.5 - a real ResolutionImpossible on a clean install
+# that a stale local venv (upgraded out-of-band, never reinstalled from a
+# clean environment) had been silently masking.
+pydantic==2.13.4
 pydantic-settings==2.8.1
 redis==5.2.1
 httpx==0.28.1
