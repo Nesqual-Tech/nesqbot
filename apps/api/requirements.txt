@@ -50,7 +50,7 @@ azure-keyvault-secrets==4.9.0
 # never load it. The official client, not a cloud-specific SDK - it talks to any
 # standard cluster via kubeconfig.
 kubernetes==31.0.0
-sse-starlette==2.2.1
+sse-starlette==3.4.8
 # The Bot Desktop stream proxy dials websockify over RFC 6455 as a *client*
 # (app/routers/desktop.py). uvicorn[standard] already drags this in for the
 # server side, but an implicit floor of ">=10.4" is not a contract: the proxy
