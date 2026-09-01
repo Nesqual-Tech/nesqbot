@@ -19,7 +19,7 @@
     "@tauri-apps/api": "^2.11.1",
     "gsap": "^3.13.0",
     "react": "19.0.0",
-    "react-dom": "19.0.0"
+    "react-dom": "19.2.8"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.4.0",
