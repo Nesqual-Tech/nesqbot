@@ -53,10 +53,70 @@ class BotOut(BaseModel):
     #: still-default behaviour. See Bot.model_provider in models.py.
     model_provider: str | None = None
     model_name: str | None = None
+    #: Persona. Small enough to travel on the list request — the chat header
+    #: and the profile card both want the address and the sign-off, and a
+    #: second round trip per bot to fetch four short strings is worse than
+    #: sending them. The prompt itself is not here; that is `BotPersonaOut`.
+    email: str | None = None
+    voice: str | None = None
+    signature: str | None = None
+    desktop_habits: str | None = None
     created_at: datetime
 
     class Config:
         from_attributes = True
+
+
+class BotConnectorSummary(BaseModel):
+    """One connector a bot holds, as a reader needs it - never the secret."""
+
+    connector_id: str
+    name: str
+    status: str
+    #: Where the credential lives, not what it is. `services.secrets` resolves
+    #: this in-process and the resolved value never reaches a response.
+    secret_ref: str | None = None
+
+
+class BotInboxSummary(BaseModel):
+    """A channel the outside world reaches this bot on.
+
+    The "email" half of "the bots have personas, with emails". An inbound
+    source names a channel and an address and routes what arrives to a roster;
+    until now none of that was visible in the app, so a bot with a mailbox
+    looked identical to one without.
+    """
+
+    slug: str
+    name: str
+    kind: str
+    channel: str
+    address: str | None = None
+    enabled: bool = True
+    last_event_at: datetime | None = None
+
+
+class BotPersonaOut(BotOut):
+    """Who a bot actually is, in one response.
+
+    `BotOut` carries a name and a one-line role, which is all the desktop app
+    could ever show - and `system_prompt` was write-only across the whole API:
+    `CreateCustomBotIn` and `UpdateBotIn` accept one, `GET /bots/{id}` never
+    returned one, so nothing could display or even re-read a bot's persona.
+    Editing a prompt in the Builder meant typing over something you could not
+    see.
+
+    Everything here is already stored; none of it was reachable. Deliberately a
+    separate endpoint rather than fields added to `BotOut`: the list view draws
+    a sidebar on every launch and does not need five system prompts to do it.
+    """
+
+    system_prompt: str
+    connectors: list[BotConnectorSummary] = Field(default_factory=list)
+    inboxes: list[BotInboxSummary] = Field(default_factory=list)
+    #: Today's spend against `daily_budget_usd`, so the persona view answers
+    #: "can this bot still work?" without a second request.
+    spent_usd_today: float = 0.0
 
 
 class CreateCustomBotIn(BaseModel):
@@ -69,6 +129,12 @@ class CreateCustomBotIn(BaseModel):
     daily_budget_usd: float = 5.0
     model_provider: str | None = None
     model_name: str | None = None
+    #: Persona — see `BotOut`. Optional, so a bot created without them is
+    #: exactly the bot this endpoint has always created.
+    email: str | None = None
+    voice: str | None = None
+    signature: str | None = None
+    desktop_habits: str | None = None
 
     @model_validator(mode="after")
     def _provider_and_model_travel_together(self) -> "CreateCustomBotIn":
@@ -137,6 +203,19 @@ class CreateThreadIn(BaseModel):
     bot_ids: list[UUID]
     title: str | None = None
     initial_message: str | None = None
+
+
+class ThreadBotsIn(BaseModel):
+    """Bots to seat on a thread that already exists.
+
+    A thread's roster is what makes delegation possible at all — a bot can only
+    hand work to somebody in the room (`orchestrator._delegate_targets`) — and
+    until this existed the only way to set one was at creation. The desktop app
+    creates every thread with a single bot, so in practice no thread ever had a
+    second participant and `delegate_to_bot` was never advertised.
+    """
+
+    bot_ids: list[UUID]
 
 
 class MessageOut(BaseModel):
@@ -334,8 +413,43 @@ class RegisterConnectorIn(BaseModel):
 
 
 class BindConnectorIn(BaseModel):
+    #: A *reference*, never a value — `env://NAME`, `kv://vault/name`, the
+    #: `app://…` marker the server writes, or a bare name against
+    #: `AZURE_KEY_VAULT_URL`. `bind_connector` refuses anything else; to hand
+    #: the app the credential itself, use
+    #: `POST /bots/{bot_id}/connectors/{connector_id}/secret`.
     secret_ref: str | None = None
     status: str = "connected"
+
+
+class ConnectorSecretIn(BaseModel):
+    """The credential itself, typed into the app.
+
+    The one place in this schema module where a request body legitimately
+    carries a secret value. It is stored server-side by
+    `secrets.store_connector_secret` and never read back: the response is
+    `ConnectorSecretOut`, which carries a reference.
+    """
+
+    value: str = Field(min_length=1)
+    status: str = "connected"
+
+
+class ConnectorSecretOut(BaseModel):
+    """Where the credential actually landed.
+
+    `backend` is not decoration. Key Vault is preferred but needs a write role
+    the deployed identity may not have, and the honest fallback encrypts the
+    value in this deployment's own database instead. Saying "saved" without
+    saying which of those happened is how somebody comes to believe a key is in
+    a vault it never reached.
+    """
+
+    connector_id: str
+    backend: Literal["key_vault", "app_encrypted"]
+    secret_ref: str
+    status: str
+    detail: str
 
 
 class RegisterMcpIn(BaseModel):
@@ -423,6 +537,15 @@ class UpdateBotIn(BaseModel):
     system_prompt: str | None = None
     daily_budget_usd: float | None = Field(default=None, ge=0)
     desktop_profile: str | None = None
+    #: Persona. `null` clears the field, the same way it does for the model
+    #: override below — somebody removing a bot's email address has to be able
+    #: to say so, and "" is not the same answer as "leave it alone". Editable
+    #: on system bots too: the standing prompt is locked, the voice it is
+    #: delivered in is not.
+    email: str | None = None
+    voice: str | None = None
+    signature: str | None = None
+    desktop_habits: str | None = None
     #: Unlike every other field here, `null` is meaningful and distinct from
     #: "not sent": sending `model_provider: null` clears the override and
     #: reverts this bot to tier routing. See update_bot's handling of these
@@ -509,6 +632,12 @@ class BotConnectorOut(BaseModel):
     name: str
     status: str
     secret_ref: str | None = None
+    #: Which store holds the credential this reference points at, derived from
+    #: the reference's own shape by `secrets.describe_backend`. Sent on every
+    #: listing, not only in the write's response, so the answer survives a
+    #: reload — a UI that can only say "where did it land" for the ninety
+    #: seconds after a save is a UI that stops being able to say it.
+    secret_backend: Literal["key_vault", "app_encrypted", "env", "none"] = "none"
     risk_default: str = "observe"
     first_party: bool = False
     actions: list[Any] = Field(default_factory=list)
@@ -1001,6 +1130,13 @@ class WorkItemOut(BaseModel):
     #: Distinct from `updated_at`, which any edit moves.
     last_event_at: datetime | None = None
     closed_at: datetime | None = None
+    #: When the owning bot was woken about this item, and on which run.
+    #:
+    #: `null` with an owner and `status: open` is the honest reading of "queued
+    #: — its bot is about to start", which a queue view has to be able to say
+    #: without inferring it. See `services.work_dispatch`.
+    dispatched_at: datetime | None = None
+    dispatch_run_id: UUID | None = None
 
 
 class WorkItemTransferIn(BaseModel):

@@ -17,6 +17,13 @@ point at:
 * **It is idempotent.** The ``awaiting_human -> running`` transition is a single
   conditional ``UPDATE``. A double-click loses the race on the second press and
   gets ``resumed: false`` instead of a second loop on the same browser session.
+* **It answers immediately.** The route claims the run and hands the loop to
+  ``services.background``; it does not drive the agent inside the request. It
+  used to, and the reported result was *"the button that i am done it just keeps
+  loading and it does nothing else so the task remains like that hanging"* —
+  minutes of spinner, and a client that disconnected first took the loop down
+  with it and left the run ``running`` with nothing driving it. See
+  ``services/background.py``.
 """
 
 from __future__ import annotations
@@ -35,6 +42,7 @@ from app.errors import AppError
 from app.models import AuditEvent, Run, User
 from app.routers.deps import get_visible_run, orchestrator
 from app.schemas import CancelRunIn, CancelRunOut, ResumeRunIn, ResumeRunOut
+from app.services import background
 from app.services.orchestrator import (
     RUN_AGENT_KEY,
     RUN_AWAITING_APPROVAL,
@@ -58,6 +66,13 @@ async def resume_run(
     Returns ``resumed: false`` rather than an error when the run has already been
     resumed or has moved on: that is what a double-click looks like, and failing
     it would train people to press the button twice.
+
+    ``resumed: true`` means **started**, not finished. The agent may work for
+    minutes; it does that on its own task, and what it does appears in the
+    thread over SSE exactly as a chat turn would. The alternative — holding the
+    response open until the loop ends — is what this route used to do, and it
+    made the button look broken and left runs hanging when the connection went
+    away mid-loop.
     """
     run = await get_visible_run(db, run_id, user)
 
@@ -94,32 +109,48 @@ async def resume_run(
                 f"This run is '{current}', not waiting for a human. Nothing was started."
             ),
         )
-    # Commit the claim before the loop runs: it may take minutes, and the
-    # transition has to be visible to a second press immediately.
+    # Commit the claim before returning: the transition has to be visible to a
+    # second press immediately, and to the task about to pick it up.
     await db.commit()
     await db.refresh(run)
 
-    out = await orchestrator.resume_run(db, user=user, run=run, note=body.note)
-    if not out.get("ok"):
-        raise AppError(
-            409,
-            "run_not_resumable",
-            str(out.get("detail") or "This run could not be resumed."),
-        )
+    thread_id = run.thread_id
+    bot_id = run.bot_id
+    user_id = user.id
+    note = body.note
 
-    approval_id = out.get("approval_id")
+    async def _carry_on(session: AsyncSession) -> None:
+        """The loop, on its own session and after the response.
+
+        Everything is re-loaded here rather than closed over: the objects above
+        belong to the request's session, which is gone by the time this runs.
+        """
+        fresh_run = await session.get(Run, run_id)
+        fresh_user = await session.get(User, user_id)
+        if fresh_run is None or fresh_user is None:
+            logger.warning("resume %s: run or user vanished before the loop started", run_id)
+            return
+        out = await orchestrator.resume_run(
+            session, user=fresh_user, run=fresh_run, note=note
+        )
+        if not out.get("ok"):
+            # `resume_run` reports this rather than raising, and there is no
+            # response left to attach it to. It has already put the run into a
+            # settled state; this is the line that says why.
+            logger.warning("resume %s did not run: %s", run_id, out.get("detail"))
+
+    background.run_detached(_carry_on, label=f"resume:{run_id}")
+
     return ResumeRunOut(
         ok=True,
         resumed=True,
         run_id=run_id,
-        status=str(out.get("status") or run.status),
-        thread_id=uuid.UUID(out["thread_id"]) if out.get("thread_id") else None,
-        bot_id=uuid.UUID(out["bot_id"]) if out.get("bot_id") else None,
-        message_id=uuid.UUID(out["message_id"]) if out.get("message_id") else None,
-        message=out.get("message"),
-        outcome=out.get("outcome"),
-        approval_id=uuid.UUID(approval_id) if approval_id else None,
-        cost_usd=out.get("cost_usd"),
+        status="running",
+        thread_id=thread_id,
+        bot_id=bot_id,
+        detail=(
+            "Picking the task back up now. What it does will appear in the thread."
+        ),
     )
 
 

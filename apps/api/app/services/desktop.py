@@ -19,7 +19,7 @@ Five modes, one `DesktopManager` surface (`start` / `stop` / `suspend` / `resume
   human applies the template out of band. Superseded by ``k8s`` for anyone who wants the
   API to actually drive the cluster; kept for the manual/CI deployment it was built for.
 
-The per-bot boundary is the product claim (see docs/competitive-analysis.md), so neither
+The per-bot boundary is the product claim (see docs/architecture.md), so neither
 the ACI nor the k8s driver ever shares or reuses a container group/Pod between bots, and
 the ACI driver never asks Azure for a public IP.
 """
@@ -49,6 +49,7 @@ from urllib.parse import urlsplit
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.db import release_transaction
 from app.models import Bot, BotDesktop
 
 # The `/browser/*` table: paths, methods and the field whitelist `browser_call`
@@ -1602,6 +1603,10 @@ class DesktopManager:
         bot = await db.get(Bot, bot_id)
         if bot is None:
             raise K8sStartError(f"bot {bot_id} no longer exists")
+        # Releasing at the call site is not enough: this `db.get` re-opens a
+        # transaction of its own, and `_k8s_start` is the part that waits out
+        # `k8s_start_timeout_seconds`. See `resume`.
+        await release_transaction(db)
         return await self._k8s_start(bot)
 
     def _home_dir(self, bot_id: uuid.UUID) -> Path | None:
@@ -1732,6 +1737,11 @@ class DesktopManager:
         ACI suspend as losing the desktop's state, or it will silently corrupt work.
         """
         desktop = await self.get(db, bot_id)
+        # Same reason as `resume` below. `get` only commits on the branch that
+        # creates a missing row, so the ordinary path arrives here with the
+        # SELECT's transaction still open, and an ACI group stop or a k8s Pod
+        # delete is an Azure/API-server round trip of unbounded length.
+        await release_transaction(db)
         if self.settings.bot_desktop_mode == "docker" and desktop.container_id:
             await asyncio.to_thread(self._docker_pause, desktop.container_id)
         elif self.settings.bot_desktop_mode == "aci" and desktop.container_id:
@@ -1771,6 +1781,24 @@ class DesktopManager:
         desktop = await self.get(db, bot_id)
         if desktop.state != "suspended":
             return desktop
+
+        # `start` and `stop` both commit immediately before their slow call; this
+        # path did not, and that omission costs more than state. `get` above
+        # issues a SELECT and only commits on the branch that creates a missing
+        # row, so the transaction is open when `_aci_resume`/`_k8s_resume` waits
+        # on a cold start — budgeted at `aci_start_timeout_seconds = 180` and
+        # `k8s_start_timeout_seconds = 180`, three times the
+        # `idle_in_transaction_session_timeout = 60000` that
+        # `db.release_transaction` records for nesqbot-pg.
+        #
+        # The failure is not a lost read. The commit at the end of this method
+        # raises on the terminated backend, so the row keeps `state="suspended"`
+        # and the *old* container_id/stream_url while the group is actually
+        # running: the viewer points at a dead address, nothing records the new
+        # handle, and `stop`'s docstring is explicit that an ACI group bills
+        # until something deletes it.
+        await release_transaction(db)
+
         if self.settings.bot_desktop_mode == "docker" and desktop.container_id:
             try:
                 await asyncio.to_thread(self._docker_unpause, desktop.container_id)

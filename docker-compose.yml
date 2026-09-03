@@ -161,8 +161,12 @@ services:
   # response buffering off.
   api:
     build:
-      context: ./apps/api
-      dockerfile: Dockerfile
+      # The repo root, because the image carries `bots/` — the prompts have to
+      # be in the image for every environment that has no bind mount to fake
+      # them, which is every environment except this one. See
+      # `apps/api/Dockerfile` and the root `.dockerignore`.
+      context: .
+      dockerfile: apps/api/Dockerfile
     image: ${API_IMAGE:-nesqbot/api:local}
     restart: unless-stopped
     logging: *default-logging

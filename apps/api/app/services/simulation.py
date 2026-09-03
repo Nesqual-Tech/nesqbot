@@ -41,6 +41,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.db import release_transaction
 from app.models import (
     Bot,
     BotConnector,
@@ -778,6 +779,22 @@ async def perform(db: AsyncSession, effect: Effect) -> EffectResult:
     # and duplicating that here would give the real run and the rehearsal two
     # different vocabularies for the same failure.
     prior = await undo_service.capture_prior_state(db, effect)
+
+    # Everything above this line is reads — `assess` is the pure
+    # classification, the standing lookup is one indexed select, and
+    # `capture_prior_state` writes nothing — and everything below it is the
+    # write. In between sits the only await in this function that talks to
+    # something other than the database, and it is slow: a Bot Desktop cold
+    # start is 30-90 seconds and a browser step can wait up to `timeout_ms`.
+    #
+    # `nesqbot-pg` terminates a backend that stays idle in a transaction
+    # for 60 seconds, so holding the opening reads' transaction across that
+    # call is how a desktop step loses its connection and takes the run with
+    # it. See `db.release_transaction` for the incident this comes from; it
+    # happened on the model-call lane first, but this is the lane every desktop
+    # step goes through, several times a run.
+    await release_transaction(db)
+
     outcome = await _execute(db, effect, assessment)
     await undo_service.record_effect(db, effect, assessment, outcome, prior=prior)
     if standing is not None:

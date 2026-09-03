@@ -144,6 +144,9 @@ param deployAciNatGateway bool = true
 @description('Exact origins allowed to call the API from a browser. Empty derives a default: prod gets the published hostnames only, everything else also gets the Tauri and Expo dev servers.')
 param apiAllowedOrigins array = []
 
+@description('Let the API write connector credentials into Key Vault (adds "Key Vault Secrets Officer" on the vault to the shared identity). Off by default and deliberately so: Key Vault RBAC has no scope smaller than the vault for a secret that does not exist yet, so this also grants write over jwt-secret, database-url and postgres-admin-password, which the API only ever reads. With it off, a credential typed into the app is encrypted at rest in Postgres instead (app/services/secrets.py falls back and the app says which store took it) - nothing breaks, it is just not in the vault.')
+param allowConnectorSecretWrites bool = false
+
 @description('Provision AKS for the Bot Desktop pool. Off, and staying off: ACI does the same job without a node floor. Kept so the template does not lose the shape of it.')
 param deployBotDesktopAks bool = false
 
@@ -352,6 +355,12 @@ var redisUrl = isFull ? 'rediss://:${uriComponent(redisEnterpriseDb.listKeys().p
 // Built-in role definition ids.
 var roleAcrPull = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
 var roleKeyVaultSecretsUser = '4633458b-17de-408a-b874-0445c86b69e6'
+// "Key Vault Secrets Officer" - dataActions Microsoft.KeyVault/vaults/secrets/*,
+// i.e. the set that includes setSecret. Verified against the built-in-roles
+// reference (learn.microsoft.com/azure/role-based-access-control/
+// built-in-roles/security), where the Secrets User id on the line above appears
+// alongside it - a wrong id here fails at role-assignment time, not at review.
+var roleKeyVaultSecretsOfficer = 'b86a8fe4-44ce-4948-aee5-eccb2c155cd7'
 var roleStorageBlobDataContributor = 'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
 var roleStorageFileDataSmbShareContributor = '0c867c2a-1d8c-454a-a3db-ab2ea1bdc8bb'
 var roleCognitiveServicesOpenAiUser = '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'
@@ -1331,6 +1340,24 @@ resource kvSecretsUser 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
+// Write access to the vault, for connector credentials typed into the app
+// rather than created in the portal by hand. Opt-in (see
+// allowConnectorSecretWrites): without it the API's identity holds read only,
+// POST /bots/{id}/connectors/{id}/secret detects the 403 and encrypts the
+// value in Postgres instead, and the UI says so - which is a working feature,
+// not a failure. Kept as a second assignment beside kvSecretsUser rather than
+// replacing it: reading secrets is what every request needs, and it must not
+// depend on this one having been switched on.
+resource kvSecretsOfficer 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (allowConnectorSecretWrites) {
+  scope: kv
+  name: guid(kv.id, uami.id, roleKeyVaultSecretsOfficer)
+  properties: {
+    principalId: uami.properties.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roleKeyVaultSecretsOfficer)
+  }
+}
+
 resource blobContributor 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   scope: storage
   name: guid(storage.id, uami.id, roleStorageBlobDataContributor)
@@ -1690,6 +1717,20 @@ resource apiApp 'Microsoft.App/containerApps@2024-03-01' = if (deployApps) {
             {
               name: 'BOTS_DIR'
               value: '/bots'
+            }
+            // Which image is actually serving, as the API reports it on
+            // /health and the desktop app prints in its footer.
+            //
+            // `NESQ_BUILD` is otherwise stamped by `--build-arg` at image
+            // build time, and a build that forgets the argument answers
+            // "unknown" — at which point the footer falls back to the
+            // *contract* version and a fresh deploy reads as a stale one.
+            // That was reported as "why does it say we are on api 0.3.0?".
+            // Deriving it from the tag this template is deploying removes the
+            // chance of the two disagreeing.
+            {
+              name: 'NESQ_BUILD'
+              value: apiTag
             }
             // Bot Desktops on ACI. One container group per bot, injected into
             // the delegated subnet so it gets a private IP and no public

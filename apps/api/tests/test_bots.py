@@ -30,6 +30,72 @@ async def test_create_custom_bot(authed):
     assert body["is_system"] is False
 
 
+async def test_creating_a_bot_with_an_unknown_connector_is_a_404_with_a_code(authed, db):
+    """`bot_connectors.connector_id` is a foreign key onto the catalog.
+
+    An id the catalog does not have — a connector removed since the client
+    cached the list — failed at the commit and came back through `app.errors`'
+    catch-all as `{"detail": "internal_error", "code": "internal_error"}`. This
+    also proves the bot row is not left behind by the rejected request, which is
+    why the check runs before the INSERT rather than around it.
+    """
+    from sqlalchemy import func, select
+
+    from app.models import Bot
+
+    response = await authed.post(
+        "/api/bots",
+        json={
+            "name": "Ghost Connector Bot",
+            "role": "Ops",
+            "system_prompt": "x",
+            "connector_ids": ["not_a_real_connector"],
+        },
+    )
+    assert response.status_code == 404
+    assert response.json()["code"] == "connector_not_found"
+
+    rows = await db.execute(
+        select(func.count()).select_from(Bot).where(Bot.name == "Ghost Connector Bot")
+    )
+    assert int(rows.scalar_one()) == 0, "the rejected request left a bot row behind"
+
+
+async def test_creating_a_bot_with_an_unknown_mcp_id_is_a_404_with_a_code(authed):
+    response = await authed.post(
+        "/api/bots",
+        json={
+            "name": "Ghost MCP Bot",
+            "role": "Ops",
+            "system_prompt": "x",
+            "mcp_ids": [str(MISSING)],
+        },
+    )
+    assert response.status_code == 404
+    assert response.json()["code"] == "mcp_not_found"
+
+
+async def test_creating_a_bot_cannot_attach_another_users_mcp_server(authed, make_mcp, user_b):
+    """Same visibility rule `routers/integrations.py::_get_mcp` applies on read.
+
+    Attaching someone else's private MCP server would let this bot call its
+    tools — which for a platform server is deletes, money movement and messages
+    to real people.
+    """
+    theirs = await make_mcp(user_b, name="B's private MCP")
+    response = await authed.post(
+        "/api/bots",
+        json={
+            "name": "Borrowed MCP Bot",
+            "role": "Ops",
+            "system_prompt": "x",
+            "mcp_ids": [str(theirs.id)],
+        },
+    )
+    assert response.status_code == 404
+    assert response.json()["code"] == "mcp_not_found"
+
+
 async def test_list_available_providers_shape(authed):
     """No provider is configured in the test environment — every key present,
     every value False."""
@@ -423,3 +489,138 @@ async def test_list_provider_models_surfaces_a_provider_failure_as_502(authed, m
     assert response.status_code == 502
     assert response.json()["code"] == "provider_unreachable"
     assert "no live credential" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Persona: the fields that existed and could not be read
+# ---------------------------------------------------------------------------
+#
+# Reported as "the bots have personas, with emails and so on but on the desktop
+# app, i can't see that", which was literally true. `system_prompt` was
+# write-only across the whole API - `CreateCustomBotIn` and `UpdateBotIn` take
+# one, `BotOut` never returned one - so a client could show a name and a
+# one-line role and nothing else. Editing a prompt in the Builder meant typing
+# over something you could not see.
+
+
+async def test_a_bots_persona_includes_the_prompt_that_was_write_only(authed, bot_a):
+    response = await authed.get(f"/api/bots/{bot_a.id}/persona")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == str(bot_a.id)
+    assert body["system_prompt"], "the persona endpoint exists to return this"
+    # And it still carries everything `BotOut` did, so one request draws the card.
+    for field in ("slug", "name", "role", "desktop_profile", "daily_budget_usd"):
+        assert field in body, field
+    assert "spent_usd_today" in body
+
+
+async def test_the_list_endpoint_stays_lean(authed, bot_a):
+    """The sidebar draws on every launch and has no use for system prompts."""
+    listed = (await authed.get("/api/bots")).json()
+    assert listed, "no bots came back"
+    assert all("system_prompt" not in bot for bot in listed)
+
+
+async def test_a_persona_names_the_channels_the_outside_world_reaches_it_on(
+    authed, db, bot_a, user_a
+):
+    """The "emails" half. An inbound source routes a mailbox to a roster."""
+    from app.models import InboundSource
+
+    db.add(
+        InboundSource(
+            slug="ops-mailbox",
+            name="Ops mailbox",
+            kind="poll",
+            channel="email",
+            owner_user_id=user_a.id,
+            bot_ids=[str(bot_a.id)],
+            config={"address": "ops@nesqualtech.test"},
+        )
+    )
+    await db.commit()
+
+    body = (await authed.get(f"/api/bots/{bot_a.id}/persona")).json()
+
+    assert [i["address"] for i in body["inboxes"]] == ["ops@nesqualtech.test"]
+    assert body["inboxes"][0]["channel"] == "email"
+
+
+async def test_an_older_single_bot_inbound_source_is_still_found(authed, db, bot_a, user_a):
+    """`bot_id` predates `bot_ids`, and deployments configured then are live."""
+    from app.models import InboundSource
+
+    db.add(
+        InboundSource(
+            slug="legacy-hook",
+            name="Legacy hook",
+            kind="webhook",
+            channel="email",
+            owner_user_id=user_a.id,
+            bot_id=bot_a.id,
+            config={"email": "legacy@nesqualtech.test"},
+        )
+    )
+    await db.commit()
+
+    body = (await authed.get(f"/api/bots/{bot_a.id}/persona")).json()
+    assert [i["address"] for i in body["inboxes"]] == ["legacy@nesqualtech.test"]
+
+
+async def test_a_connector_is_reported_as_a_reference_never_a_secret(
+    authed, db, bot_a, make_connector_binding
+):
+    """`secret_ref` is the pointer; the value is resolved in-process only."""
+    await make_connector_binding(bot_a, "crm", secret_ref="kv://vault/crm-key")
+
+    body = (await authed.get(f"/api/bots/{bot_a.id}/persona")).json()
+
+    bound = {c["connector_id"]: c for c in body["connectors"]}
+    assert "crm" in bound
+    assert bound["crm"]["secret_ref"] == "kv://vault/crm-key"
+    assert "the-real-crm-key" not in response_text(body)
+
+
+def response_text(body) -> str:
+    import json
+
+    return json.dumps(body)
+
+
+async def test_a_config_value_that_is_not_an_address_is_not_rendered_as_one(
+    authed, db, bot_a, user_a
+):
+    """`config` is provider-shaped and can hold anything somebody needed.
+
+    Only a plain string from a known key that actually looks like an address is
+    shown - rendering an arbitrary config value into a persona card is how a
+    secret ends up on screen.
+    """
+    from app.models import InboundSource
+
+    db.add(
+        InboundSource(
+            slug="odd-config",
+            name="Odd",
+            kind="webhook",
+            channel="webhook",
+            owner_user_id=user_a.id,
+            bot_ids=[str(bot_a.id)],
+            config={"address": {"nested": "not-a-string"}, "token": "sk-live-secret"},
+        )
+    )
+    await db.commit()
+
+    body = (await authed.get(f"/api/bots/{bot_a.id}/persona")).json()
+
+    assert body["inboxes"][0]["address"] is None
+    assert "sk-live-secret" not in response_text(body)
+
+
+async def test_another_users_bot_has_no_readable_persona(authed, other, make_bot, user_b):
+    """The persona carries a system prompt, so visibility matters more here."""
+    theirs = await make_bot(user_b, name="Theirs", slug="theirs-persona")
+    response = await authed.get(f"/api/bots/{theirs.id}/persona")
+    assert response.status_code == 404

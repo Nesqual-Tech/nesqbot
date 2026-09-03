@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     azure_tenant_id: str = ""
     # THE API'S OWN app registration id — the `aud` this API accepts, *not* the
     # desktop/mobile client's id. See docs/entra-setup.md: the resource server is
-    # `Nesq Bot API` (7959c495-…) and the public client is `Nesq Bot` (a369e670-…).
+    # `Nesq Bot API` (20000000-…) and the public client is `Nesq Bot` (30000000-…).
     # Setting the client's id here would make the API accept tokens audienced to
     # the client — exactly the audience confusion the two-registration split
     # exists to prevent — and it would do so silently, because such tokens verify
@@ -71,6 +71,21 @@ class Settings(BaseSettings):
     azure_deployment_nano: str = "gpt-5.6-luna"
     azure_deployment_mini: str = "gpt-5.4-mini"
     azure_deployment_reason: str = "gpt-5.6-sol"
+
+    #: A second deployment for the reason tier, tried when the first is
+    #: throttled and before the tier is given up on entirely.
+    #:
+    #: This exists because of an arithmetic problem, not a preference. Azure
+    #: allocates token-per-minute quota *per model*, and the primary reason
+    #: deployment holds its model's entire regional allowance:
+    #:
+    #:   grok-4-1-fast-reasoning   50 of a limit of 50   (= 50,000 TPM)
+    #:
+    #: so it cannot be raised. A different xAI model has its own untouched 50,
+    #: which is the only way to buy reasoning throughput today without waiting
+    #: on a quota request. Empty disables the hop and the tier falls straight
+    #: back to `mini`.
+    azure_deployment_reason_alt: str = ""
     azure_deployment_embed: str = "text-embedding-3-small"
 
     # ---- a second account, and per-tier endpoints ---------------------------
@@ -116,7 +131,7 @@ class Settings(BaseSettings):
     #
     # The account, as it actually is, so nobody has to re-measure it:
     #
-    #   endpoint   https://nesqbot-prod-xai-4zelre5orjeuw.cognitiveservices.azure.com/
+    #   endpoint   https://nesqbot-xai-CHANGE_ME.cognitiveservices.azure.com/
     #   kind       AIServices (an xAI model cannot deploy to an OpenAI-kind one)
     #   region     swedencentral, GlobalStandard
     #   rate limit 50,000 tokens AND 50 requests per 60 seconds, read off
@@ -405,6 +420,24 @@ class Settings(BaseSettings):
 
     # Outbound call budgets (seconds)
     request_timeout_seconds: float = 60.0
+
+    #: How often the API re-runs the orphaned-run reaper while it is
+    #: alive. Reaping used to happen only at boot, so a run that stalled
+    #: after the last deploy stayed `running` for ever and the person
+    #: watching that thread was told nothing - see `main._sweep_orphaned_runs`.
+    #: Ten minutes against `reaper.STALE_AFTER` (45m) bounds the delay
+    #: between a turn dying and the thread saying so at ~55 minutes.
+    run_sweep_interval_seconds: int = 600
+    #: How often the API looks for work items whose owner has not been woken —
+    #: see `services.work_dispatch` and `main._dispatch_assigned_work`.
+    #:
+    #: Short, unlike the reaper above, because this one is in the person's way:
+    #: a chief of staff that assigns three items and says so has made a promise
+    #: that those bots are starting, and a minute of apparent silence reads as
+    #: the same nothing-happened this whole lane exists to end. Fifteen seconds
+    #: costs one cheap indexed query per replica per interval and nothing else —
+    #: the query is a partial index lookup over the backlog, not a table scan.
+    work_dispatch_interval_seconds: int = 15
     sidecar_timeout_seconds: float = 30.0
     redis_connect_timeout_seconds: float = 2.0
 

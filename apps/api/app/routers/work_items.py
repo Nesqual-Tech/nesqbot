@@ -46,6 +46,7 @@ from app.schemas import (
     WorkItemTransferOut,
     WorkItemTransferResultOut,
 )
+from app.services import work_dispatch
 from app.services import work_items as work_items_service
 
 logger = logging.getLogger("nesqbot.work_items")
@@ -90,6 +91,8 @@ def _render(item: WorkItem, keys: list[WorkItemKey]) -> WorkItemOut:
         created_at=item.created_at,
         updated_at=item.updated_at,
         transferred_at=item.transferred_at,
+        dispatched_at=item.dispatched_at,
+        dispatch_run_id=item.dispatch_run_id,
         last_event_at=item.last_event_at,
         closed_at=item.closed_at,
     )
@@ -209,6 +212,15 @@ async def create_work_item(
         thread_id=body.thread_id,
         detail=dict(body.detail or {}),
     )
+    # An item created `open` with an owner is an assignment, and an assignment
+    # starts the owner working — `services.work_dispatch` claims it within
+    # seconds. A caller that wants a record and no run creates it `waiting`,
+    # which is also what "this is with somebody outside" means. Deliberately
+    # not conditional on who is calling: the app, a routine and a bot all mean
+    # the same thing by "this is yours and it is open".
+    work_dispatch.mark_for_dispatch(item)
+    # After `mark_for_dispatch`, which puts a non-terminal item back to `open`:
+    # what the caller asked for wins.
     work_items_service.apply_status(item, body.status)
     db.add(item)
     # Flush, not commit: the keys and the ledger row need `item.id`, and all
@@ -366,6 +378,12 @@ async def transfer_work_item(
     Idempotent. Transferring to the bot that already holds it returns
     ``transferred: false`` and writes no ledger row — a model calling the tool
     twice must not produce two handovers that did not happen.
+
+    **The new owner is started on it.** A transfer is an instruction, not
+    bookkeeping: the item goes back to ``open`` with its dispatch stamp cleared,
+    and ``services.work_dispatch`` gives the receiving bot its own run on it
+    within seconds. Transfer to park something without waking anybody by
+    setting the item ``waiting`` first.
     """
     item = await _get_owned_work_item(db, work_item_id, user)
     target = await get_visible_bot(db, body.to_bot_id, user)
@@ -393,7 +411,10 @@ async def transfer_work_item(
         detail=body.detail,
     )
     if row is None:
-        # No write happened; nothing to commit and nothing to record.
+        # No write happened; nothing to commit and nothing to record. In
+        # particular the item is *not* re-marked for dispatch: the owner has not
+        # changed, and a second wake for a bot already working it would be two
+        # runs on the same row.
         return WorkItemTransferResultOut(
             ok=True,
             transferred=False,
@@ -401,6 +422,10 @@ async def transfer_work_item(
             detail="That bot already owns this work item",
         )
 
+    # The new owner has not been told yet. `services.work_dispatch` starts them
+    # within seconds; see its module docstring for why an assignment that wakes
+    # nobody was the bug rather than the design.
+    work_dispatch.mark_for_dispatch(item)
     await db.commit()
     await db.refresh(item)
     await db.refresh(row)

@@ -39,6 +39,10 @@ export type IconName =
   | "command"
   | "list"
   | "book"
+  | "send"
+  | "sliders"
+  | "users"
+  | "more"
 
 /** Path data on a 24x24 grid. Stroked, never filled, so weight stays uniform. */
 const PATHS: Record<IconName, string> = {
@@ -79,6 +83,19 @@ const PATHS: Record<IconName, string> = {
   // Two pages meeting at a spine — the knowledge base, distinct from `list`'s
   // rows-of-equal-width ledger.
   book: "M12 6.5C10.5 5 8 4 4 4v14c4 0 6.5 1 8 2.5m0-14C13.5 5 16 4 20 4v14c-4 0-6.5 1-8 2.5m0-14v14",
+  // A paper plane, for the composer's send button. Sits inside a filled circle
+  // there, so it is drawn on the same 24-grid as everything else and simply
+  // inherits the button's `currentColor`.
+  send: "M4 12 20.5 4 13 20l-2.2-6.2L4 12Zm6.8 1.8L20.5 4",
+  // Faders, not a cog: this opens a sheet full of adjustable settings rather
+  // than a single machine-level configuration, and the app already spends its
+  // circles on avatars.
+  sliders: "M4 7h9m4 0h3M4 17h3m4 0h9M15 4v6M9 14v6",
+  // Two people — "start a group", next to `plus`'s "start a conversation".
+  users: "M9 12a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm-6 8a6 6 0 0 1 12 0m2.5-14.6a3.5 3.5 0 0 1 0 6.7M17 20a6 6 0 0 0-1.6-4.1",
+  // The overflow menu. Three dots on the horizontal, because it opens
+  // downwards from a header row.
+  more: "M6 12h.01M12 12h.01M18 12h.01",
 }
 
 export interface IconProps extends Omit<SVGProps<SVGSVGElement>, "name"> {

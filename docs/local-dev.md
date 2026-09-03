@@ -178,6 +178,16 @@ data).
 `CORS_ORIGINS` in `.env` must contain the dev server origin —
 `http://localhost:1420` for Vite, `http://localhost:8081` for Expo web.
 
+**A packaged desktop build cannot reach your own hosted API**
+Not CORS — the Tauri CSP. `apps/desktop/src-tauri/tauri.conf.json` allowlists
+the hosts the packaged app may talk to, and it ships with `localhost:8080` (so
+a local API works out of the box) plus a `your-api.example.com` placeholder.
+Pointing `VITE_API_URL` — or the setup wizard's runtime override — at your own
+API is not enough on its own: add that origin to `connect-src`, `img-src` and
+`frame-src`, and its `wss://` form to `connect-src`, or the requests are
+blocked before they leave the app. The dev server is not affected, which is why
+this only shows up after packaging.
+
 **Expo cannot resolve a workspace package**
 Metro does not follow symlinks out of the app directory by default. The mobile
 app needs a `metro.config.js` that adds the repo root to `watchFolders` and
@@ -224,3 +234,28 @@ Deliberate deviations are listed in the script's `EXEMPT` table with reasons.
 
 There is no test suite yet and no Python linting wired into these scripts —
 see `STATUS.md` for the honest list of what is missing.
+
+## Clicking the app (`make harness`)
+
+```bash
+make harness        # api + postgres + the desktop dev server, all throwaway
+make harness-down   # delete all of it
+```
+
+Prints a URL. The setup wizard asks for the backend
+(`http://localhost:18080/api`), auth is the development bypass so there is no
+sign-in, and with no model credentials every bot answers with the router's
+deterministic mock — enough to exercise send, streaming, tool calls, work
+items, approvals, and whether the transcript survives a tab switch.
+
+It exists because four user-visible bugs shipped in one day past a green
+`pytest` and a clean `tsc`: a broken chat layout, a wizard rendering "signal is
+aborted without reason", turns that failed in silence, and a reasoning
+deployment sitting at 100% of its token quota. Every one was found by opening
+the app and clicking Send. Neither test suite was ever going to catch "the
+reply never arrives" — both were passing while it did not arrive.
+
+It exports `HEAD` to a local drive rather than serving the repo directly,
+because npm, esbuild and `npx` all fail over a UNC share (`\NAS\...`), and
+Docker cannot bind-mount from one either. That also means it tests **committed**
+code: commit, then click.

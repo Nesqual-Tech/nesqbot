@@ -65,6 +65,11 @@ export interface CreateCustomBotRequest {
   /** Both or neither — 422 on one without the other. See `Bot.model_provider`. */
   model_provider?: ModelProvider | null
   model_name?: string | null
+  /** Persona — see `Bot.email`. Optional; omit for a bot with no persona. */
+  email?: string | null
+  voice?: string | null
+  signature?: string | null
+  desktop_habits?: string | null
 }
 
 /**
@@ -88,6 +93,16 @@ export interface UpdateBotRequest {
   desktop_profile?: DesktopProfile
   model_provider?: ModelProvider | null
   model_name?: string | null
+  /**
+   * Persona. `null` clears the field, the same as the model override above —
+   * removing a bot's address has to be sayable, and the API treats `""` as a
+   * clear too. Editable on system bots: the standing prompt is locked, the
+   * voice it is delivered in is not.
+   */
+  email?: string | null
+  voice?: string | null
+  signature?: string | null
+  desktop_habits?: string | null
 }
 
 /** `PATCH /bots/{bot_id}/budget`. */
@@ -500,7 +515,7 @@ export interface UpdateRunStatusRequest {
  * Body of `POST /runs/{run_id}/resume`.
  *
  * Everything the resumed run needs is already persisted on the run; `note` is
- * the one thing only the person at the screen knows ("logged in as norbert@…").
+ * the one thing only the person at the screen knows ("logged in as avery@…").
  * It goes into the transcript the model is rebuilt from, so it must never carry
  * a credential.
  */

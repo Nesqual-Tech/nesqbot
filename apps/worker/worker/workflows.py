@@ -17,7 +17,9 @@ from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflow
 
 with workflow.unsafe.imports_passed_through():
     from worker.activities import (
+        APPROVAL_POLL_BUDGET_SECONDS,
         NON_RETRYABLE_ERROR_TYPE,
+        PENDING_APPROVAL_STATUSES,
         ensure_desktop_activity,
         post_message_activity,
         record_run_status_activity,
@@ -50,8 +52,32 @@ DESKTOP_START_TO_CLOSE = timedelta(minutes=10)
 DESKTOP_HEARTBEAT = timedelta(seconds=30)
 MESSAGE_START_TO_CLOSE = timedelta(minutes=5)
 STEP_START_TO_CLOSE = timedelta(minutes=15)
-APPROVAL_START_TO_CLOSE = timedelta(hours=24)
+APPROVAL_START_TO_CLOSE = timedelta(seconds=APPROVAL_POLL_BUDGET_SECONDS + 60)
+"""One poll attempt's budget plus a minute of margin.
+
+This used to be `timedelta(hours=24)` — the same 86400 seconds as the
+activity's own internal deadline, so which timer fired first was a coin flip,
+and Temporal winning meant a *retryable* timeout under STANDARD_RETRY's 3
+attempts: a 72-hour zombie instead of a clean abort at 24. Deriving it from the
+budget the activity is handed makes the activity's own `pending` return the
+outcome that always wins, and keeps the arithmetic (`start_to_close` strictly
+greater than the poll budget) in one place.
+"""
 APPROVAL_HEARTBEAT = timedelta(minutes=2)
+APPROVAL_DEADLINE = timedelta(hours=24)
+"""How long a human has, when the run does not say. A workflow constant, not a
+setting: a setting read here would change under replay."""
+APPROVAL_BACKOFF_MIN = timedelta(seconds=60)
+APPROVAL_BACKOFF_MAX = timedelta(minutes=5)
+"""Durable-timer gap between poll attempts, doubling to the cap.
+
+The gap is what frees the worker: a parked approval holds an activity slot only
+while an attempt is in flight (one minute), not for the whole wait, so twenty
+routines parked on unanswered approvals no longer occupy all twenty of
+`worker_max_concurrent_activities`. At the cap the duty cycle is 60s of every
+360s. The cost is latency: a decision is noticed within about six minutes,
+which is the trade this repo wants for an overnight unattended run.
+"""
 STATUS_START_TO_CLOSE = timedelta(seconds=30)
 
 
@@ -307,16 +333,7 @@ class RoutineWorkflow:
                     index,
                     approval_id,
                 )
-                decision = await workflow.execute_activity(
-                    wait_for_approval_activity,
-                    {
-                        "approval_id": approval_id,
-                        "timeout_seconds": params.approval_timeout_seconds,
-                    },
-                    start_to_close_timeout=APPROVAL_START_TO_CLOSE,
-                    heartbeat_timeout=APPROVAL_HEARTBEAT,
-                    retry_policy=STANDARD_RETRY,
-                )
+                decision = await self._await_approval(approval_id, params)
                 step_result["approval"] = decision
                 if not decision.get("approved"):
                     status = "aborted"
@@ -355,6 +372,58 @@ class RoutineWorkflow:
             summary["steps_total"],
         )
         return summary
+
+    async def _await_approval(self, approval_id: str, params: RoutineInput) -> dict[str, Any]:
+        """Wait for a human on a durable timer, not inside a long activity.
+
+        Each attempt polls for `APPROVAL_POLL_BUDGET_SECONDS` and returns
+        `pending` if nobody decided; the gap between attempts is a workflow
+        timer, which costs no worker slot and survives a worker restart. The
+        24-hour deadline is therefore enforced here, by `workflow.now()`, which
+        makes the clean `timed_out` abort the guaranteed outcome instead of a
+        race between two 86400-second timers (see `APPROVAL_START_TO_CLOSE`).
+        """
+        window = (
+            timedelta(seconds=params.approval_timeout_seconds)
+            if params.approval_timeout_seconds
+            else APPROVAL_DEADLINE
+        )
+        deadline = workflow.now() + window
+        backoff = APPROVAL_BACKOFF_MIN
+        attempts = 0
+        while True:
+            attempts += 1
+            decision = await workflow.execute_activity(
+                wait_for_approval_activity,
+                {
+                    "approval_id": approval_id,
+                    # Passed explicitly so the attempt can never outlive the
+                    # start_to_close derived from the same constant, whatever
+                    # `worker_approval_poll_budget_seconds` says in the env.
+                    "poll_budget_seconds": APPROVAL_POLL_BUDGET_SECONDS,
+                },
+                start_to_close_timeout=APPROVAL_START_TO_CLOSE,
+                heartbeat_timeout=APPROVAL_HEARTBEAT,
+                retry_policy=STANDARD_RETRY,
+            )
+            status = str(decision.get("status") or "").strip().lower()
+            if status not in PENDING_APPROVAL_STATUSES:
+                return decision
+
+            remaining = (deadline - workflow.now()).total_seconds()
+            if remaining <= 0:
+                workflow.logger.warning(
+                    "routine.approval_timed_out approval_id=%s attempts=%d", approval_id, attempts
+                )
+                return {
+                    "approval_id": approval_id,
+                    "status": "timed_out",
+                    "approved": False,
+                    "note": f"no decision within {window.total_seconds():.0f}s",
+                    "polls": attempts,
+                }
+            await workflow.sleep(min(remaining, backoff.total_seconds()))
+            backoff = min(APPROVAL_BACKOFF_MAX, backoff * 2)
 
     def _summary(
         self,

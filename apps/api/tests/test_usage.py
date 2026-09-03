@@ -55,6 +55,57 @@ async def test_usage_days_window_is_validated(authed):
     assert (await authed.get("/api/usage?days=90")).status_code == 200
 
 
+async def test_usage_does_not_cost_two_queries_per_bot(authed, db_connection, make_bot, user_a):
+    """`GET /usage` was 2N+1: a `spent_today_usd` SUM plus a 50-row ledger
+    select for every visible bot.
+
+    `UsagePanel.tsx` documents its `refreshKey` as "the shell does it after
+    every completed turn", so the fan-out ran on every chat turn and grew with
+    the roster. Counted with more bots against the same request, which is the
+    only assertion that catches a regression back to the loop — the payload is
+    identical either way.
+    """
+    from tests.test_threads import counted_statements
+
+    with counted_statements(db_connection) as before:
+        assert (await authed.get("/api/usage")).status_code == 200
+
+    for index in range(4):
+        await make_bot(user_a, name=f"Extra {index}")
+    with counted_statements(db_connection) as after:
+        listed = await authed.get("/api/usage")
+    assert len(listed.json()) >= 5
+
+    assert len(after) == len(before), (
+        "four more bots cost more statements — the per-bot queries are back: "
+        f"{len(before)} -> {len(after)}"
+    )
+
+
+async def test_usage_entries_are_newest_first_across_several_rows(authed, db, bot_a):
+    """The per-bot cap is now a window function, so its ordering is asserted.
+
+    A `row_number()` that ranked in one order and a result set returned in
+    another would silently put entries at the wrong position, which no
+    single-row test can see.
+    """
+    for index in range(3):
+        db.add(
+            CostLedger(
+                bot_id=bot_a.id,
+                tier=f"tier{index}",
+                input_tokens=index,
+                output_tokens=0,
+                cost_usd=Decimal("0.0001"),
+            )
+        )
+        await db.commit()
+
+    row = next(u for u in (await authed.get("/api/usage")).json() if u["bot_id"] == str(bot_a.id))
+    assert [e["tier"] for e in row["entries"]] == ["tier2", "tier1", "tier0"]
+    assert row["spent_usd_today"] == 0.0003
+
+
 # ---------------------------------------------------------------------------
 # Evals
 # ---------------------------------------------------------------------------

@@ -1,0 +1,41 @@
+# Build context for the API image, which is the repository root because the
+# image has to carry `bots/` — see the header of `apps/api/Dockerfile`.
+#
+# Only builds whose *context* is this directory read this file, so the worker
+# and bot-desktop images keep using their own `.dockerignore` unchanged.
+#
+# Deny by default, then re-admit exactly what the image needs. Without this the
+# daemon uploads the whole monorepo on every build — `.git`, `node_modules`,
+# `apps/desktop/src-tauri/target`, `data/bot-homes` — none of which is COPYed
+# and all of which invalidates nothing useful. Deny-first also means a file
+# added later (a dump, a notebook full of credentials, an `.env`) cannot reach
+# the context by accident.
+*
+
+!apps/api/requirements.txt
+!apps/api/requirements-dev.txt
+!apps/api/app/
+!apps/api/sql/
+!apps/api/alembic.ini
+!apps/api/alembic/
+# The reason this context is the repo root: the five system-bot prompts.
+!bots/
+
+# Re-exclude the noise inside the admitted directories: negation patterns do
+# not recurse into what a later rule re-excludes, so these must come last.
+**/__pycache__/
+**/*.py[cod]
+**/.venv/
+**/venv/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.ipynb_checkpoints/
+**/.DS_Store
+**/Thumbs.db
+**/*.log
+**/*.sqlite3
+**/*.db
+**/.env
+**/.env.*
+**/tests/

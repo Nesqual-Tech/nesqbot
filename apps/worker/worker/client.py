@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+from datetime import timedelta
 from typing import Any, Iterable
 
 from temporalio.client import (
@@ -136,16 +137,38 @@ def _build_schedule(
     extra: dict[str, Any] | None = None,
 ) -> Schedule:
     sid = schedule_id(routine_id)
-    payload = routine_payload(routine_id, bot_id, steps, **(extra or {}))
+    extra = dict(extra or {})
+    # `WORKER_APPROVAL_TIMEOUT_SECONDS` is a documented env var (.env.example),
+    # and `RoutineWorkflow` is where the approval deadline is now enforced — but
+    # workflow code must not read settings: a value re-read during replay can
+    # differ from the one the run started with. Baking it into the schedule's
+    # workflow argument is the deterministic way to keep the setting live; it is
+    # written once per upsert and replays identically. `RoutineInput` already
+    # reads this key, and a run the API starts directly simply falls back to
+    # `workflows.APPROVAL_DEADLINE`, which is the same 24 hours as the default.
+    extra.setdefault("approval_timeout_seconds", settings.worker_approval_timeout_seconds)
+    payload = routine_payload(routine_id, bot_id, steps, **extra)
     return Schedule(
         action=ScheduleActionStartWorkflow(
             settings.worker_schedule_workflow,
             args=[payload],
-            id=sid,
+            # `routine-{id}-scheduled`, matching what the API commits in
+            # `services/temporal_client.py`. This module's docstring calls the
+            # id format a shared contract to change in both places or not at
+            # all; the worker used to pass `sid` (the schedule id itself), so
+            # the worker was the side that diverged and is the side fixed here.
+            id=f"{sid}-scheduled",
             task_queue=settings.temporal_task_queue,
+            execution_timeout=timedelta(seconds=settings.worker_schedule_execution_timeout_seconds),
         ),
         spec=ScheduleSpec(cron_expressions=[cron]),
-        policy=SchedulePolicy(overlap=ScheduleOverlapPolicy.SKIP),
+        policy=SchedulePolicy(
+            overlap=ScheduleOverlapPolicy.SKIP,
+            # Never the SDK default of 365 days: see
+            # `worker_schedule_catchup_window_seconds` for the burst of real
+            # sends that default produces after an outage.
+            catchup_window=timedelta(seconds=settings.worker_schedule_catchup_window_seconds),
+        ),
         state=ScheduleState(
             note=f"nesq routine {routine_id}",
             paused=not enabled,
@@ -230,7 +253,14 @@ async def reconcile_schedules(
     *,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
-    """Make Temporal match the API: upsert enabled cron routines, drop orphans."""
+    """Upsert enabled cron routines; sweep orphans only when that is provably safe.
+
+    `routines` is whatever `GET /routines` answered, and that answer is a
+    *visibility-filtered* view, not an inventory — see
+    `worker_reconcile_delete_orphans` for the production-only data loss that
+    treating it as an inventory caused. Upserts are always safe (they only ever
+    write the schedule the API asked for); deletes are gated twice.
+    """
     settings = settings or get_settings()
     desired: dict[str, dict[str, Any]] = {}
     for routine in routines:
@@ -269,19 +299,48 @@ async def reconcile_schedules(
             log.warning("%s", kv(event="schedule.upsert.failed", schedule_id=sid, error=str(exc)[:200]))
 
     deleted: list[str] = []
-    try:
-        existing = await list_schedules(client)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("%s", kv(event="schedule.list.failed", error=str(exc)[:200]))
-        existing = []
-    for sid in existing:
-        if sid in desired:
-            continue
+    refused: str | None = None
+    if not settings.worker_reconcile_delete_orphans:
+        refused = "disabled"
+        log.info("%s", kv(event="schedule.orphans.skipped", reason=refused))
+    else:
         try:
-            if await delete_schedule(client, sid):
-                deleted.append(sid)
+            existing = await list_schedules(client)
         except Exception as exc:  # noqa: BLE001
-            log.warning("%s", kv(event="schedule.delete.failed", schedule_id=sid, error=str(exc)[:200]))
+            log.warning("%s", kv(event="schedule.list.failed", error=str(exc)[:200]))
+            existing = []
+        orphans = [sid for sid in existing if sid not in desired]
+        # Guard 1: an empty routine list is indistinguishable from "the API
+        # answered for an identity that can see nothing", and deleting every
+        # schedule on that basis is unrecoverable.
+        if not desired:
+            refused = "empty_routine_list"
+        # Guard 2: a filtered or paginated answer read as authoritative shows up
+        # as "most schedules are suddenly orphans". A genuine orphan is rare and
+        # arrives one at a time.
+        elif existing and len(orphans) > settings.worker_reconcile_orphan_max_fraction * len(existing):
+            refused = "orphan_fraction_too_high"
+        if refused:
+            log.warning(
+                "%s",
+                kv(
+                    event="schedule.orphans.refused",
+                    reason=refused,
+                    existing=len(existing),
+                    desired=len(desired),
+                    orphans=len(orphans),
+                ),
+            )
+        else:
+            for sid in orphans:
+                try:
+                    if await delete_schedule(client, sid):
+                        deleted.append(sid)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "%s",
+                        kv(event="schedule.delete.failed", schedule_id=sid, error=str(exc)[:200]),
+                    )
 
     log.info(
         "%s",
@@ -290,6 +349,7 @@ async def reconcile_schedules(
             upserted=len(upserted),
             deleted=len(deleted),
             failed=len(failed),
+            orphans_refused=refused,
         ),
     )
-    return {"upserted": upserted, "deleted": deleted, "failed": failed}
+    return {"upserted": upserted, "deleted": deleted, "failed": failed, "orphans_refused": refused}

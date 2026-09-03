@@ -121,7 +121,6 @@ pre {
  */
 
 .eyebrow,
-.sidebar__section-label,
 .field__label,
 .subpanel__title,
 .approval__detail-label,
@@ -203,6 +202,19 @@ legend,
   position: relative;
   isolation: isolate;
   background: var(--bg);
+}
+
+/*
+ * Closed — the ordinary case, and now the default.
+ *
+ * The pane used to be a permanent fourth column, so a third of the window
+ * belonged to a Linux desktop scaled to 30% whether or not anything was
+ * happening on it, and the app read as two messengers side by side. It is
+ * opened from a conversation (`ChatPane`'s Computer button, `Ctrl ⇧ D`), and
+ * when it is closed neither it nor the splitter is in the DOM at all.
+ */
+.app--desktop-closed {
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
 }
 
 /* Maximised: the pane leaves the grid entirely and covers the window. */
@@ -304,18 +316,13 @@ legend,
   opacity: 1;
 }
 
-.sidebar,
+.rail,
 .main,
 .desktop-pane {
   display: flex;
   flex-direction: column;
   min-height: 0;
   min-width: 0;
-}
-
-.sidebar {
-  border-right: 1px solid var(--border);
-  background: var(--surface);
 }
 
 .desktop-pane {
@@ -426,242 +433,12 @@ legend,
   flex: 0 0 auto;
 }
 
-/* ------------------------------------------------------------------- nav */
-
-.nav {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  padding: 0 var(--space-md) var(--space-md);
-}
-
-.nav__item {
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  width: 100%;
-  padding: var(--space-sm) var(--space-md);
-  border: 0;
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  text-align: left;
-  font-size: var(--text-body-size);
-  line-height: var(--text-body-line);
-  transition:
-    background var(--duration-fast) var(--ease-standard),
-    color var(--duration-fast) var(--ease-standard);
-}
-
-/* The active marker: a short accent bar in the gutter, not a full border. */
-.nav__item::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 50%;
-  width: 2px;
-  height: 0;
-  border-radius: var(--radius-pill);
-  background: var(--accent);
-  transform: translateY(-50%);
-  transition:
-    height var(--duration-base) var(--ease-entrance),
-    opacity var(--duration-fast) var(--ease-standard);
-  opacity: 0;
-}
-
-.nav__item:hover {
-  background: var(--surface-alt);
-  color: var(--text);
-}
-
-.nav__item--active {
-  background: var(--surface-alt);
-  color: var(--text);
-  font-weight: var(--text-body-strong-weight);
-}
-
-.nav__item--active::before {
-  height: 18px;
-  opacity: 1;
-}
-
-.nav__item--active .nav__glyph {
-  color: var(--accent);
-}
-
-.nav__glyph {
-  display: inline-flex;
-  color: var(--text-dim);
-  transition: color var(--duration-fast) var(--ease-standard);
-}
-
-.nav__item:hover .nav__glyph {
-  color: var(--text-muted);
-}
-
-.nav__label {
-  flex: 1;
-}
-
-.badge {
-  min-width: 20px;
-  padding: 0 var(--space-xs);
-  border-radius: var(--radius-pill);
-  background: var(--status-warning);
-  color: var(--brand-navy);
-  font-size: var(--text-caption-size);
-  line-height: 18px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-  text-align: center;
-}
-
-.sidebar__section-label {
-  padding: var(--space-md) var(--space-lg) var(--space-sm);
-}
-
-.sidebar__footer {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  padding: var(--space-md);
-  border-top: 1px solid var(--border);
-  flex-wrap: wrap;
-  background: var(--bg);
-}
-
-.status-line {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-xs);
-  font-size: var(--text-caption-size);
-  line-height: var(--text-caption-line);
-  color: var(--text-muted);
-}
-
-.status-dot {
-  width: 7px;
-  height: 7px;
-  flex: 0 0 auto;
-  border-radius: var(--radius-pill);
-  background: var(--status-success);
-  box-shadow: 0 0 0 3px var(--success-soft);
-}
-
-.status-line--warn .status-dot {
-  background: var(--status-warning);
-  box-shadow: 0 0 0 3px var(--warning-soft);
-}
-
-.status-line--error .status-dot {
-  background: var(--status-danger);
-  box-shadow: 0 0 0 3px var(--danger-soft);
-}
-
-/* -------------------------------------------------------------- bot list */
-
-.bot-list {
-  list-style: none;
-  margin: 0;
-  padding: 0 var(--space-md) var(--space-lg);
-  overflow: auto;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
-.bot-item {
-  position: relative;
-  display: flex;
-  gap: var(--space-sm);
-  align-items: center;
-  width: 100%;
-  padding: var(--space-sm) var(--space-md) var(--space-sm) var(--space-sm);
-  border-radius: var(--radius-md);
-  cursor: pointer;
-  transition: background var(--duration-fast) var(--ease-standard);
-}
-
-.bot-item:hover {
-  background: var(--surface-alt);
-}
-
-.bot-item--active {
-  background: var(--surface-alt);
-}
-
-.bot-item--active::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 50%;
-  width: 2px;
-  height: 20px;
-  border-radius: var(--radius-pill);
-  background: var(--accent);
-  transform: translateY(-50%);
-}
-
-.avatar {
-  width: 30px;
-  height: 30px;
-  flex: 0 0 auto;
-  border-radius: var(--radius-sm);
-  display: grid;
-  place-items: center;
-  font-size: var(--text-caption-size);
-  font-weight: 700;
-  letter-spacing: 0;
-  color: var(--brand-navy);
-  background: var(--avatar-bg, var(--accent));
-}
-
-.avatar--xs {
-  width: 18px;
-  height: 18px;
-  border-radius: 5px;
-  font-size: 9px;
-}
-
-.bot-item__meta {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  flex: 1;
-  gap: 1px;
-}
-
-.bot-item__name {
-  font-weight: var(--text-body-strong-weight);
-  font-size: var(--text-body-size);
-  line-height: 18px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.bot-item__role {
-  font-size: var(--text-caption-size);
-  line-height: var(--text-caption-line);
-  color: var(--text-muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.bot-item__spend {
-  font-size: var(--text-caption-size);
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-}
-
-.bot-item__spend--warn {
-  color: var(--status-warning-fg);
-}
+/*
+ * The tab rail, the teammate list and the palette cue that used to live here
+ * are gone with `Sidebar.tsx` and `BotList.tsx` — the sidebar is a
+ * conversation list now (`.rail`, further down). Removed rather than left
+ * behind: dead CSS is the kind of thing that gets copied back in by accident.
+ */
 
 /* ------------------------------------------------------- headers (shared) */
 
@@ -702,18 +479,11 @@ legend,
   color: var(--text-muted);
 }
 
-.chat__identity {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.chat__title {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-}
+/*
+ * `.chat__identity` and `.chat__title` are defined with the conversation shell
+ * further down — the identity is a row (glyph beside the name) and a button
+ * now, not the stacked heading block that used to sit here.
+ */
 
 /* Eyebrow / title / subtitle stack in a panel header. */
 .panel__header > div:first-child,
@@ -1963,6 +1733,21 @@ legend {
    * should be as tall as what is in it.
    */
   align-items: start;
+  /*
+   * ...and rows that are as tall as the card in them.
+   *
+   * `align-items: start` alone was not enough. With auto rows, a usage card
+   * measured 147px tall sat in a row Chromium sized at 111px — 36px short,
+   * which is exactly the three 12px `row-gap`s inside the card's own column
+   * flex — so every card in a column was painted over by the one below it and
+   * lost its last line ("Show the 1 call", "Change the cap"). Caught in a
+   * screenshot; nothing about it fails a test or a typecheck.
+   *
+   * `max-content` is also the honest declaration of intent: this is a
+   * catalogue of independent objects, and a row should be the size of what is
+   * in it.
+   */
+  grid-auto-rows: max-content;
   gap: var(--space-md);
 }
 
@@ -5111,42 +4896,6 @@ legend {
 
 /* --------------------------------------------------------- the palette cue */
 
-/*
- * Reads as a search field, behaves as a button. It is the only advertisement
- * the palette gets, and it is what turns a power-user shortcut into something
- * everybody finds on the first day.
- */
-.palette-cue {
-  display: flex;
-  align-items: center;
-  gap: var(--space-sm);
-  width: 100%;
-  margin-bottom: var(--space-md);
-  padding: var(--space-sm) var(--space-md);
-  border-radius: var(--radius-md);
-  background: var(--surface-alt);
-  border: 1px solid var(--border);
-  color: var(--text-muted);
-  cursor: pointer;
-  text-align: left;
-  transition:
-    background var(--duration-fast) var(--ease-standard),
-    border-color var(--duration-fast) var(--ease-standard),
-    color var(--duration-fast) var(--ease-standard);
-}
-
-.palette-cue:hover {
-  background: var(--surface-raised);
-  border-color: var(--border-strong);
-  color: var(--text);
-}
-
-.palette-cue__label {
-  flex: 1;
-  font-size: var(--text-label-size);
-}
-
-.palette-cue__kbd,
 .command-palette__kbd,
 .command-palette__esc {
   padding: 1px 6px;
@@ -6557,4 +6306,997 @@ legend {
 .approval__granted svg {
   flex: 0 0 auto;
   margin-top: 2px;
+}
+
+/* ===========================================================================
+ * The conversation shell
+ * ===========================================================================
+ *
+ * A left rail of conversations, a chat column, and the Agent Computer only
+ * when it is asked for. This replaces a nine-item tab rail with a bot list
+ * under it — see the note at the top of `components/ConversationList.tsx` for
+ * why, and `components/SettingsSheet.tsx` for where those nine went.
+ *
+ * Everything here borrows the existing chrome: the same surfaces, borders,
+ * radii and spacing steps the panels already use. It is a different
+ * information architecture, not a different design system.
+ */
+
+/* --- the rail ------------------------------------------------------------ */
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.rail__tools {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 0 var(--space-md) var(--space-sm);
+}
+
+.rail__search {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  padding: 0 var(--space-sm);
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface-alt);
+  color: var(--text-faint);
+}
+
+.rail__search:focus-within {
+  border-color: var(--accent);
+  color: var(--text-muted);
+}
+
+.rail__search-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-caption-size);
+  outline: none;
+}
+
+.rail__tool {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface-alt);
+  color: var(--text-muted);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+.rail__tool:hover {
+  background: var(--surface-pressed);
+  color: var(--text);
+}
+
+.rail__tool--on {
+  background: var(--accent-wash);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/*
+ * The two pickers. A panel rather than a floating popover: the rail is already
+ * a column of rows, so a block that pushes the list down reads as part of it
+ * and cannot be clipped by the shell's overflow.
+ */
+.rail__picker {
+  margin: 0 var(--space-md) var(--space-sm);
+  padding: var(--space-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-popover);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rail__picker-note,
+.rail__empty {
+  margin: 0;
+  padding: var(--space-xs) var(--space-sm);
+  color: var(--text-muted);
+  font-size: var(--text-meta-size);
+  line-height: 1.45;
+}
+
+.rail__empty--error {
+  color: var(--status-danger-fg);
+}
+
+.rail__picker-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  padding: var(--space-xs) var(--space-sm);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rail__picker-row:hover {
+  background: var(--surface-pressed);
+}
+
+.rail__picker-row--check {
+  cursor: default;
+}
+
+.rail__picker-name {
+  font-size: var(--text-caption-size);
+  font-weight: 600;
+}
+
+.rail__picker-role {
+  margin-left: auto;
+  color: var(--text-faint);
+  font-size: var(--text-meta-size);
+  white-space: nowrap;
+}
+
+.rail__picker-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+  padding-top: var(--space-xs);
+}
+
+.rail__list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 0 var(--space-sm) var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+/* --- one conversation ---------------------------------------------------- */
+
+.convo {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  padding: var(--space-sm);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+
+.convo:hover {
+  background: var(--surface-alt);
+}
+
+.convo--active {
+  background: var(--accent-wash);
+}
+
+.convo__avatar {
+  flex: 0 0 auto;
+}
+
+.convo__avatar--none {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-pressed);
+}
+
+.convo__body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+
+.convo__title {
+  font-size: var(--text-caption-size);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.convo__subtitle {
+  color: var(--text-muted);
+  font-size: var(--text-meta-size);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.convo__stamp {
+  align-self: start;
+  color: var(--text-faint);
+  font-size: var(--text-meta-size);
+  white-space: nowrap;
+}
+
+.rail__footer {
+  border-top: 1px solid var(--border);
+  padding: var(--space-sm) var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.rail__footer-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.rail__spend {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: var(--text-meta-size);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- the bot glyphs ------------------------------------------------------ */
+
+.bot-avatar {
+  display: block;
+  flex: 0 0 auto;
+}
+
+/*
+ * Overlapped, and each one ringed in the surface colour behind it so the
+ * shapes stay separable where they cross. `row-reverse` puts the first bot on
+ * top without needing a z-index per child.
+ */
+.bot-avatar-stack {
+  display: inline-flex;
+  flex-direction: row-reverse;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.bot-avatar-stack .bot-avatar {
+  margin-right: calc(var(--stack-size, 24px) * -0.3);
+  border-radius: var(--radius-pill);
+  outline: 2px solid var(--surface);
+}
+
+.bot-avatar-stack .bot-avatar:first-child {
+  margin-right: 0;
+}
+
+/* --- chat header -------------------------------------------------------- */
+
+.chat__header {
+  position: relative;
+  align-items: center;
+  padding: var(--space-md) var(--space-lg);
+}
+
+/*
+ * The identity is a button now: it opens the profile. Styled as the header
+ * text it replaces rather than as a control, because a bot's name reading as
+ * a button is how a header starts looking like a toolbar.
+ */
+.chat__identity {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  min-width: 0;
+  padding: var(--space-xs);
+  margin: calc(var(--space-xs) * -1);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat__identity:hover {
+  background: var(--surface-alt);
+}
+
+.chat__identity-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.chat__title {
+  margin: 0;
+  font-size: var(--text-subheading-size);
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat__menu-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.chat__menu-button:hover,
+.chat__menu-button[aria-expanded="true"] {
+  background: var(--surface-alt);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.chat__menu {
+  position: absolute;
+  top: calc(100% - var(--space-sm));
+  right: var(--space-lg);
+  z-index: 30;
+  width: 17rem;
+  padding: var(--space-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised);
+  box-shadow: var(--shadow-popover);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.chat__menu-label {
+  color: var(--text-faint);
+  font-size: var(--text-meta-size);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0 var(--space-xs);
+}
+
+.chat__menu-roster {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chat__menu-roster li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 2px var(--space-xs);
+  font-size: var(--text-caption-size);
+}
+
+.chat__menu-remove {
+  margin-left: auto;
+  display: inline-flex;
+  padding: 2px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.chat__menu-remove:hover {
+  background: var(--surface-pressed);
+  color: var(--status-danger-fg);
+}
+
+.chat__menu-note {
+  margin: 0;
+  padding: 0 var(--space-xs);
+  color: var(--text-muted);
+  font-size: var(--text-meta-size);
+  line-height: 1.45;
+}
+
+.chat__menu-divider {
+  height: 1px;
+  background: var(--border);
+  margin: var(--space-xs) 0;
+}
+
+.chat__menu-item {
+  display: block;
+  width: 100%;
+  padding: var(--space-xs) var(--space-sm);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: var(--text-caption-size);
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat__menu-item:hover:not(:disabled) {
+  background: var(--surface-pressed);
+}
+
+.chat__menu-item:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+
+.chat__menu-item--danger:hover:not(:disabled) {
+  color: var(--status-danger-fg);
+}
+
+/* --- opening a conversation --------------------------------------------- */
+
+.chat__opening {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-md);
+}
+
+.chat__suggestions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  width: min(34rem, 100%);
+}
+
+/*
+ * Prompts, not buttons that fire. They fill the composer and leave the caret
+ * at the end — the useful one is nearly always the one you edit first.
+ */
+.chat__suggestion {
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--text-caption-size);
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+.chat__suggestion:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+/* --- composer send ------------------------------------------------------ */
+
+.composer__send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  color: var(--on-accent);
+  cursor: pointer;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+.composer__send:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* --- the settings sheet and the profile modal --------------------------- */
+
+.sheet,
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-xl);
+}
+
+.sheet__backdrop,
+.modal__backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  padding: 0;
+  background: rgb(8 12 24 / 45%);
+  cursor: default;
+  animation: sheet-fade-in var(--duration-fast) var(--ease-standard) both;
+}
+
+@keyframes sheet-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.sheet__panel {
+  position: relative;
+  display: grid;
+  grid-template-columns: 13rem minmax(0, 1fr);
+  width: min(74rem, 100%);
+  height: min(46rem, 100%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg);
+  box-shadow: var(--shadow-modal);
+  overflow: hidden;
+}
+
+.sheet__nav {
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  padding: var(--space-lg) var(--space-sm);
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.sheet__nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.sheet__nav-label {
+  padding: 0 var(--space-sm) var(--space-xs);
+  color: var(--text-faint);
+  font-size: var(--text-meta-size);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sheet__nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-sm);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--text-caption-size);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sheet__nav-item:hover {
+  background: var(--surface-alt);
+  color: var(--text);
+}
+
+.sheet__nav-item--active {
+  background: var(--accent-wash);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.sheet__nav-item .badge {
+  margin-left: auto;
+}
+
+.sheet__nav-empty {
+  margin: 0;
+  padding: var(--space-sm);
+  color: var(--text-faint);
+  font-size: var(--text-meta-size);
+}
+
+.sheet__main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.sheet__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: 1px solid var(--border);
+}
+
+.sheet__title {
+  margin: 0;
+  font-size: var(--text-subheading-size);
+}
+
+.sheet__search {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  height: 30px;
+  padding: 0 var(--space-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface-alt);
+  color: var(--text-faint);
+}
+
+.sheet__search-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-caption-size);
+  outline: none;
+}
+
+.sheet__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--surface-alt);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.sheet__close:hover {
+  background: var(--surface-pressed);
+  color: var(--text);
+}
+
+.sheet__body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+/*
+ * The panels inside the sheet were written as full-window tabs, so they carry
+ * their own headers. Inside a sheet that reads as a second title bar under the
+ * first, and the sheet header already names the section.
+ */
+.sheet__body .panel__header {
+  padding-top: var(--space-lg);
+  border-bottom: 0;
+}
+
+.sheet__body .panel__title {
+  font-size: var(--text-subheading-size);
+}
+
+/* --- a settings page written for the sheet ------------------------------ */
+
+.settings__page {
+  padding: var(--space-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xl);
+  max-width: 52rem;
+}
+
+.settings__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.settings__group-title {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: var(--text-meta-size);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.settings__note {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-caption-size);
+  line-height: 1.55;
+  max-width: 46rem;
+}
+
+.settings__actions,
+.settings__choice {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+.chip--on {
+  background: var(--accent-wash);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+button.chip {
+  cursor: pointer;
+}
+
+.settings__keys {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-xs) var(--space-md);
+  margin: 0;
+  font-size: var(--text-caption-size);
+}
+
+.settings__keys > div {
+  display: contents;
+}
+
+.settings__keys dd {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.settings__pills {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+
+.settings__rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.settings__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+  padding: var(--space-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  font-size: var(--text-caption-size);
+}
+
+.settings__row-name {
+  font-weight: 600;
+}
+
+.settings__row-value {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-mono-size);
+}
+
+.field__note {
+  color: var(--text-faint);
+  font-style: normal;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: var(--text-meta-size);
+}
+
+.modal__panel {
+  position: relative;
+  width: min(40rem, 100%);
+  max-height: 100%;
+  overflow: auto;
+  overscroll-behavior: contain;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-modal);
+}
+
+/* The card is the modal's whole body here, so it drops the pane margins. */
+.modal__panel .persona {
+  margin: 0;
+  border-radius: var(--radius-lg);
+}
+
+.persona__avatar {
+  flex: 0 0 auto;
+}
+
+.persona__lede {
+  margin: var(--space-sm) 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-caption-size);
+  line-height: 1.55;
+}
+
+.persona__actions {
+  display: flex;
+  gap: var(--space-sm);
+  margin-top: var(--space-md);
+}
+
+.persona__prose {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.persona__prose dt {
+  color: var(--text-faint);
+  font-size: var(--text-meta-size);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.persona__prose dd {
+  margin: 2px 0 0;
+  font-size: var(--text-caption-size);
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.persona {
+  margin: 0 var(--space-lg) var(--space-md);
+  padding: var(--space-lg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+}
+
+.persona__header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-md);
+}
+
+.persona__name {
+  margin: 0;
+  font-size: var(--text-h3-size);
+  line-height: var(--text-h3-line);
+}
+
+.persona__role {
+  margin: 2px 0 0;
+  color: var(--text-muted);
+  font-size: var(--text-caption-size);
+}
+
+.persona__close {
+  margin-left: auto;
+}
+
+.persona__body {
+  margin-top: var(--space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.persona__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-lg);
+  margin: 0;
+}
+
+.persona__facts dt {
+  color: var(--text-faint);
+  font-size: var(--text-meta-size);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.persona__facts dd {
+  margin: 2px 0 0;
+  font-size: var(--text-caption-size);
+}
+
+.persona__label {
+  margin: var(--space-sm) 0 0;
+  font-size: var(--text-meta-size);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+}
+
+.persona__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.persona__list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-sm);
+  font-size: var(--text-caption-size);
+}
+
+.persona__meta {
+  color: var(--text-muted);
+  font-size: var(--text-meta-size);
+}
+
+.persona__empty {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-caption-size);
+}
+
+.persona__prompt {
+  margin: 0;
+  padding: var(--space-md);
+  border-radius: var(--radius-md);
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: var(--text-mono-size);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  max-height: 22rem;
+  overflow: auto;
 }

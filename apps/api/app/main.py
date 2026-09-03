@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from contextlib import asynccontextmanager
 
@@ -15,6 +17,7 @@ from app.db import SessionLocal, engine
 from app.errors import register_error_handlers
 from app.middleware import RequestContextMiddleware
 from app.routers import API_VERSION, OPENAPI_TAGS, router
+from app.services import work_dispatch
 from app.services.provider_credentials import load_overrides_from_db as load_provider_credential_overrides
 from app.services.reaper import reap_orphaned_runs
 from app.services.schema import ensure_schema
@@ -126,7 +129,107 @@ async def lifespan(_app: FastAPI):
         # `lock_timeout` above, which turns that lock wait into exactly this
         # exception instead of an indefinite hang.
         logger.exception("startup: seeding/reaping/pruning did not complete - will retry next boot")
-    yield
+
+    # ---- and again, on a timer -------------------------------------------
+    #
+    # Reaping only at boot was the difference between a bookkeeping fix and a
+    # product fix, and the live database showed which one it was: a user message
+    # written at 18:14 with its run still `running`, and a second run stuck the
+    # same way since 15:43 - nearly three hours, on a deployment that had booted
+    # in between and reclaimed nine *older* rows. A run that stalls after the
+    # last boot stays `running` until the next deploy, and the person watching
+    # the thread is told nothing at all. That is the whole of the reported
+    # "I messaged and nothing happened".
+    #
+    # So the same age-based, idempotent sweep runs on an interval. Nothing about
+    # its safety changes with more than one replica - only `updated_at` decides,
+    # and a conditional UPDATE makes a race a no-op - and the interval only sets
+    # how quickly a dead run becomes a sentence in the transcript rather than
+    # silence.
+    sweeper = asyncio.create_task(_sweep_orphaned_runs(settings))
+
+    # ---- and the other direction: work nobody has started yet -------------
+    #
+    # A work item with an owner used to be a record and nothing else, so a
+    # chief of staff that decomposed a goal into assigned items had started
+    # nobody while reporting that it had routed the work. `work_dispatch`
+    # claims those rows and runs their owners. It lives on a timer for the same
+    # reason the sweep does — a `create_task` fired inside a request handler
+    # dies with the request, and this has to survive a deploy — and the queue
+    # is the table, so a claimed row whose process went away is visible rather
+    # than lost.
+    dispatcher = asyncio.create_task(_dispatch_assigned_work(settings))
+    try:
+        yield
+    finally:
+        for task in (sweeper, dispatcher):
+            task.cancel()
+        for task in (sweeper, dispatcher):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
+
+async def _sweep_orphaned_runs(settings) -> None:
+    """Reclaim presumed-dead runs for as long as this process lives.
+
+    Failures are logged and the loop continues: a sweep that cannot reach the
+    database must not end the sweeper, because the next interval is very likely
+    to succeed and a silently dead sweeper is how the boot-only behaviour comes
+    back without anybody noticing.
+    """
+    interval = max(60, int(settings.run_sweep_interval_seconds))
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            async with SessionLocal() as db:
+                reclaimed = await reap_orphaned_runs(db)
+            if reclaimed:
+                logger.warning(
+                    "sweep reclaimed %d stalled run(s): %s",
+                    len(reclaimed),
+                    ", ".join(reclaimed),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - one bad sweep must not stop the rest
+            logger.warning("run sweep failed; retrying at the next interval", exc_info=True)
+
+async def _dispatch_assigned_work(settings) -> None:
+    """Start the owners of work items that have been assigned and not woken.
+
+    Same shape and same failure policy as `_sweep_orphaned_runs`: log and carry
+    on, because a pass that cannot reach the database must not end the loop —
+    a silently dead dispatcher is how assigned work goes back to sitting there,
+    which is the bug this exists to fix.
+    """
+    interval = max(5, int(settings.work_dispatch_interval_seconds))
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            async with SessionLocal() as db:
+                started = await work_dispatch.dispatch_pending(db)
+            for item in started:
+                if item.error:
+                    logger.warning(
+                        "work item %s could not be worked by %s: %s",
+                        item.work_item_id,
+                        item.bot_slug,
+                        item.error,
+                    )
+                else:
+                    logger.info(
+                        "work item %s started %s (run %s)",
+                        item.work_item_id,
+                        item.bot_slug,
+                        item.run_id,
+                    )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - one bad pass must not stop the rest
+            logger.warning(
+                "work dispatch pass failed; retrying at the next interval", exc_info=True
+            )
 
 
 def create_app() -> FastAPI:

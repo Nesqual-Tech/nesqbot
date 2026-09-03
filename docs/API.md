@@ -20,8 +20,8 @@ All list endpoints are scoped to the calling user where an owner column exists.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/bots` | list |
-| POST | `/bots` | create custom |
+| GET | `/bots` | list. Carries the persona (`email`, `voice`, `signature`, `desktop_habits`) but not `system_prompt` — four short strings are cheaper than a round trip per bot, five system prompts are not |
+| POST | `/bots` | create custom. Persona fields optional |
 | GET | `/bots/providers` | `{azure, openai, anthropic, google}` — which providers this deployment can actually reach right now (live credential resolved), for the setup wizard's and Builder's provider picker |
 | GET | `/bots/providers/credentials` | app-typed provider keys (`provider_credentials` table), never the key itself — `{provider, configured, key_hint, base_url, updated_at}` per provider. Env-configured providers never appear as `configured` here even when live; this is only the app-writable layer on top |
 | POST | `/bots/providers/{provider}/credential` | `{api_key, base_url?}` — save a key from the app (an upsert; POST rather than PUT because the Container Apps ingress `corsPolicy` in `infra/azure/main.bicep` does not allow PUT, and that check sits ahead of the app's own CORS middleware — see the comment on the route). Additive only: an operator's env var for the same provider always wins, see `services/provider_credentials.py`. Encrypted in Postgres with a key derived from `JWT_SECRET`; 400 on an unknown provider or a blank key |
@@ -29,7 +29,8 @@ All list endpoints are scoped to the calling user where an owner column exists.
 | GET | `/bots/providers/{provider}/models` | model/deployment names live-queried from the provider itself, using whichever credential resolves — `{provider, models}`. Azure calls its `/openai/deployments` endpoint (not `.models.list()`, which is the base-model *catalog* Azure offers to deploy, not what this account actually has deployed); the other three use their SDK's own `.models.list()`. 502 with the provider's own failure detail when nothing resolves or the call fails — never a silent empty list |
 | POST | `/bots/system/reseed` | re-run system-bot seeding from `bots/*.yaml` without restarting the API; creates new slugs, reconciles existing system bots, never touches a custom bot |
 | GET | `/bots/{bot_id}` | single, 404 if missing |
-| PATCH | `/bots/{bot_id}` | `UpdateBotIn`: name/role/system_prompt/daily_budget_usd/desktop_profile/model_provider/model_name; 403 changing prompt/slug on system bots. `model_provider`/`model_name` (`azure`\|`openai`\|`anthropic`\|`google`) pin this bot to one provider/model, bypassing tier routing; `null` on both reverts to tier routing; setting one without the other is a 422 |
+| GET | `/bots/{bot_id}/persona` | who the bot is: its `system_prompt`, its persona (`email` is identity only — the From line on a draft, with no inbox behind it), bound connectors (reference only, never the secret), the inbound channels/addresses routed to it, and today's spend. Separate from the row above so the sidebar's list request stays lean |
+| PATCH | `/bots/{bot_id}` | `UpdateBotIn`: name/role/system_prompt/daily_budget_usd/desktop_profile/model_provider/model_name/email/voice/signature/desktop_habits; 403 changing prompt/slug on system bots. The persona four *are* editable on a system bot — the standing prompt is locked, the voice it is delivered in is not — and `null` or `""` clears one. `model_provider`/`model_name` (`azure`\|`openai`\|`anthropic`\|`google`) pin this bot to one provider/model, bypassing tier routing; `null` on both reverts to tier routing; setting one without the other is a 422 |
 | DELETE | `/bots/{bot_id}` | custom bots only (403 on `is_system`); stops desktop first |
 
 ### Bots working together
@@ -88,6 +89,8 @@ Four invariants hold whatever the mechanism looks like:
 | --- | --- | --- |
 | GET | `/threads` | own threads |
 | POST | `/threads` | create |
+| POST | `/threads/{thread_id}/bots` | seat more bots on an existing thread — additive and idempotent. The roster is what makes delegation possible: a bot can only hand work to somebody in the room |
+| DELETE | `/threads/{thread_id}/bots/{bot_id}` | unseat one bot; 409 `last_bot_in_thread` if it is the only one, since a thread with no bots cannot answer |
 | DELETE | `/threads/{thread_id}` | cascade |
 | GET | `/threads/{thread_id}/messages` | ordered |
 | POST | `/threads/{thread_id}/messages` | non-streaming turn (existing response shape, unchanged) |
@@ -166,7 +169,7 @@ Both event unions also carry an `unknown` arm (`{event: "unknown", name, data}`)
 | GET | `/approvals?status=pending&bot_id=` | list |
 | POST | `/approvals` | create directly: `{bot_id, run_id?, risk, title, summary, payload}` using the held-payload shape below → `ApprovalOut`. Used by routine steps of `type: "approval"` |
 | GET | `/approvals/{id}` | single |
-| POST | `/approvals/{id}/decide` | `{decision: approved\|rejected, note?}`. On `approved` the API MUST execute the held action via `services.approvals.execute_approved(...)` and return `ApprovalOut` plus `execution` `{ok, result\|error}`. Deciding a non-pending approval → 409. **Deciding also continues the task.** A run parked in `awaiting_approval` resumes through the same path as the takeover Continue button — same persisted state, same conversation rebuild, same conditional status claim, so a double-press is a no-op. The continuation rides back as `execution.continuation`, a superset of `{ok, result\|error}`, so no client breaks. The resumed model is told whether the approved action actually **ran** or was approved and then refused at execution; a rejection is reported as a person's decision, not to be retried or routed around |
+| POST | `/approvals/{id}/decide` | `{decision: approved\|rejected, note?}`. On `approved` the API MUST execute the held action via `services.approvals.execute_approved(...)` and return `ApprovalOut` plus `execution` `{ok, result\|error}`. Deciding a non-pending approval → 409. **Deciding also continues the task.** A run parked in `awaiting_approval` resumes through the same path as the takeover Continue button — same persisted state, same conversation rebuild, same conditional status claim, so a double-press is a no-op. The continuation rides back as `execution.continuation`, a superset of `{ok, result\|error}`, so no client breaks. The resumed model is told whether the approved action actually **ran** or was approved and then refused at execution; a rejection is reported as a person's decision, not to be retried or routed around. The `execution.continuation` block reports that the parked run was *started* (`{continued: true, status: "running"}`) rather than what it went on to do: the agent loop runs on a background task, for the same reason `POST /runs/{run_id}/resume` does |
 | POST | `/approvals/{id}/expire` | mark expired (sweeper) |
 
 ### Standing permissions
@@ -239,7 +242,8 @@ An approval with neither key and no `run_id` has no knowable human. This is the 
 | DELETE | `/integrations/connectors/{id}` | non-first-party only |
 | GET | `/bots/{bot_id}/connectors` | bindings + status |
 | POST | `/bots/{bot_id}/connectors/{connector_id}` | bind/update |
-| DELETE | `/bots/{bot_id}/connectors/{connector_id}` | unbind |
+| DELETE | `/bots/{bot_id}/connectors/{connector_id}` | unbind; deletes the app-stored credential when `secret_ref` is an `app://` one |
+| POST | `/bots/{bot_id}/connectors/{connector_id}/secret` | hand over the credential *value*; stored server-side (Key Vault when the identity may write, otherwise encrypted at rest) and answers `{backend, secret_ref}`. `secret_ref` on bind takes a reference only — a value pasted there is refused |
 | POST | `/bots/{bot_id}/connectors/{connector_id}/actions/{action}` | execute; when `requires_approval(risk)` → 201 `{approval_id, status:"pending_approval"}` instead of executing |
 
 ## MCP
@@ -318,7 +322,7 @@ noVNC files. Close codes: `4401` unauthorised, `4404` no desktop, `4409` ticket 
 
 A work item is an owned, transferable unit of work — the object a bot hands to another bot. It is
 generalised with a `type` (`lead`, `ticket`, `invoice`, …) rather than modelled as a `leads` table:
-the transfer ledger is the differentiator (`docs/competitive-analysis.md`), and a differentiator
+the transfer ledger is the differentiator (`docs/architecture.md`), and a differentiator
 wants one place to be queried from. Owner-scoped to the human via `work_items.owner_user_id`, which
 never changes; only `owner_bot_id` moves. Not-yours is 404, never 403.
 
@@ -330,11 +334,12 @@ was handed over.
 | Method | Path | Notes |
 | --- | --- | --- |
 | GET | `/work-items?type=&status=&owner_bot_id=&limit=` | `WorkItemOut` list, newest first, scoped to the calling user. `owner_bot_id` is the "what is this bot holding?" queue view |
-| POST | `/work-items` | Create, already owned by a bot: `WorkItemIn {owner_bot_id, title, type?, summary?, status?, thread_id?, detail?, keys?, reason?}` → `WorkItemOut`. Writes the **opening ledger row** with `from_bot_id: null`, so "who has held this" has no gap at the front. `owner_bot_id` must be a bot the caller can see; `thread_id` must be a thread they own |
+| POST | `/work-items` | Create, already owned by a bot: `WorkItemIn {owner_bot_id, title, type?, summary?, status?, thread_id?, detail?, keys?, reason?}` → `WorkItemOut`. Writes the **opening ledger row** with `from_bot_id: null`, so "who has held this" has no gap at the front. `owner_bot_id` must be a bot the caller can see; `thread_id` must be a thread they own. An item created `open` **starts its owner** the same way a transfer does; create it `waiting` for a record with no run |
 | GET | `/work-items/{work_item_id}` | Single, 404 if not the caller's |
 | PATCH | `/work-items/{work_item_id}` | `UpdateWorkItemIn`: title/summary/status/resolution/thread_id/detail/keys. Sending `owner_bot_id` is **422**, not a silent drop — ownership moves only through `/transfer`, which is the path that writes the ledger, and a 200 that dropped the field would read as a successful handover with no record. Keyed on presence, so an explicit `null` is refused too. This is the one input model in the API that rejects unknown keys. `keys` replaces the whole set rather than merging. Setting `status: "closed"` stamps `closed_at`; moving off it clears the stamp |
 | DELETE | `/work-items/{work_item_id}` | Deletes the item and its keys → `OkOut`. **The transfer ledger survives** — see above |
-| POST | `/work-items/{work_item_id}/transfer` | Hand the item to another bot: `WorkItemTransferIn {to_bot_id, reason, actor_bot_id?, detail?}` → `WorkItemTransferResultOut {ok, transferred, work_item, transfer?, detail?}`. `reason` is **required** (`min_length=1`): a ledger of timestamps without reasons is no better than what the competitor does not have. Idempotent — transferring to the bot that already holds it returns `transferred: false` and writes no second ledger row, same shape and reasoning as `ResumeRunOut.resumed`. 409 `work_item_closed` on a closed item; 404 on a target bot the caller cannot see. Not risk-gated, by decision: a transfer reaches nothing outside the tenant and is undone by transferring back |
+| POST | `/work-items/{work_item_id}/transfer` | Hand the item to another bot: `WorkItemTransferIn {to_bot_id, reason, actor_bot_id?, detail?}` → `WorkItemTransferResultOut {ok, transferred, work_item, transfer?, detail?}`. `reason` is **required** (`min_length=1`): a ledger of timestamps without reasons is no better than what the competitor does not have. Idempotent — transferring to the bot that already holds it returns `transferred: false` and writes no second ledger row, same shape and reasoning as `ResumeRunOut.resumed`. 409 `work_item_closed` on a closed item; 404 on a target bot the caller cannot see. Not risk-gated, by decision: a transfer reaches nothing outside the tenant and is undone by transferring back. **The new owner is started on it**: the item goes back to `open` with its dispatch stamp cleared, and the API's dispatcher gives the receiving bot its own run within seconds (`services/work_dispatch.py`). Set the item `waiting` first to reassign without waking anybody |
+| GET | `/work-items` | list, newest first. `WorkItemOut.dispatched_at` is `null` with an owner and `status: open` for exactly as long as the item is queued for its bot, which is what a queue view reads to say "starting" |
 | GET | `/work-items/{work_item_id}/transfers` | `WorkItemTransferOut` list, newest first — the handover ledger. Reachability is checked against the work item, not the ledger rows |
 
 `status` is one of `open` (nobody has touched it), `working` (the owning bot is acting), `waiting`
@@ -424,7 +429,7 @@ with no resolvable human gets no run at all and is recorded `unroutable`, never 
 ## Rehearsal and reversibility
 
 Answers the two gaps that make agent products unfit for customer-facing work: you cannot
-rehearse an action, and you cannot take it back. See `docs/competitive-analysis.md`.
+rehearse an action, and you cannot take it back. See `docs/architecture.md`.
 
 A dry run performs **no** side effects. Every outbound effect in the service layer passes
 through one chokepoint, `services.simulation.perform`, which either records the intent or

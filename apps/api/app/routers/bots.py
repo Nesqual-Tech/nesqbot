@@ -8,7 +8,7 @@ import uuid
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
@@ -19,6 +19,9 @@ from app.models import (
     AuditEvent,
     Bot,
     BotConnector,
+    Connector,
+    InboundSource,
+    McpServer,
     Message,
     Run,
     User,
@@ -30,7 +33,10 @@ from app.routers.deps import (
     model_router,
 )
 from app.schemas import (
+    BotConnectorSummary,
+    BotInboxSummary,
     BotOut,
+    BotPersonaOut,
     BudgetIn,
     CreateCustomBotIn,
     OkOut,
@@ -65,9 +71,53 @@ def _bot_out(bot: Bot) -> BotOut:
         desktop_profile=bot.desktop_profile,
         model_provider=bot.model_provider,
         model_name=bot.model_name,
+        email=bot.email,
+        voice=bot.voice,
+        signature=bot.signature,
+        desktop_habits=bot.desktop_habits,
         created_at=bot.created_at,
     )
 
+
+#: Fields where `null` means "clear this", not "leave it alone".
+#:
+#: `update_bot` skips `None` for everything else, because a PATCH body is
+#: mostly "the fields I am changing" and a client that helpfully sends
+#: `role: null` should not blank the role. These are the exceptions: clearing
+#: a model override is how a bot goes back to tier routing, and removing a
+#: persona field is a thing a person does on purpose.
+_NULLABLE_BOT_FIELDS = (
+    "model_provider",
+    "model_name",
+    "email",
+    "voice",
+    "signature",
+    "desktop_habits",
+)
+
+
+
+#: Config keys an inbound source may carry its address under.
+#:
+#: `inbound_sources.config` is provider-shaped JSON rather than a fixed
+#: schema - a Graph subscription, a mail poller and a webhook each name the
+#: same thing differently - so the address is looked for rather than assumed,
+#: and a source with none simply has no address to show.
+_INBOX_ADDRESS_KEYS = ("address", "email", "mailbox", "from_address", "to", "user")
+
+
+def _inbox_address(config: dict | None) -> str | None:
+    """The address an inbound source listens on, if it names one.
+
+    Only ever a plain string from a known key: `config` can hold anything a
+    provider needed, and rendering an arbitrary value into a persona card is
+    how a secret ends up on screen.
+    """
+    for key in _INBOX_ADDRESS_KEYS:
+        value = (config or {}).get(key)
+        if isinstance(value, str) and value.strip() and "@" in value:
+            return value.strip()
+    return None
 
 @router.get("/bots", response_model=list[BotOut])
 async def list_bots(
@@ -87,6 +137,27 @@ async def create_custom_bot(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> BotOut:
+    # `connector_ids` and `mcp_ids` land in `bot_connectors.connector_id` and
+    # `bot_mcp.mcp_id`, both foreign keys, and were going in unchecked — an id
+    # the catalog does not have (a connector removed since the client cached the
+    # list, an MCP server deleted in another window) failed at the commit below,
+    # and `app.errors`' catch-all turns an IntegrityError into
+    # `{"detail": "internal_error", "code": "internal_error", …}`. That is a 500
+    # with no usable code on a routine "create a bot" click. Checked before the
+    # bot row is written so a rejected request also leaves nothing behind.
+    #
+    # MCP visibility matches `routers/integrations.py::_get_mcp`: a server with
+    # no owner is shared, otherwise only its owner may see it — so this is also
+    # what stops one user attaching another user's private MCP server, whose
+    # tools their bot would then be able to call.
+    for cid in dict.fromkeys(body.connector_ids):
+        if await db.get(Connector, cid) is None:
+            raise AppError(404, "connector_not_found", f"Connector {cid!r} not found")
+    for mid in dict.fromkeys(body.mcp_ids):
+        mcp = await db.get(McpServer, mid)
+        if mcp is None or mcp.owner_user_id not in (None, user.id):
+            raise AppError(404, "mcp_not_found", "MCP server not found")
+
     slug = _slugify(body.name) or f"bot_{uuid.uuid4().hex[:8]}"
     existing = await db.execute(select(Bot).where(Bot.slug == slug))
     if existing.scalar_one_or_none():
@@ -102,13 +173,23 @@ async def create_custom_bot(
         daily_budget_usd=Decimal(str(body.daily_budget_usd)),
         model_provider=body.model_provider,
         model_name=body.model_name,
+        # `or None` rather than the value: these arrive from text inputs, and
+        # an untouched one sends "" — which would print an empty line in the
+        # persona block the orchestrator builds.
+        email=body.email or None,
+        voice=body.voice or None,
+        signature=body.signature or None,
+        desktop_habits=body.desktop_habits or None,
     )
     db.add(bot)
     await db.commit()
     await db.refresh(bot)
-    for cid in body.connector_ids:
+    # `dict.fromkeys` for the same reason as the checks above: both link tables
+    # have a composite primary key, so a repeated id in the request body was
+    # itself a 500. Order is preserved, unlike `set()`.
+    for cid in dict.fromkeys(body.connector_ids):
         db.add(BotConnector(bot_id=bot.id, connector_id=cid, status="disconnected"))
-    for mid in body.mcp_ids:
+    for mid in dict.fromkeys(body.mcp_ids):
         await mcp_registry.attach_mcp(db, bot.id, mid)
     await db.commit()
     return _bot_out(bot)
@@ -272,6 +353,92 @@ async def get_bot(
     return _bot_out(bot)
 
 
+@router.get("/bots/{bot_id}/persona", response_model=BotPersonaOut)
+async def get_bot_persona(
+    bot_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> BotPersonaOut:
+    """Who this bot is: its prompt, its connectors, its inboxes, its spend.
+
+    The gap this closes was total. `system_prompt` was write-only across the
+    entire API - `CreateCustomBotIn` and `UpdateBotIn` accept one and nothing
+    ever returned one - so the desktop app could show a name and a one-line
+    role and nothing else. Reported as "the bots have personas, with emails and
+    so on but on the desktop app, i can't see that", which was exactly true:
+    every field here was already in the database and none of it was reachable.
+
+    Separate from `GET /bots/{id}` rather than folded into `BotOut` because the
+    sidebar's list request draws five bots on every launch and does not need
+    five system prompts to do it.
+
+    Secrets stay references. `secret_ref` is the pointer `services.secrets`
+    resolves in-process; the resolved value never reaches a row or a response,
+    and this endpoint does not resolve anything.
+    """
+    bot = await get_visible_bot(db, bot_id, user)
+
+    bound = (
+        (
+            await db.execute(
+                select(BotConnector, Connector)
+                .join(Connector, Connector.id == BotConnector.connector_id)
+                .where(BotConnector.bot_id == bot.id)
+                .order_by(Connector.name)
+            )
+        )
+        .all()
+    )
+    connectors = [
+        BotConnectorSummary(
+            connector_id=link.connector_id,
+            name=connector.name,
+            status=link.status,
+            secret_ref=link.secret_ref,
+        )
+        for link, connector in bound
+    ]
+
+    # An inbound source routes to a roster (`bot_ids`) or to a single bot
+    # (`bot_id`, the older shape). Both are checked, because a deployment
+    # configured before the roster existed still has live sources.
+    sources = (
+        (
+            await db.execute(
+                select(InboundSource).where(
+                    InboundSource.owner_user_id == user.id,
+                    or_(
+                        InboundSource.bot_id == bot.id,
+                        InboundSource.bot_ids.contains([str(bot.id)]),
+                    ),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    inboxes = [
+        BotInboxSummary(
+            slug=source.slug,
+            name=source.name,
+            kind=source.kind,
+            channel=source.channel,
+            address=_inbox_address(source.config),
+            enabled=source.enabled,
+            last_event_at=source.last_event_at,
+        )
+        for source in sources
+    ]
+
+    return BotPersonaOut(
+        **_bot_out(bot).model_dump(),
+        system_prompt=bot.system_prompt,
+        connectors=connectors,
+        inboxes=inboxes,
+        spent_usd_today=float(await model_router.spent_today_usd(db, bot.id)),
+    )
+
+
 @router.patch("/bots/{bot_id}", response_model=BotOut)
 async def update_bot(
     bot_id: uuid.UUID,
@@ -302,10 +469,12 @@ async def update_bot(
         changes["daily_budget_usd"] = Decimal(str(changes["daily_budget_usd"]))
 
     for field, value in changes.items():
-        if field in ("model_provider", "model_name"):
-            # `None` is meaningful here, unlike every other field: it clears
-            # the override and reverts this bot to tier routing.
-            setattr(bot, field, value)
+        if field in _NULLABLE_BOT_FIELDS:
+            # `None` is meaningful for these, unlike every other field — see
+            # `_NULLABLE_BOT_FIELDS`. An empty string is treated as a clear
+            # too: it arrives from a text input somebody emptied, and storing
+            # "" would make the persona block below print a blank line.
+            setattr(bot, field, value or None)
             continue
         if value is not None:
             setattr(bot, field, value)

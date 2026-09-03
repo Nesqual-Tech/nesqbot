@@ -8,11 +8,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
-from app.db import get_db
+from app.db import get_db, release_transaction
 from app.models import AuditEvent, Bot, CostLedger, Routine, Run, User
 from app.routers.deps import (
     bot_visibility_clause,
@@ -44,46 +44,112 @@ EVAL_SYSTEM_PROMPT = "You are Nesq Bot under eval. Be concise and accurate."
 # ---------------------------------------------------------------------------
 
 
+#: Ledger rows returned per bot. Unchanged from the per-bot `LIMIT 50` this
+#: endpoint has always applied — see the note in `usage` about what it means for
+#: the panel that reads it.
+USAGE_ENTRY_LIMIT = 50
+
+
 @router.get("/usage", response_model=list[UsageOut])
 async def usage(
     days: int = Query(default=1, ge=1, le=90),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> list[UsageOut]:
-    """Per-bot spend for the visible bots over the last `days` calendar days."""
+    """Per-bot spend for the visible bots over the last `days` calendar days.
+
+    Three queries, not 2N+1. The old shape ran `spent_today_usd` plus a 50-row
+    ledger select *per visible bot*, and `UsagePanel.tsx` documents its
+    `refreshKey` as "the shell does it after every completed turn" — so the
+    fan-out ran on every chat turn, growing with the roster. `work_items.py`
+    names this mistake in its own words ("a query per row, which on the default
+    page of 50 is 51 round trips to render a list nobody reads past the top of")
+    and then does it correctly; this is the same fix, with the same payload.
+
+    Two things this deliberately does *not* change, both visible in the UI and
+    both wider than a query shape:
+
+    * `spent_usd_today` ignores `days` — it is always the midnight-to-now total,
+      as its name says, so `days=7` returns a today-only headline next to a
+      seven-day entry list.
+    * `entries` is capped at `USAGE_ENTRY_LIMIT` while the headline is an
+      uncapped SUM, and `useUsage.ts`'s `breakdown()` derives per-tier calls and
+      tokens by summing `entries`. For any bot past 50 ledger rows in the window
+      the panel's tier costs cannot add up to its own total.
+
+    Fixing either is a contract change to `UsageOut` (a `spent_usd_window`, or a
+    server-side tier rollup) and belongs with the client work, not here.
+    """
     bots = (await db.execute(select(Bot).where(bot_visibility_clause(user)))).scalars().all()
     midnight = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     start = midnight - timedelta(days=days - 1)
+    bot_ids = [bot.id for bot in bots]
+    if not bot_ids:
+        return []
 
-    out: list[UsageOut] = []
-    for bot in bots:
-        spent = await model_router.spent_today_usd(db, bot.id)
-        entries_q = await db.execute(
-            select(CostLedger)
-            .where(CostLedger.bot_id == bot.id, CostLedger.created_at >= start)
-            .order_by(CostLedger.created_at.desc())
-            .limit(50)
-        )
-        entries = [
-            {
-                "tier": e.tier,
-                "input_tokens": e.input_tokens,
-                "output_tokens": e.output_tokens,
-                "cost_usd": float(e.cost_usd),
-                "created_at": e.created_at.isoformat(),
-            }
-            for e in entries_q.scalars().all()
-        ]
-        out.append(
-            UsageOut(
-                bot_id=bot.id,
-                bot_name=bot.name,
-                spent_usd_today=float(spent),
-                budget_usd=float(bot.daily_budget_usd),
-                entries=entries,
+    # Query 2: today's spend for every bot at once. Same window and same
+    # `coalesce`-to-zero semantics as `ModelRouter.spent_today_usd`, which is
+    # what this replaces — a bot with no rows is absent from the result and
+    # falls back to 0 below, which is the same answer.
+    totals = await db.execute(
+        select(CostLedger.bot_id, func.coalesce(func.sum(CostLedger.cost_usd), 0))
+        .where(CostLedger.bot_id.in_(bot_ids), CostLedger.created_at >= midnight)
+        .group_by(CostLedger.bot_id)
+    )
+    spent_by_bot = dict(totals.all())
+
+    # Query 3: the newest `USAGE_ENTRY_LIMIT` rows *per bot*, which is a
+    # per-group LIMIT and therefore a window function rather than a LIMIT. `id`
+    # is a tiebreaker, not the ordering: `created_at` defaults to
+    # `clock_timestamp()` so collisions are vanishingly unlikely, but a
+    # row_number over a non-unique ordering is free to break ties differently
+    # between the ranking and the output, which would put an entry in the list
+    # at the wrong position rather than merely in an arbitrary one.
+    ranked = (
+        select(
+            CostLedger.bot_id.label("bot_id"),
+            CostLedger.tier.label("tier"),
+            CostLedger.input_tokens.label("input_tokens"),
+            CostLedger.output_tokens.label("output_tokens"),
+            CostLedger.cost_usd.label("cost_usd"),
+            CostLedger.created_at.label("created_at"),
+            func.row_number()
+            .over(
+                partition_by=CostLedger.bot_id,
+                order_by=(CostLedger.created_at.desc(), CostLedger.id.desc()),
             )
+            .label("rank"),
         )
-    return out
+        .where(CostLedger.bot_id.in_(bot_ids), CostLedger.created_at >= start)
+        .subquery()
+    )
+    rows = await db.execute(
+        select(ranked)
+        .where(ranked.c.rank <= USAGE_ENTRY_LIMIT)
+        .order_by(ranked.c.bot_id, ranked.c.rank)
+    )
+    entries_by_bot: dict[uuid.UUID, list[dict[str, Any]]] = {bot_id: [] for bot_id in bot_ids}
+    for row in rows.all():
+        entries_by_bot[row.bot_id].append(
+            {
+                "tier": row.tier,
+                "input_tokens": row.input_tokens,
+                "output_tokens": row.output_tokens,
+                "cost_usd": float(row.cost_usd),
+                "created_at": row.created_at.isoformat(),
+            }
+        )
+
+    return [
+        UsageOut(
+            bot_id=bot.id,
+            bot_name=bot.name,
+            spent_usd_today=float(spent_by_bot.get(bot.id, 0)),
+            budget_usd=float(bot.daily_budget_usd),
+            entries=entries_by_bot[bot.id],
+        )
+        for bot in bots
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -91,7 +157,16 @@ async def usage(
 # ---------------------------------------------------------------------------
 
 
-async def _run_case(case: EvalCaseIn) -> dict[str, Any]:
+async def _run_case(db: AsyncSession, case: EvalCaseIn) -> dict[str, Any]:
+    # `agent_turn` routes to `mini` (`route_task`), so this is not the
+    # reason-tier call the incident in `db.release_transaction` clocked at 57.0
+    # seconds. It is still one outbound model call with
+    # `request_timeout_seconds = 60.0` and the SDK's default two retries, and
+    # `run_eval_suite` below runs one per case in a serial list comprehension,
+    # so a suite holds a single transaction for the sum of its cases. Released
+    # per case rather than once before the loop, so a case that starts touching
+    # `db` cannot silently re-arm it.
+    await release_transaction(db)
     result = await model_router.chat(
         task="agent_turn",
         messages=[
@@ -117,7 +192,7 @@ async def run_eval(
     user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     """Cheap mini-tier eval for promoting routines - no flagship."""
-    return await _run_case(body)
+    return await _run_case(db, body)
 
 
 @router.post("/evals/suite", response_model=EvalSuiteOut)
@@ -126,7 +201,7 @@ async def run_eval_suite(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> EvalSuiteOut:
-    results = [await _run_case(case) for case in body.cases]
+    results = [await _run_case(db, case) for case in body.cases]
     return EvalSuiteOut(
         passed=sum(1 for r in results if r["passed"]),
         total=len(results),

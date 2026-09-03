@@ -46,15 +46,18 @@ export interface Bot {
   name: string
   role: string
   /**
-   * Write-only in practice. `BotOut` does not return it, so it is absent on
-   * every read — `GET /bots`, `GET /bots/{id}`, and the bodies echoed back
-   * by create and update. It is required going *in*
-   * (`CreateCustomBotRequest.system_prompt`) and optional on
-   * `UpdateBotRequest`.
+   * Absent on every ordinary read — `GET /bots`, `GET /bots/{id}` and the
+   * bodies echoed back by create and update all return `BotOut`, which does
+   * not carry it. Required going *in* (`CreateCustomBotRequest`) and optional
+   * on `UpdateBotRequest`.
    *
-   * There is no "summary vs detail" split here because the API has no detail
-   * endpoint: the list and the single-bot route return the identical shape.
-   * A `BotSummary` type would invent a distinction the API does not make.
+   * It *is* returned by `GET /bots/{id}/persona` — see `BotPersona`. That
+   * endpoint exists because this field being write-only everywhere else meant
+   * no client could show a bot's persona, or even re-read the prompt it was
+   * about to overwrite: the desktop app could display a name and a one-line
+   * role and nothing more. The split is deliberate rather than invented — the
+   * list request draws a sidebar on every launch and has no use for five
+   * system prompts.
    */
   system_prompt?: string
   is_system: boolean
@@ -69,6 +72,20 @@ export interface Bot {
    */
   model_provider: ModelProvider | null
   model_name: string | null
+  /**
+   * Persona — who the bot is, as opposed to `system_prompt`'s what it does.
+   * Returned on every read, including the list request: the chat header and
+   * the profile card both want the address and the sign-off, and four short
+   * strings cost less than a second round trip per bot.
+   *
+   * `email` is identity, not a mailbox. It is the From line on a draft; mail
+   * only arrives through a configured inbound source, and sending waits for a
+   * human even when a mail connector is bound.
+   */
+  email: string | null
+  voice: string | null
+  signature: string | null
+  desktop_habits: string | null
   created_at: string
   /** Null for system bots; set for custom bots created through `POST /bots`. */
   owner_user_id?: Uuid | null
@@ -517,6 +534,17 @@ export interface BotConnectorBinding {
   status: ConnectorBindingStatus
   /** Key Vault reference, never the secret itself. */
   secret_ref?: string | null
+  /**
+   * Which store actually holds the credential.
+   *
+   * `key_vault` when the value is in the vault (a `kv://` ref, or one the API
+   * wrote there itself), `app_encrypted` when the vault refused the write and
+   * it is Fernet-encrypted in Postgres, `env` for an `env://` ref, `none` when
+   * the binding has no credential at all. Reported so the UI cannot imply a
+   * secret reached the vault when it did not — see
+   * `POST /bots/{bot_id}/connectors/{connector_id}/secret`.
+   */
+  secret_backend?: "key_vault" | "app_encrypted" | "env" | "none"
   risk_default: RiskClass
   first_party: boolean
   actions: ConnectorAction[]
@@ -863,6 +891,16 @@ export interface WorkItem {
    */
   last_event_at?: IsoDateTime | null
   closed_at?: IsoDateTime | null
+  /**
+   * When the owning bot was woken about this item, and on which run.
+   *
+   * `null` with an owner and `status: "open"` is the queue: this item has been
+   * assigned and its bot is about to start on it. The API dispatcher claims
+   * those rows on a short timer, stamps this, and gives the owner its own run
+   * — so a queue view can say "starting" without inferring it from anything.
+   */
+  dispatched_at?: IsoDateTime | null
+  dispatch_run_id?: Uuid | null
 }
 
 /**
@@ -1022,4 +1060,50 @@ export interface InboundPollResult {
   duplicates: number
   event_ids: Uuid[]
   detail?: string | null
+}
+
+/**
+ * One connector a bot holds. `secret_ref` is the *reference*
+ * (`env://NAME`, `kv://vault/name`, `app://connector/…`) that
+ * `services.secrets` resolves in-process; the resolved credential never
+ * reaches a row or a response.
+ */
+export interface BotConnectorSummary {
+  connector_id: string
+  name: string
+  status: string
+  secret_ref: string | null
+}
+
+/**
+ * A channel the outside world reaches a bot on — the "emails" half of a
+ * persona. One `inbound_sources` row, which routes what arrives to a roster.
+ *
+ * `address` is looked for in the source's provider-shaped `config` rather than
+ * assumed: a Graph subscription, a mail poller and a webhook each name the
+ * same thing differently, and a source that names none simply has none.
+ */
+export interface BotInboxSummary {
+  slug: string
+  name: string
+  kind: string
+  channel: string
+  address: string | null
+  enabled: boolean
+  last_event_at: string | null
+}
+
+/**
+ * `GET /bots/{bot_id}/persona` — who a bot is, not just what it is called.
+ *
+ * Every field was already in the database and none of it was reachable, which
+ * is what "the bots have personas, with emails and so on but on the desktop
+ * app, i can't see that" meant literally.
+ */
+export interface BotPersona extends Bot {
+  system_prompt: string
+  connectors: BotConnectorSummary[]
+  inboxes: BotInboxSummary[]
+  /** Today's spend, so a persona view can answer "can this bot still work?" */
+  spent_usd_today: number
 }

@@ -36,8 +36,8 @@ from app.models import (
     Run,
     StandingApproval,
 )
+from app.services import background, simulation, standing_approvals
 from app.services import browser as B
-from app.services import simulation, standing_approvals
 from app.services.orchestrator import (
     RUN_AGENT_KEY,
     STANDING_GRANTED,
@@ -136,11 +136,22 @@ def payload(**kwargs) -> dict:
 
 
 async def decide(authed, approval, decision="approved", note=None) -> dict:
+    """Decide, then wait for the continuation the route detached.
+
+    The decide route claims the run and hands the agent loop to
+    `services.background` rather than driving it inside the request — see the
+    note there on the Approve button that span for minutes and left runs
+    hanging. Anything a test asserts about what the bot *then said* has to wait
+    for that task, and on this harness it also has to: the test session and the
+    background one share a single asyncpg connection, which is not safe to use
+    from two places at once.
+    """
     body: dict = {"decision": decision}
     if note is not None:
         body["note"] = note
     response = await authed.post(f"/api/approvals/{approval.id}/decide", json=body)
     assert response.status_code == 200, response.text
+    await background.drain()
     return response.json()
 
 

@@ -722,12 +722,53 @@ async def test_the_whole_run_costs_what_it_says_on_the_tin(before_after):
 #: the request is three times the size the sidecar would normally return. A
 #: ceiling derived from the comfortable case is a ceiling that fails on a
 #: Tuesday.
-AGENT_REQUEST_TOKEN_CEILING = 12_500
+#:
+#: Raised from 12,500 by `RESEARCH_TRADECRAFT`, which put 297 tokens into the
+#: static system block — the paragraph that turns "find companies that need a
+#: CRM" into searches for things pages actually contain. That is a deliberate
+#: purchase and it is recorded here rather than absorbed, which is the whole
+#: point of the number: the failure these tests exist to catch is *unnoticed*
+#: growth, and a ceiling nobody may ever raise is a ceiling somebody edits
+#: without saying why.
+#:
+#: Raised again, from 12,800, by delegation reaching the whole team. The
+#: hand-off block was previously carried only on a thread with more than one
+#: bot seated on it — which the desktop app had no way to create, so in the
+#: shipped product it was carried almost never. `_delegate_targets` is now the
+#: person's own bots, so every delegating run pays for the roster and the
+#: paragraph that says a tool call is the only thing which reaches a teammate.
+#: Measured worst went from 12,790 to 12,878 on the adversarial DOM run.
+#:
+#: The wording was tightened first and the number moved second: the address
+#: sentence in `persona_block` went from four clauses to one, and the roster
+#: from `slug — name, role` to `slug: role`. What was not touched is any
+#: sentence that exists because of an observed failure — "naming them in your
+#: reply does not wake them", "a turn that only files rows has started nobody"
+#: — because those two are why the feature works at all.
+AGENT_REQUEST_TOKEN_CEILING = 13_000
 
 #: What an *average* request may carry. This is the number that decides whether
 #: Grok is reachable, because 50,000-tokens-per-60-seconds is a rate and a rate
 #: is paid on the mean, not on the worst.
-AGENT_REQUEST_TOKEN_MEAN = 9_500
+#:
+#: The same 297 tokens, and here is what they cost against that rate: 5.28
+#: requests a minute at the old mean of 9,474, 5.12 at the new one. An agent loop
+#: does not notice a sixth of a request per minute; a bot that searches for a
+#: sentence no page contains wastes whole runs.
+#:
+#: Raised from 9,800 for the reason on the ceiling above: the hand-off block is
+#: now carried by every delegating run instead of by almost none. Measured mean
+#: 9,998.
+#:
+#: What this number governs has also changed since it was written, and that is
+#: worth stating because it is why 200 tokens is affordable here. When this was
+#: set, every iteration of the agent loop asked for `deep_plan` and therefore
+#: went to the reason tier — so the mean was paid dozens of times per run
+#: against 50,000 tokens a minute. `route_task` now sends an ordinary
+#: continuation to `agent_step`, which is `mini` on the shared account at
+#: capacity 250; the reason tier sees the opening plan, a recovery after
+#: failures and a re-prompt. A handful of calls, not dozens.
+AGENT_REQUEST_TOKEN_MEAN = 10_100
 
 
 def _mean(values) -> int:
@@ -766,7 +807,14 @@ async def test_the_mean_is_what_makes_a_50k_per_minute_endpoint_reachable():
     request cap, not the token cap, as the binding constraint.
     """
     steps_per_minute = 50_000 // AGENT_REQUEST_TOKEN_MEAN
-    assert steps_per_minute >= 5
+    # Four, not five, since the mean rose to 10,100 — and four is now the right
+    # floor rather than a relaxed one: `route_task` sends ordinary loop
+    # continuations to `agent_step`/`mini` (capacity 250) and keeps the reason
+    # tier for the opening plan, a recovery and a re-prompt. This bounds a
+    # handful of calls per run, not the whole loop. Below four, a single run's
+    # planning calls would start queueing against each other, which is the
+    # thing worth catching.
+    assert steps_per_minute >= 4
     # And a sanity check on the other limit, so a future reduction does not
     # quietly move the bottleneck without anyone noticing which one it is.
     assert steps_per_minute <= 50, "at this size the 50-requests-a-minute cap binds first"

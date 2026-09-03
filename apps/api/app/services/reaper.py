@@ -30,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import AuditEvent, Run
+from app.models import AuditEvent, Bot, Message, Run, Thread
 
 logger = logging.getLogger("nesqbot.reaper")
 
@@ -59,7 +59,7 @@ async def reap_orphaned_runs(
     cutoff = (now or datetime.now(timezone.utc)) - stale_after
 
     found = await db.execute(
-        select(Run.id, Run.bot_id, Run.status).where(
+        select(Run.id, Run.bot_id, Run.status, Run.thread_id).where(
             Run.status.in_(ACTIVE_STATUSES),
             or_(Run.updated_at < cutoff, Run.updated_at.is_(None)),
         )
@@ -69,7 +69,7 @@ async def reap_orphaned_runs(
         return []
 
     claimed: list[str] = []
-    for run_id, bot_id, was in rows:
+    for run_id, bot_id, was, thread_id in rows:
         # One conditional UPDATE per run rather than one sweeping statement: two
         # replicas booting together would otherwise both "reap" the same rows and
         # both write an audit event. The status predicate makes the loser a no-op.
@@ -93,6 +93,7 @@ async def reap_orphaned_runs(
                 detail={"run_id": str(run_id), "from_status": was, "reason": "process_gone"},
             )
         )
+        await _say_so_in_the_thread(db, run_id=run_id, bot_id=bot_id, thread_id=thread_id)
         claimed.append(str(run_id))
 
     await db.commit()
@@ -101,3 +102,57 @@ async def reap_orphaned_runs(
             "reaped %d run(s) with no live process: %s", len(claimed), ", ".join(claimed)
         )
     return claimed
+
+
+async def _say_so_in_the_thread(
+    db: AsyncSession, *, run_id, bot_id, thread_id
+) -> None:
+    """Tell the person, in the thread they are looking at, that it stopped.
+
+    The gap this closes, measured on the live database: a user message written
+    at 18:14:07, its run still `running` with no reply, and a second run from
+    15:43 in the same state. The report was *"I messaged and nothing happened
+    at all"* — which was exactly true. An assistant message is only written when
+    a turn *finishes*, so a turn killed by a deploy, a scale-in or a stall
+    leaves the transcript holding the person's own message and nothing else,
+    for ever. Marking the row `interrupted` fixed the *bookkeeping* and changed
+    nothing about what the person could see.
+
+    So the reap writes the sentence the dead turn never got to write. It says
+    what happened, that nothing more is coming, and what to do — which is the
+    difference between a product that failed and a product that appears to
+    ignore you.
+
+    Skipped for a run with no thread (a routine, an inbound handler): there is
+    nowhere to say it and nobody watching a transcript for it. Failures here are
+    swallowed on purpose — this is the reaper's courtesy, not its job, and a
+    thread that has since been deleted must not stop the run being reclaimed.
+    """
+    if thread_id is None:
+        return
+    try:
+        thread = await db.get(Thread, thread_id)
+        if thread is None:
+            return
+        bot = await db.get(Bot, bot_id) if bot_id else None
+        who = bot.name if bot is not None else "The bot"
+        db.add(
+            Message(
+                thread_id=thread_id,
+                bot_id=bot_id,
+                role="assistant",
+                content=(
+                    f"**{who} stopped mid-task and nothing more is coming.** The turn was "
+                    "still in flight when its process went away — a deploy, a restart, or "
+                    "a step that stalled — so whatever it had done is not written down "
+                    "here and no work is continuing in the background.\n\n"
+                    "Send the message again to start it over. If this keeps happening on "
+                    "the same request, say so: a turn that dies in the same place twice is "
+                    "a bug worth chasing rather than bad luck."
+                ),
+                meta={"interrupted_run_id": str(run_id), "reason": "process_gone"},
+            )
+        )
+        thread.updated_at = datetime.now(timezone.utc)
+    except Exception:  # noqa: BLE001 - never let the courtesy block the reclaim
+        logger.warning("could not post an interruption note for run %s", run_id, exc_info=True)

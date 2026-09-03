@@ -381,8 +381,12 @@ async def test_the_woken_run_can_delegate_because_the_thread_has_a_roster(
         path=(bot_a.slug,),
         root_run_id=uuid.uuid4(),
     )
-    targets = await Orchestrator()._delegate_targets(db, thread, bot_a, chain)
-    assert [b.id for b in targets] == [sales.id]
+    targets = await Orchestrator()._delegate_targets(db, thread, bot_a, chain, user_a)
+    # `sales` is reachable, which is what this lane exists to prove. The list is
+    # this person's whole team now rather than the thread roster - see
+    # `_delegate_targets` - so it is checked by membership, not by equality.
+    assert sales.id in {b.id for b in targets}
+    assert bot_a.id not in {b.id for b in targets}
 
 
 async def test_a_roster_entry_the_owner_can_no_longer_see_is_not_seated(

@@ -39,7 +39,7 @@ from app.services.orchestrator import (
     TOOL_DELEGATE_TO_BOT,
 )
 from app.services.risk import ACTION_RISKS, classify_action_risk
-from tests.services.conftest import acts, call
+from tests.services.conftest import acts, call, says
 
 # ---------------------------------------------------------------------------
 # Harness
@@ -304,6 +304,13 @@ async def test_the_delegated_prompt_is_a_brief_not_a_conversation(
     replaying `history[-20:]` verbatim, which is what an ordinary `_turn` does.
     The assertion is a ratio rather than an absolute, because the absolute moves
     with the bots' own system prompts and this is a claim about the window.
+
+    The system message is subtracted from both sides for the same reason, and
+    that correction is worth stating: both variants pay for the identical
+    vocabulary block, so leaving it in makes this a claim about the size of
+    `desktop_static_block()` as much as about the window. It was left in, and
+    adding a paragraph to the shared prompt duly failed this test while the
+    window it is guarding had not changed by a byte.
     """
     thread = await make_thread(avery, [lead_bot, sales_bot])
     for index in range(24):
@@ -329,11 +336,15 @@ async def test_the_delegated_prompt_is_a_brief_not_a_conversation(
     await turn_as(orchestrator, db, avery, thread, lead_bot)
 
     child = orchestrator.router.seen[1]
-    actual = count_text_tokens(child)
-    full_history = count_text_tokens(
-        [child[0]]
-        + [{"role": m.role, "content": m.content} for m in history[-20:]]
-        + [child[-1]]
+    shared = count_text_tokens([child[0]])
+    actual = count_text_tokens(child) - shared
+    full_history = (
+        count_text_tokens(
+            [child[0]]
+            + [{"role": m.role, "content": m.content} for m in history[-20:]]
+            + [child[-1]]
+        )
+        - shared
     )
     # Not a marginal trim: the window is what keeps a delegated opening call
     # roughly the size of the brief plus the bot's own prompt.
@@ -703,8 +714,9 @@ async def test_an_unknown_slug_is_an_error_the_model_can_use(
     refused_text = next(
         text for text in tool_results_seen(orchestrator.router) if "closer_bot" in text
     )
-    assert "There is no bot called 'closer_bot' on this thread" in refused_text
-    assert "On this thread: sales" in refused_text
+    assert "There is no bot called 'closer_bot' on this person's team" in refused_text
+    assert "Your teammates: " in refused_text
+    assert "sales" in refused_text
     # Usable means the run carried on and got it right the second time.
     assert len(await runs_for(db, sales_bot)) == 1
     assert "Second try worked" in done["message"]
@@ -713,13 +725,15 @@ async def test_an_unknown_slug_is_an_error_the_model_can_use(
 async def test_a_bot_cannot_pull_another_persons_bot_into_the_thread(
     agent_with, db, avery, user_b, make_bot, make_thread, lead_bot, sales_bot
 ):
-    """Refuse, never auto-add. `bots.slug` is global; bot *visibility* is not.
+    """`bots.slug` is global; bot *visibility* is not.
 
-    Auto-adding a slug the model produced would let a bot on one person's thread
-    reach another person's custom bot by guessing a name — a model-authored
-    string escalating what a run can touch. Refusing is also the recoverable
-    option: the error names who is here, and an unwanted thread member would
-    have to be noticed and removed by hand.
+    A hand-off now seats the recipient rather than refusing when they are not
+    already in the room — that is what makes "use Jordan" work from an ordinary
+    one-to-one chat, see `_delegate_targets`. This is the boundary that did
+    *not* move, and it is the one that matters: the candidate list is built
+    server-side from this person's own visibility, so a slug the model invented
+    or guessed cannot reach another tenant's bot. Nothing runs, nothing is
+    seated, and the refusal names the real alternatives.
     """
     stranger = await make_bot(user_b, name="B's closer", slug="closer_bot")
     orchestrator = agent_with(
@@ -740,7 +754,9 @@ async def test_a_bot_cannot_pull_another_persons_bot_into_the_thread(
     refused_text = next(
         text for text in tool_results_seen(orchestrator.router) if "closer_bot" in text
     )
-    assert "a bot cannot add another bot to a person's thread" in refused_text
+    assert "There is no bot called 'closer_bot' on this person's team" in refused_text
+    # The refusal lists this person's own team and no part of anybody else's.
+    assert "closer" not in refused_text.split("Your teammates: ", 1)[1]
 
 
 async def test_a_hand_off_with_no_brief_is_refused(
@@ -970,3 +986,366 @@ def test_the_shared_allowance_is_shared_by_siblings_not_copied():
     assert root.spent[0] == 1
     assert left.depth == right.depth == 1
     assert root.audit_path == "avery → lead_generator"
+
+
+# ---------------------------------------------------------------------------
+# 5. Delegation written as prose is not delegation
+# ---------------------------------------------------------------------------
+#
+# The reported failure, and the most expensive one in this file, because it is
+# the one that looks like success. A chief of staff replied "Jordan, generate a
+# fresh list of 10-15 named companies. Sam, prepare the closing sequence." Both
+# specialists then answered "Starting research now, stand by." Three confident
+# replies, one thread, nothing running: the other bots never see each other's
+# messages and are not woken by their own names, and `_announces_action`'s
+# phrase list — written around "I'll" and "let me" — caught none of it.
+
+
+async def test_a_bot_that_briefs_a_colleague_in_prose_is_asked_to_use_the_tool(
+    agent_with, db, avery, make_thread, lead_bot, sales_bot
+):
+    """A vocative reply gets one second chance, and it reaches the real thing."""
+    orchestrator = agent_with(
+        [
+            says("Sales, prepare a 3-step closing sequence for these accounts. Stand by."),
+            acts(
+                "",
+                call(
+                    TOOL_DELEGATE_TO_BOT,
+                    slug="sales",
+                    brief="Prepare a 3-step closing sequence for the accounts on this thread.",
+                ),
+            ),
+            acts("", call("task_complete", summary="Three-step sequence drafted.")),
+            acts("", call("task_complete", summary="Sequence is with Sales.")),
+        ]
+    )
+    thread = await make_thread(avery, [lead_bot, sales_bot])
+
+    _frames, done = await turn_as(orchestrator, db, avery, thread, lead_bot)
+
+    # The re-prompt named the actual failure, not the generic one.
+    reprompts = [
+        message
+        for request in orchestrator.router.seen
+        for message in request
+        if message.get("role") == "user" and "as prose" in str(message.get("content") or "")
+    ]
+    assert reprompts, "a bot briefing a colleague in prose was not asked to use the tool"
+    assert TOOL_DELEGATE_TO_BOT in str(reprompts[0]["content"])
+
+    # And the second chance was taken: Sales really ran.
+    sales_runs = await runs_for(db, sales_bot)
+    assert len(sales_runs) == 1
+    assert sales_runs[0].status == "completed"
+    assert "handed this to" in done["message"]
+
+
+async def test_a_bot_that_briefs_in_prose_twice_says_nothing_was_delegated(
+    agent_with, db, avery, make_thread, lead_bot, sales_bot
+):
+    """Refusing twice is reported as a refusal — never dressed up as a plan."""
+    orchestrator = agent_with(
+        [
+            says("Sales, prepare the closing sequence. I'll compile and approve."),
+            says("Sales: as I said, prepare the closing sequence. Standing by."),
+        ]
+    )
+    thread = await make_thread(avery, [lead_bot, sales_bot])
+
+    _frames, done = await turn_as(orchestrator, db, avery, thread, lead_bot)
+
+    assert await runs_for(db, sales_bot) == []
+    assert "Nothing was delegated" in done["message"]
+    assert "none of them started" in done["message"]
+
+
+async def test_merely_mentioning_a_colleague_is_not_a_prose_hand_off(
+    agent_with, db, avery, make_thread, lead_bot, sales_bot
+):
+    """The guard stays quiet on a bot describing its own plan.
+
+    "I will pass this to sales once it is qualified" is a sentence about the
+    future, not an instruction to anybody. Re-prompting it with "you wrote
+    instructions to another bot" would be a confident, wrong correction — so
+    the vocative position, not the bare name, is what trips this.
+    """
+    orchestrator = orch.Orchestrator()
+    lead, sales = lead_bot, sales_bot
+    assert not orchestrator._addresses_another_bot(
+        "Once the lead is qualified I will pass it to sales for closing.", [sales]
+    )
+    assert orchestrator._addresses_another_bot("Sales, close her this week.", [sales])
+    assert orchestrator._addresses_another_bot("@sales close her this week.", [sales])
+    assert orchestrator._addresses_another_bot(
+        "Here is the list.\nSales: take it from here.", [sales]
+    )
+    # And a bot never counts as addressing itself — it is not in its own targets.
+    assert not orchestrator._addresses_another_bot("Lead Generator, go.", [sales])
+    assert lead.slug == "lead_generator"
+
+
+def test_the_shipped_sentences_that_started_nothing_are_all_caught():
+    """Regression guard: the exact replies from the thread that reported this."""
+    orchestrator = orch.Orchestrator()
+    for reply in (
+        "Got it, Avery. Desktop is up. Starting research now for European prospects. "
+        "Will pull named accounts, roles, and sources before any outreach. "
+        "Stand by for the first batch.",
+        "Starting desktop now to hunt prospects directly. Will pull named companies "
+        "with buyer signals, then draft the 3-step sequence. No messages sent.",
+        "Jordan is building the lead list. Sam will close. I'll compile when they post.",
+    ):
+        assert orchestrator._announces_action(reply), reply
+
+
+# ---------------------------------------------------------------------------
+# 6. A briefed bot that acknowledges has not done anything either
+# ---------------------------------------------------------------------------
+#
+# The other half of the reported failure: *"I message chief of staff and tag
+# sales and leads too and tell the chief of staff what to tell the other to do.
+# It tells them but they ack and don't really do what they are asked."*
+#
+# The hand-off worked. What failed is what happened at the far end of it: a
+# briefed bot answering "Starting research now, stand by" produced no tool call,
+# so `_delegate` took its `else` branch, posted the ack to the thread as the
+# bot's answer, and `_delegation_answer` reported it to the caller as what came
+# back. The caller then summarised three acks as three pieces of work in
+# progress. Every guard against exactly this lived on the chat turn, which a
+# delegated run does not go through.
+
+
+async def test_a_briefed_bot_that_acknowledges_is_asked_again_and_then_acts(
+    agent_with, db, avery, make_thread, lead_bot, sales_bot
+):
+    """The ack gets one second chance, and the second chance really runs."""
+    orchestrator = agent_with(
+        [
+            acts(
+                "",
+                call(
+                    TOOL_DELEGATE_TO_BOT,
+                    slug="sales",
+                    brief="Prepare a 3-step closing sequence for Rita at Acme.",
+                ),
+            ),
+            # Sales, briefed, reports for duty instead of working.
+            says("On it, Jordan. Will draft the sequence and post it here. Stand by."),
+            acts("", call("task_complete", summary="Three-step sequence drafted for Rita.")),
+            acts("", call("task_complete", summary="Sequence is with Sales.")),
+        ]
+    )
+    thread = await make_thread(avery, [lead_bot, sales_bot])
+
+    _frames, done = await turn_as(orchestrator, db, avery, thread, lead_bot)
+
+    # It was asked again, in the delegated run's own conversation.
+    nudges = [
+        message
+        for request in orchestrator.router.seen
+        for message in request
+        if message.get("role") == "user"
+        and "described what you would do" in str(message.get("content") or "")
+    ]
+    assert nudges, "a briefed bot answered with an ack and was never asked again"
+
+    # And what it said the second time is what the thread and the caller get.
+    sales_runs = await runs_for(db, sales_bot)
+    assert len(sales_runs) == 1
+    assert sales_runs[0].status == "completed"
+    posted = [m for m in await messages_in(db, thread) if m.bot_id == sales_bot.id]
+    assert "Three-step sequence drafted" in posted[-1].content
+    assert "Stand by" not in posted[-1].content
+    assert "Sequence is with Sales" in done["message"]
+
+
+async def test_a_briefed_bot_that_acknowledges_twice_says_nothing_ran(
+    agent_with, db, avery, make_thread, lead_bot, sales_bot
+):
+    """Two acks are reported as two acks — to the thread and to the caller.
+
+    The expensive failure is not the refusal, it is the caller believing work is
+    under way. So the sentence has to reach `_delegation_answer`, which quotes
+    the receiving bot's own summary.
+    """
+    orchestrator = agent_with(
+        [
+            acts(
+                "",
+                call(
+                    TOOL_DELEGATE_TO_BOT,
+                    slug="sales",
+                    brief="Prepare a 3-step closing sequence for Rita at Acme.",
+                ),
+            ),
+            says("On it. Will draft the sequence and post it here."),
+            says("Starting now — standing by with the sequence shortly."),
+            acts("", call("task_complete", summary="Sales says it has not started.")),
+        ]
+    )
+    thread = await make_thread(avery, [lead_bot, sales_bot])
+
+    await turn_as(orchestrator, db, avery, thread, lead_bot)
+
+    posted = [m for m in await messages_in(db, thread) if m.bot_id == sales_bot.id]
+    assert "acknowledged it twice" in posted[-1].content
+    assert "Nothing ran" in posted[-1].content
+    # The caller was told the same thing, not "Sales is on it".
+    handback = [
+        text for text in tool_results_seen(orchestrator.router) if "Nothing ran" in text
+    ]
+    assert handback, "the delegating bot was not told the work had not started"
+
+
+async def test_an_ack_hidden_in_a_task_complete_summary_is_still_an_ack(
+    agent_with, db, avery, make_thread, lead_bot, sales_bot
+):
+    """The shape that slipped past the guard even on the chat turn.
+
+    `task_complete(summary="I'll start pulling the list now")` is a tool call, so
+    the old `not calls` test was False and the guard never ran — and the summary
+    is exactly what gets posted to the thread. The announcement is in a tool
+    argument rather than in the reply, which is the only thing that was different
+    about it.
+    """
+    orchestrator = agent_with(
+        [
+            acts("", call("task_complete", summary="I'll pull the named accounts now.")),
+            acts("", call("start_desktop")),
+            acts("", call("task_complete", summary="Desktop up; 4 named accounts found.")),
+        ]
+    )
+    thread = await make_thread(avery, [lead_bot, sales_bot])
+
+    _frames, done = await turn_as(orchestrator, db, avery, thread, lead_bot)
+
+    assert orchestrator.router.calls_made >= 2, "the ack-shaped task_complete ended the turn"
+    assert "4 named accounts" in done["message"]
+
+
+# ---------------------------------------------------------------------------
+# 7. Tagging three bots addresses one of them
+# ---------------------------------------------------------------------------
+#
+# The scenario as it was reported: *"I message chief of staff and tag sales and
+# leads too and tell the chief of staff what to tell the other to do."* The tag
+# narrows who answers and does nothing else - the other two are not woken, never
+# see the message, and never see the reply. From the outside it looks like three
+# bots were addressed and two ignored their instructions.
+
+
+async def test_the_bot_that_answers_is_told_who_else_was_tagged(
+    agent_with, db, avery, make_thread, lead_bot, sales_bot, ops_bot
+):
+    """Named in the prompt, with the fact that naming them delivered nothing.
+
+    Which of the two tagged bots *answers* is deliberately not asserted: with no
+    chief of staff on the thread `_select_bot` falls back to `bots[0]`, so it is
+    row order. The claim under test is about the other one, whoever that is.
+    """
+    orchestrator = agent_with([acts("", call("task_complete", summary="Briefed both."))])
+    thread = await make_thread(avery, [lead_bot, sales_bot, ops_bot])
+
+    frames = [
+        frame
+        async for frame in orchestrator.handle_user_message_stream(
+            db,
+            user=avery,
+            thread=thread,
+            content="lead gen: pull the list. sales: close them.",
+            mention_bot_ids=[lead_bot.id, sales_bot.id],
+        )
+    ]
+    answered = next(data["bot_id"] for name, data in frames if name == "turn_started")
+    other = sales_bot if str(lead_bot.id) == answered else lead_bot
+
+    system = str(orchestrator.router.seen[0][0]["content"])
+    assert f"tagged {other.name} (`{other.slug}`)" in system
+    assert "did not reach them" in system
+    assert TOOL_DELEGATE_TO_BOT in system
+    # The tagged bots, and only those: the third bot in the room was not
+    # addressed and the one reading this is not told it tagged itself.
+    addressed = system.split("The person tagged")[1]
+    assert ops_bot.name not in addressed
+    assert answered not in addressed
+    assert addressed.count("(`") == 1
+
+
+async def test_a_thread_with_no_tags_says_nothing_about_tagging(
+    agent_with, db, avery, make_thread, lead_bot, sales_bot
+):
+    """Most turns have no mention filter, and pay nothing for this."""
+    orchestrator = agent_with([acts("", call("task_complete", summary="Done."))])
+    thread = await make_thread(avery, [lead_bot, sales_bot])
+
+    frames = [
+        frame
+        async for frame in orchestrator.handle_user_message_stream(
+            db, user=avery, thread=thread, content="pull the list"
+        )
+    ]
+    assert frames
+    assert "The person tagged" not in str(orchestrator.router.seen[0][0]["content"])
+
+
+async def test_a_brief_that_forwards_the_judgement_is_corrected_where_it_lands(
+    agent_with, db, avery, make_thread, lead_bot, sales_bot
+):
+    """The chief of staff's own words, handed on unchanged, are the bug.
+
+    `RESEARCH_TRADECRAFT` is in every bot's system prompt already. This is the
+    same rule restated on the brief it applies to, because the brief is the last
+    thing the receiving bot reads and it reads like a query.
+    """
+    orchestrator = agent_with(
+        [
+            acts(
+                "",
+                call(
+                    TOOL_DELEGATE_TO_BOT,
+                    slug="sales",
+                    brief="Find companies that need a CRM on LinkedIn and Instagram.",
+                ),
+            ),
+            acts("", call("task_complete", summary="Four accounts with hiring signals.")),
+            acts("", call("task_complete", summary="Sales came back with four.")),
+        ]
+    )
+    thread = await make_thread(avery, [lead_bot, sales_bot])
+
+    await turn_as(orchestrator, db, avery, thread, lead_bot)
+
+    brief_message = str(orchestrator.router.seen[1][-1]["content"])
+    assert "Find companies that need a CRM" in brief_message, "the brief is still verbatim"
+    assert "not anything that is written down" in brief_message
+    assert "Do not put it in a search box" in brief_message
+
+
+async def test_an_executable_brief_is_handed_over_untouched(
+    agent_with, db, avery, make_thread, lead_bot, sales_bot
+):
+    """The other half: a brief that names a footprint gets no lecture."""
+    orchestrator = agent_with(
+        [
+            acts(
+                "",
+                call(
+                    TOOL_DELEGATE_TO_BOT,
+                    slug="sales",
+                    brief=(
+                        "Ten Milan firms that posted a first sales-ops role in the last "
+                        "60 days. Job-ad URL and a named contact for each."
+                    ),
+                ),
+            ),
+            acts("", call("task_complete", summary="Ten, with URLs.")),
+            acts("", call("task_complete", summary="List is in.")),
+        ]
+    )
+    thread = await make_thread(avery, [lead_bot, sales_bot])
+
+    await turn_as(orchestrator, db, avery, thread, lead_bot)
+
+    brief_message = str(orchestrator.router.seen[1][-1]["content"])
+    assert "Do not put it in a search box" not in brief_message

@@ -455,3 +455,44 @@ export const botColors: Record<string, string> = {
 export function getBotColor(slug: string): string {
   return botColors[slug] ?? botColors["custom"] ?? brandMark[500]
 }
+
+/**
+ * Per-bot silhouette, keyed by bot slug.
+ *
+ * Colour alone was doing all the identifying, and a column of tinted circles
+ * with two-letter initials in them reads as one control repeated rather than
+ * as five different teammates — worse still for the two bots whose names both
+ * start with S. A shape is legible at 20px, survives greyscale and colour
+ * blindness, and is the thing people actually end up naming ("the triangle
+ * one").
+ *
+ * The mapping is a name, not a path: the shape has to be drawn with SVG on the
+ * desktop and `react-native-svg` on mobile, and the one thing both need to
+ * agree on is which bot gets which. Unknown slugs are assigned deterministically
+ * from the name — see `getBotShape` — so a custom bot keeps its shape across
+ * launches without storing anything.
+ */
+export type BotShape = "hexagon" | "triangle" | "square" | "cloud" | "circle"
+
+export const botShapes: Record<string, BotShape> = {
+  chief_of_staff: "hexagon",
+  lead_generator: "triangle",
+  sales: "square",
+  support: "cloud",
+  ops: "circle",
+}
+
+const SHAPE_CYCLE: BotShape[] = ["hexagon", "triangle", "square", "cloud", "circle"]
+
+export function getBotShape(slug: string): BotShape {
+  const known = botShapes[slug]
+  if (known) return known
+  // A stable hash rather than a counter: the sidebar sorts and re-sorts, and a
+  // teammate whose shape changes when a bot is added above them is worse than
+  // no shape at all.
+  let hash = 0
+  for (let index = 0; index < slug.length; index += 1) {
+    hash = (hash * 31 + slug.charCodeAt(index)) | 0
+  }
+  return SHAPE_CYCLE[Math.abs(hash) % SHAPE_CYCLE.length]
+}

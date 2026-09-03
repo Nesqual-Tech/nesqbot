@@ -41,7 +41,7 @@ import pytest
 from sqlalchemy import select
 
 from app.models import ActionLog, Approval, AuditEvent, BotDesktop, Message, Run
-from app.services import simulation
+from app.services import background, simulation
 from app.services.agent_work_items import TOOL_CREATE_WORK_ITEM
 from app.services.model_router import (
     ChatResult,
@@ -932,9 +932,24 @@ async def test_the_continue_button_resumes_the_run(authed, db, parked_run, stub_
     body = response.json()
     assert body["resumed"] is True
     assert body["run_id"] == str(run.id)
-    assert body["status"] == "completed"
-    assert "Searched and captured the list." in body["message"]
+    # `resumed: true, running` means started. The route claims the run and
+    # hands the loop to `services.background` — it used to hold the response
+    # open for the whole thing, which made the button look hung and left runs
+    # stuck when a client disconnected mid-loop. See
+    # `test_resume_answers_immediately.py`.
+    assert body["status"] == "running"
+
+    await background.drain()
+
     assert "signed in, all yours" in json.dumps(router.seen[0])
+    # The summary is in the thread, where a reply belongs, rather than on the
+    # response of the button that started the work.
+    replies = (
+        await db.execute(
+            select(Message).where(Message.thread_id == _thread.id, Message.role == "assistant")
+        )
+    ).scalars().all()
+    assert any("Searched and captured the list." in m.content for m in replies)
 
 
 async def test_a_double_click_on_continue_does_not_start_a_second_loop(
@@ -948,15 +963,22 @@ async def test_a_double_click_on_continue_does_not_start_a_second_loop(
     run_id = run.id
 
     first = await authed.post(f"/api/runs/{run_id}/resume", json={})
-    calls_after_first = router.calls_made
     second = await authed.post(f"/api/runs/{run_id}/resume", json={})
+    await background.drain()
+    calls_after_both = router.calls_made
 
     assert first.status_code == 200 and first.json()["resumed"] is True
     assert second.status_code == 200
     assert second.json()["resumed"] is False
-    assert second.json()["status"] == "completed"
+    # `running`, not `completed`: the second press now lands while the first
+    # one's loop is still going, which is the *more* likely order of events now
+    # that the button comes back immediately. Either way it is not an error.
+    assert second.json()["status"] in ("running", "completed")
     assert "not waiting for a human" in second.json()["detail"]
-    assert router.calls_made == calls_after_first, "the second press ran the loop again"
+
+    # The claim is the guard, and it still holds: exactly one loop ran.
+    await background.drain()
+    assert router.calls_made == calls_after_both, "a second loop was started"
 
     db.expire_all()
     stored = await db.get(Run, run_id)
@@ -1080,13 +1102,18 @@ def test_the_announcement_phrases_are_only_used_to_ask_again():
         Path(__file__).resolve().parents[2] / "app" / "services" / "orchestrator.py"
     ).read_text(encoding="utf-8")
     assert ANNOUNCEMENT_PHRASES
-    # Exactly one caller: the `if` that decides whether to ask the model again.
-    assert source.count("self._announces_action") == 1
-    # And that call site reaches a re-prompt, never an executor.
-    call_site = source.split("self._announces_action", 1)[1][:1500]
-    assert "REPROMPT_FOR_ACTION" in call_site
-    assert "simulation.perform" not in call_site
-    assert "create_approval" not in call_site
+    # Two callers, one per entrance to a bot's turn: the chat turn, and a bot
+    # opening on a brief another bot handed it. The second was added because a
+    # briefed bot answering "Starting research now, stand by" reached neither
+    # guard and had its ack posted as its answer.
+    call_sites = source.split("self._announces_action")[1:]
+    assert len(call_sites) == 2
+    # And every one of them reaches a re-prompt, never an executor.
+    for call_site in call_sites:
+        window = call_site[:1500]
+        assert "REPROMPT_FOR_ACTION" in window
+        assert "simulation.perform" not in window
+        assert "create_approval" not in window
 
 
 # ---------------------------------------------------------------------------

@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 
 REQUIRED_BOT_KEYS = ("slug", "name", "system_prompt")
 
+#: Persona keys a bot YAML may carry — see `Bot.email` in models.py. Seeded
+#: once and then owned by whoever edits the bot, unlike the prompt.
+PERSONA_KEYS = ("email", "voice", "signature", "desktop_habits")
+
 # The emergency skeleton, used only when `bots_dir` does not exist or has no
 # YAML for a slug at all — a misconfigured deployment, not the normal path.
 #
@@ -163,6 +167,15 @@ async def seed_system(db: AsyncSession) -> None:
                 bot.role = spec.get("role", "")
                 bot.system_prompt = spec["system_prompt"]
                 bot.desktop_profile = spec.get("desktop_profile", bot.desktop_profile)
+                # Persona is seeded, then left alone. The app tells people
+                # "the standing prompt is locked. Voice, email, signature and
+                # budget are yours to tune", and reconciling these the way the
+                # prompt is reconciled would quietly undo that tuning on every
+                # boot. So the YAML supplies a starting value for a bot that
+                # has none and never overwrites one somebody set.
+                for field in PERSONA_KEYS:
+                    if getattr(bot, field, None) is None:
+                        setattr(bot, field, spec.get(field) or None)
             continue
         db.add(
             Bot(
@@ -173,6 +186,7 @@ async def seed_system(db: AsyncSession) -> None:
                 is_system=True,
                 desktop_profile=spec.get("desktop_profile", "xfce"),
                 daily_budget_usd=spec.get("daily_budget_usd", 5),
+                **{field: spec.get(field) or None for field in PERSONA_KEYS},
             )
         )
     await db.commit()

@@ -56,7 +56,8 @@
         "EXPO_PUBLIC_API_URL": "https://your-api.example.com/api"
       },
       "ios": {
-        "resourceClass": "m-medium"
+        "resourceClass": "m-medium",
+        "image": "macos-sequoia-15.6-xcode-26.0"
       },
       "android": {
         "buildType": "app-bundle"

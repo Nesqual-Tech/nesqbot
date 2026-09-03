@@ -133,11 +133,33 @@ class ScriptedToolRouter(ModelRouter):
         return len(self.seen)
 
 
-async def turn(orchestrator: Orchestrator, db, user, thread, content: str = "do it"):
+async def turn(
+    orchestrator: Orchestrator,
+    db,
+    user,
+    thread,
+    content: str = "do it",
+    *,
+    mention_bot_ids=None,
+):
+    """One turn. Pass `mention_bot_ids` when *which* bot answers matters.
+
+    On a multi-bot thread with no chief of staff on it, `_select_bot` falls back
+    to `bots[0]` — whichever row the roster query returned first — so a test that
+    scripts one bot's replies and asserts on rows that bot wrote is otherwise
+    depending on database row order. That is a real failure that only shows up
+    in some orderings: `test_handing_it_to_sales_is_one_call_and_a_ledger_row`
+    had the *sales* bot answer, create the work item, and then hand it to
+    itself, which `work_items.transfer` correctly does nothing for.
+    """
     frames = [
         frame
         async for frame in orchestrator.handle_user_message_stream(
-            db, user=user, thread=thread, content=content
+            db,
+            user=user,
+            thread=thread,
+            content=content,
+            mention_bot_ids=mention_bot_ids,
         )
     ]
     done = next((data for name, data in frames if name == "done"), {})

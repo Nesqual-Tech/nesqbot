@@ -97,6 +97,112 @@ async def test_reset_cache_forces_a_re_read():
         os.environ[ENV_VAR] = SENTINEL
 
 
+async def test_forget_re_reads_the_one_ref_it_was_given():
+    """Replacing a credential in the app keeps the same reference — that is the
+    design — so the cache, which is keyed on the reference and not the version,
+    would serve the replaced value for the next `CACHE_TTL_SECONDS`. The first
+    thing anyone does after a replace is run the connector."""
+    import os
+
+    await secrets.resolve_secret(REF)
+    os.environ[ENV_VAR] = "replaced"
+    try:
+        secrets.forget(REF)
+        assert await secrets.resolve_secret(REF) == "replaced"
+    finally:
+        os.environ[ENV_VAR] = SENTINEL
+
+
+async def test_forget_leaves_every_other_ref_cached():
+    """What distinguishes `forget` from `reset_cache`: one replace must not
+    make every other bot's connector re-read its credential from Key Vault."""
+    import os
+
+    other_var = "NESQ_TEST_OTHER_CONNECTOR_SECRET"
+    other_ref = f"env://{other_var}"
+    os.environ[other_var] = "other-value"
+    try:
+        assert await secrets.resolve_secret(REF) == SENTINEL
+        assert await secrets.resolve_secret(other_ref) == "other-value"
+
+        secrets.forget(REF)
+        os.environ[other_var] = "changed-after-caching"
+        assert await secrets.resolve_secret(other_ref) == "other-value", (
+            "forgetting one ref evicted another"
+        )
+    finally:
+        os.environ.pop(other_var, None)
+
+
+@pytest.mark.parametrize("ref", ["", "not a ref at all", None])
+def test_forget_is_a_no_op_for_something_that_is_not_a_ref(ref):
+    """It is called from the write path with whatever reference a binding
+    happened to hold, including none — it must never raise there."""
+    secrets.forget(ref)
+
+
+# ---------------------------------------------------------------------------
+# `app://` — a value the app stored itself
+# ---------------------------------------------------------------------------
+
+
+def test_parse_an_app_ref():
+    assert secrets.parse_ref("app://connector/abc/crm") == ("app", "", "connector/abc/crm")
+
+
+@pytest.mark.parametrize("ref", ["app://", "app:///"])
+def test_an_empty_app_ref_is_not_a_ref(ref):
+    assert secrets.parse_ref(ref) is None
+
+
+async def test_an_app_ref_resolves_to_nothing_without_a_session():
+    """`inbound.py` resolves refs a person typed and has no session to give.
+    A person cannot type an `app://` ref — only `store_connector_secret`
+    writes one — so returning None beats raising in that caller."""
+    assert await secrets.resolve_secret("app://connector/abc/crm") is None
+
+
+@pytest.mark.parametrize(
+    ("ref", "backend"),
+    [
+        ("kv://a-vault/a-secret", "key_vault"),
+        ("app://connector/abc/crm", "app_encrypted"),
+        ("env://SOME_VAR", "env"),
+        (None, "none"),
+        ("", "none"),
+        ("a bare name with no vault configured", "none"),
+    ],
+)
+def test_describe_backend_reads_the_shape_of_the_reference(ref, backend):
+    """The UI shows this so nobody believes a credential reached Key Vault when
+    it did not. Derived from the ref rather than stored beside it, so the two
+    cannot disagree."""
+    assert secrets.describe_backend(ref) == backend
+
+
+def test_two_connector_ids_that_differ_only_by_an_illegal_character_get_different_vault_names():
+    """Key Vault names allow no underscores, so `a_b` and `a-b` both slugify to
+    `a-b`. Without the hash, two bindings would share one vault secret and
+    overwrite each other's credential."""
+    import uuid
+
+    bot = uuid.uuid4()
+    assert secrets.connector_secret_name(bot, "a_b") != secrets.connector_secret_name(bot, "a-b")
+
+
+def test_a_connector_vault_name_is_legal_and_stable():
+    """Illegal characters are a 400 from Key Vault at write time, i.e. a
+    feature that fails only in production; and a name that is not stable per
+    pair could not be found again on the next read."""
+    import re
+    import uuid
+
+    bot = uuid.uuid4()
+    name = secrets.connector_secret_name(bot, "microsoft_graph")
+    assert re.fullmatch(r"[0-9a-zA-Z-]{1,127}", name), name
+    assert name == secrets.connector_secret_name(bot, "microsoft_graph")
+
+
 async def test_resolve_connector_secrets_for_a_bound_connector(db, make_user, make_bot, make_connector_binding):
     user = await make_user()
     bot = await make_bot(user)

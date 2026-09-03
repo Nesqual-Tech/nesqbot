@@ -54,7 +54,7 @@ from app.schemas import (
 )
 from app.services import connectors as connectors_service
 from app.services import inbound as inbound_service
-from app.services.secrets import parse_ref
+from app.services.secrets import check_ref
 
 logger = logging.getLogger("nesqbot.inbound")
 
@@ -135,15 +135,21 @@ def _render_event(event: InboundEvent) -> InboundEventOut:
     )
 
 
-def _validated_secret_ref(value: str | None, *, kind: str) -> str | None:
+async def _validated_secret_ref(value: str | None, *, kind: str) -> str | None:
     """Refuse anything that is not a resolvable reference.
 
     Two failures this closes, and the second is the one that matters. A webhook
     source with no key is an unauthenticated endpoint that starts agent runs, so
     it is refused outright. And a caller who pastes the key itself into this
-    field would have it echoed back by `GET /inbound/sources` forever after —
-    `parse_ref` accepts `env://NAME`, `kv://vault/name` and a bare name against
-    the configured vault, and rejects the shapes a real secret takes.
+    field would have it echoed back by `GET /inbound/sources` forever after.
+
+    Shape alone could not tell those apart. `parse_ref` accepts a bare name
+    against the configured vault, so with `AZURE_KEY_VAULT_URL` set — every real
+    deployment — a pasted key parsed as "a secret with that name" and was
+    stored. `secrets.check_ref` asks the vault whether the name exists instead,
+    which is the same fix the connector-binding route carries and the reason
+    this function is now a coroutine. Unverifiable fails closed: an
+    unauthenticated webhook that starts agent runs is not a thing to guess at.
     """
     ref = (value or "").strip()
     if not ref:
@@ -156,14 +162,31 @@ def _validated_secret_ref(value: str | None, *, kind: str) -> str | None:
                 "runs is a way to spend your budget.",
             )
         return None
-    if parse_ref(ref) is None:
+    verdict = await check_ref(ref)
+    if verdict.ok:
+        return ref
+    if verdict.reason == "unparsable":
         raise AppError(
             422,
             "invalid_secret_ref",
             "secret_ref must be a reference to a secret (env://NAME, kv://vault/name, "
             "or a bare name against AZURE_KEY_VAULT_URL) — never the secret itself.",
         )
-    return ref
+    if verdict.reason == "missing":
+        raise AppError(
+            422,
+            "invalid_secret_ref",
+            "secret_ref looks like a reference but nothing by that name exists to "
+            "resolve. Check the spelling — and if what you pasted is the signing key "
+            "itself, put it in the vault or the environment and reference it here.",
+        )
+    raise AppError(
+        422,
+        "invalid_secret_ref",
+        "secret_ref could not be checked: the vault did not answer, or this "
+        "deployment has no credential to read it with. Nothing was saved rather than "
+        "saving a signing key that may not resolve when a hook arrives.",
+    )
 
 
 async def _validated_roster(db: AsyncSession, bot_ids: list[uuid.UUID], user: User) -> list[str]:
@@ -258,7 +281,7 @@ async def create_inbound_source(
     if body.bot_id is not None:
         bot_id = (await get_visible_bot(db, body.bot_id, user)).id
     roster = await _validated_roster(db, body.bot_ids, user)
-    secret_ref = _validated_secret_ref(body.secret_ref, kind=body.kind)
+    secret_ref = await _validated_secret_ref(body.secret_ref, kind=body.kind)
 
     if body.kind == "poll":
         if bot_id is None:
@@ -328,7 +351,7 @@ async def update_inbound_source(
     if "bot_ids" in changes and body.bot_ids is not None:
         source.bot_ids = await _validated_roster(db, body.bot_ids, user)
     if "secret_ref" in changes:
-        source.secret_ref = _validated_secret_ref(body.secret_ref, kind=source.kind)
+        source.secret_ref = await _validated_secret_ref(body.secret_ref, kind=source.kind)
     if "connector_id" in changes:
         source.connector_id = body.connector_id
     if "config" in changes and body.config is not None:

@@ -51,7 +51,7 @@ export function RoutinesPanel({ bots, activeBotId, onSelectBot }: RoutinesPanelP
           <div className="eyebrow">Automation</div>
           <h2 className="panel__title">Routines</h2>
           <p className="panel__subtitle">
-            Taught from real desktop demonstrations. Record new ones in the Bot Desktop pane.
+            Taught from real desktop demonstrations. Record new ones on a teammate's Agent Computer.
           </p>
         </div>
         <div className="panel__header-actions">
@@ -104,7 +104,7 @@ export function RoutinesPanel({ bots, activeBotId, onSelectBot }: RoutinesPanelP
           <EmptyState
             glyph="repeat"
             title="No routines yet"
-            description="Open a bot desktop, hit Record, do the job once, then save it as a routine."
+            description="Open a teammate's computer, hit Record, do the job once, then save it as a routine."
           />
         ) : null}
 

@@ -26,6 +26,7 @@ import pytest
 from sqlalchemy import select
 
 from app.models import Approval, AuditEvent, BotDesktop, Message, Run
+from app.services import background
 from app.services import browser as B
 from app.services.orchestrator import (
     RUN_AGENT_KEY,
@@ -60,6 +61,27 @@ async def desktop_bot(db, make_bot, user_a):
     db.add(BotDesktop(bot_id=bot.id, state="running", control_url="http://desktop.test:7910"))
     await db.flush()
     return bot
+
+
+async def decide(authed, approval_id, decision: str = "approved"):
+    """Press the button, then wait for the work it started.
+
+    `POST /approvals/{id}/decide` claims the run and hands the continuation to
+    `services.background` — it does not drive the agent inside the request any
+    more, because doing that made the person's Approve spin for as long as the
+    bot worked and left the run hanging when the connection went first. So the
+    response says `continued: true, status: running` and the *outcome* is read
+    off the run once the task has finished.
+
+    `drain()` is the same code path production takes, plus a place to wait: no
+    inline-when-testing switch, because then the thing under test would not be
+    the thing that ships.
+    """
+    response = await authed.post(
+        f"/api/approvals/{approval_id}/decide", json={"decision": decision}
+    )
+    await background.drain()
+    return response
 
 
 async def hold_a_step(agent_with, db, user_a, make_thread, bot):
@@ -129,14 +151,14 @@ async def test_approving_runs_the_action_and_then_the_task_carries_on(
         ]
     )
 
-    response = await authed.post(
-        f"/api/approvals/{approval.id}/decide", json={"decision": "approved"}
-    )
+    response = await decide(authed, approval.id, "approved")
 
     assert response.status_code == 200
     continuation = response.json()["execution"]["continuation"]
+    # `continued: true` means started. The outcome is on the run, which is
+    # where it has always actually lived.
     assert continuation["continued"] is True
-    assert continuation["outcome"] == "completed"
+    assert continuation["status"] == "running"
 
     run_id, thread_id = run.id, thread.id
     db.expire_all()
@@ -161,7 +183,7 @@ async def test_the_model_is_told_the_action_ran_and_not_to_repeat_it(
     )
     router = stub_api_router([acts("", call(TOOL_TASK_COMPLETE, summary="Done."))])
 
-    await authed.post(f"/api/approvals/{approval.id}/decide", json={"decision": "approved"})
+    await decide(authed, approval.id, "approved")
 
     blob = json.dumps(router.seen[0])
     assert "APPROVED" in blob
@@ -213,9 +235,7 @@ async def test_an_approved_action_that_did_not_run_says_so(
     monkeypatch.setattr(simulation._desktop, "browser_call", _call)
     router = stub_api_router([acts("", call(TOOL_TASK_COMPLETE, summary="Could not send."))])
 
-    response = await authed.post(
-        f"/api/approvals/{approval.id}/decide", json={"decision": "approved"}
-    )
+    response = await decide(authed, approval.id, "approved")
 
     assert response.json()["execution"]["ok"] is False
     blob = json.dumps(router.seen[0])
@@ -238,9 +258,7 @@ async def test_rejecting_runs_nothing_and_still_carries_on(
         [acts("", call(TOOL_TASK_COMPLETE, summary="You said no, so I stopped there."))]
     )
 
-    response = await authed.post(
-        f"/api/approvals/{approval.id}/decide", json={"decision": "rejected"}
-    )
+    response = await decide(authed, approval.id, "rejected")
 
     assert response.status_code == 200
     assert response.json()["execution"]["continuation"]["continued"] is True
@@ -277,12 +295,8 @@ async def test_a_second_decision_cannot_start_a_second_loop(
     )
     stub_api_router([acts("", call(TOOL_TASK_COMPLETE, summary="Done."))])
 
-    first = await authed.post(
-        f"/api/approvals/{approval.id}/decide", json={"decision": "approved"}
-    )
-    second = await authed.post(
-        f"/api/approvals/{approval.id}/decide", json={"decision": "approved"}
-    )
+    first = await decide(authed, approval.id, "approved")
+    second = await decide(authed, approval.id, "approved")
 
     assert first.status_code == 200
     assert second.status_code == 409
@@ -295,9 +309,7 @@ async def test_an_approval_with_no_parked_run_decides_without_continuing(
     """A routine's approval has no agent run behind it. Nothing to continue."""
     approval = await make_approval(bot_a)
 
-    response = await authed.post(
-        f"/api/approvals/{approval.id}/decide", json={"decision": "approved"}
-    )
+    response = await decide(authed, approval.id, "approved")
 
     assert response.status_code == 200
     assert "continuation" not in (response.json()["execution"] or {})
@@ -312,9 +324,7 @@ async def test_a_decision_about_a_different_hold_never_continues_a_run(
     )
     other = await make_approval(desktop_bot, run=run)
 
-    response = await authed.post(
-        f"/api/approvals/{other.id}/decide", json={"decision": "approved"}
-    )
+    response = await decide(authed, other.id, "approved")
 
     assert response.status_code == 200
     assert "continuation" not in (response.json()["execution"] or {})
@@ -332,7 +342,7 @@ async def test_a_continuation_that_hits_another_gate_parks_again(
     )
     stub_api_router([acts("", call("click", x=5, y=5, risk="delete"))])
 
-    await authed.post(f"/api/approvals/{approval.id}/decide", json={"decision": "approved"})
+    await decide(authed, approval.id, "approved")
 
     run_id = run.id
     db.expire_all()
@@ -357,11 +367,12 @@ async def test_a_dead_desktop_stops_the_continuation_honestly(
     await db.commit()
     stub_api_router([acts("", call(TOOL_TASK_COMPLETE, summary="never reached"))])
 
-    response = await authed.post(
-        f"/api/approvals/{approval.id}/decide", json={"decision": "approved"}
-    )
+    response = await decide(authed, approval.id, "approved")
 
-    assert response.json()["execution"]["continuation"]["outcome"] == "desktop_unavailable"
+    # The decision is registered and the continuation is started either way —
+    # the response cannot know it is about to find a dead machine. What the
+    # person actually needs is the sentence in the thread, which is below.
+    assert response.json()["execution"]["continuation"]["continued"] is True
     replies = (
         await db.execute(
             select(Message).where(Message.thread_id == thread_id, Message.role == "assistant")
@@ -378,7 +389,7 @@ async def test_the_continuation_is_audited(
     )
     stub_api_router([acts("", call(TOOL_TASK_COMPLETE, summary="Done."))])
 
-    await authed.post(f"/api/approvals/{approval.id}/decide", json={"decision": "approved"})
+    await decide(authed, approval.id, "approved")
 
     events = (
         await db.execute(
@@ -472,7 +483,7 @@ async def test_the_model_is_told_which_element_the_approved_click_landed_on(
     monkeypatch.setattr(simulation._desktop, "browser_call", _call)
     router = stub_api_router([acts("", call(TOOL_TASK_COMPLETE, summary="Sent."))])
 
-    await authed.post(f"/api/approvals/{approval.id}/decide", json={"decision": "approved"})
+    await decide(authed, approval.id, "approved")
 
     blob = json.dumps(router.seen[0])
     assert 'browser_click ran on button \\"Send invoice\\"' in blob or (

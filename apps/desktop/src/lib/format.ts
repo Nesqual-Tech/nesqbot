@@ -141,6 +141,32 @@ export function relativeTime(iso?: string | number | null): string {
   })
 }
 
+/**
+ * "12:25" / "Wed" / "22 Aug" — the stamp at the end of a conversation row.
+ *
+ * Deliberately not `relativeTime`. A list of thirty conversations reading
+ * "4m ago / 2h ago / 19h ago / 3d ago" is a column of arithmetic nobody does;
+ * every messenger settles on this ladder instead, because "Wed" is a fact and
+ * "3d ago" is a subtraction. Same precision, less work to read.
+ */
+export function conversationTime(iso?: string | null): string {
+  if (!iso) return ""
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return ""
+  const now = new Date()
+  const sameDay =
+    date.getDate() === now.getDate() &&
+    date.getMonth() === now.getMonth() &&
+    date.getFullYear() === now.getFullYear()
+  if (sameDay) return date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+  // Inside the last week a weekday name is unambiguous; past that it is not,
+  // so it becomes a date.
+  if (Date.now() - date.getTime() < 6 * 86_400_000) {
+    return date.toLocaleDateString(undefined, { weekday: "short" })
+  }
+  return date.toLocaleDateString(undefined, { day: "numeric", month: "short" })
+}
+
 export function clockTime(iso?: string | null): string {
   if (!iso) return ""
   const date = new Date(iso)

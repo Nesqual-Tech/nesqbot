@@ -709,6 +709,29 @@ def _reset_sse_app_status():
 
 
 @pytest.fixture(autouse=True)
+async def _no_stray_background_tasks():
+    """Cancel anything `services.background` detached, after every test.
+
+    `POST /runs/{id}/resume` and `POST /approvals/{id}/decide` hand the agent
+    loop to a background task so the button answers immediately. Under this
+    harness that task shares the one asyncpg connection every session is bound
+    to, so a task still running when a test ends holds something the *next*
+    test needs — and the next test's `drain()` then waits out its whole budget
+    for work that can never finish. Measured: a seven-minute suite became a
+    twenty-minute one, with unrelated failures scattered through it, before
+    this fixture existed.
+
+    A test that wants the work to *happen* awaits `background.drain()` itself,
+    which is deliberate: waiting is an assertion about behaviour and belongs in
+    the test that makes it.
+    """
+    yield
+    from app.services import background
+
+    await background.cancel_all()
+
+
+@pytest.fixture(autouse=True)
 def _reset_idempotency_cache():
     from app.routers import threads as threads_module
 

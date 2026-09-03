@@ -411,7 +411,7 @@ async def test_every_desktop_effect_goes_through_the_chokepoint(
 async def test_every_desktop_step_writes_an_audit_row(
     orchestrator_with, db, user_a, make_thread, desk_bot, varying_screens
 ):
-    """`docs/competitive-analysis.md` claims an audit row per desktop action."""
+    """`docs/architecture.md` claims an audit row per desktop action."""
     from app.models import AuditEvent
 
     orchestrator = orchestrator_with(

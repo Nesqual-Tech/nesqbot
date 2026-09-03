@@ -144,6 +144,21 @@ param vnetAddressPrefix = '10.60.0.0/16'
 param containerAppsSubnetPrefix = '10.60.0.0/23'
 param aciSubnetPrefix = '10.60.4.0/23'
 
+// Connector credentials typed into the app go into Key Vault rather than being
+// encrypted in Postgres. Switched on here rather than in the template default
+// because it is a real trade the CEO said yes to on 2026-09-02: Key Vault RBAC
+// has no scope smaller than the vault, so "Key Vault Secrets Officer" also
+// grants this identity write over jwt-secret, database-url,
+// postgres-admin-password and storage-account-key, which the API only reads.
+//
+// The assignment is already live on nesq-prod-kv-4zelre5orje, applied by hand
+// with `az role assignment create` so the feature worked the day it shipped.
+// This line is what stops the template disagreeing with the subscription -
+// without it, a reader of the infrastructure would conclude the app cannot
+// write secrets, and a redeployment from a clean state would produce a
+// deployment where it silently cannot.
+param allowConnectorSecretWrites = true
+
 param tags = {
   costCenter: 'CHANGE_ME'
   owner: 'CHANGE_ME'

@@ -41,7 +41,8 @@ jobs:
       matrix:
         include:
           - name: api
-            context: apps/api
+            # The repo root: the api image bakes in `bots/`, which lives there.
+            context: .
             dockerfile: apps/api/Dockerfile
           - name: worker
             context: apps/worker

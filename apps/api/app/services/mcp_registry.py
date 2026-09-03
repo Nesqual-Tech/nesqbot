@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.db import release_transaction
 from app.models import BotMcp, McpServer
 
 
@@ -83,6 +84,16 @@ async def call_mcp_tool(
         return {"ok": False, "error": "tool not allowlisted"}
 
     if mcp.transport in ("sse", "http") and mcp.endpoint:
+        # The reads above (the server, the link, and whatever the request's auth
+        # dependency already did) leave a transaction open, and the POST below
+        # allows 30 seconds — connect *and* read — against a server this
+        # deployment does not control. `db.release_transaction` has the incident:
+        # a backend idle in a transaction past sixty seconds is terminated. This
+        # site does not raise today, because nothing touches `db` afterwards,
+        # which makes it quieter than the incident rather than different from it:
+        # the backend still dies and the pool still hands the dead connection to
+        # whoever asks next, for `pool_pre_ping` to notice.
+        await release_transaction(db)
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 r = await client.post(

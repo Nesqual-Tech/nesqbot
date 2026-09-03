@@ -417,8 +417,13 @@ async def test_gated_mcp_step_parks_then_resumes_on_approval(env):
 
     # The gate ran before anything downstream did, and exactly once.
     assert sequence == ["step:0", "approval:approval-mcp-1", "step:1"]
+    # One bounded poll attempt, whose budget the workflow states explicitly so
+    # an env override cannot make it outlive its own start_to_close.
     assert calls["approvals"] == [
-        {"approval_id": "approval-mcp-1", "timeout_seconds": None}
+        {
+            "approval_id": "approval-mcp-1",
+            "poll_budget_seconds": acts.APPROVAL_POLL_BUDGET_SECONDS,
+        }
     ]
     # The MCP tool itself never executed — the API held it, the worker waited.
     assert executed == [1]

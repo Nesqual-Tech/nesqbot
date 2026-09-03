@@ -65,8 +65,11 @@ import type {
   UpdateBotInput,
   UpdateMcpInput,
   UpdateRoutineInput,
+  BotPersona,
   UsageRow,
   User,
+  WorkItem,
+  WorkItemTransfer,
 } from "../types"
 
 /* ----------------------------------------------------------- health / auth */
@@ -116,9 +119,23 @@ export const listProviderModels = (provider: string, signal?: AbortSignal) =>
 
 /* -------------------------------------------------------- threads/messages */
 
+/** Who a bot is - prompt, connectors, inboxes, spend. See `BotPersona`. */
+export const getBotPersona = (botId: string, signal?: AbortSignal) =>
+  get<BotPersona>(`/bots/${botId}/persona`, undefined, signal)
+
 export const listThreads = (signal?: AbortSignal) => get<Thread[]>("/threads", undefined, signal)
 export const createThread = (input: CreateThreadInput) => post<Thread>("/threads", input)
 export const deleteThread = (threadId: string) => del<void>(`/threads/${threadId}`)
+/*
+ * A thread's roster is the only thing that makes delegation possible: a bot can
+ * only hand work to somebody in the room. This app used to create every thread
+ * with one bot and had no way to add a second, so `delegate_to_bot` was never
+ * advertised and no hand-off could ever happen.
+ */
+export const addThreadBots = (threadId: string, botIds: string[]) =>
+  post<Thread>(`/threads/${threadId}/bots`, { bot_ids: botIds })
+export const removeThreadBot = (threadId: string, botId: string) =>
+  del<Thread>(`/threads/${threadId}/bots/${botId}`)
 export const listMessages = (threadId: string, signal?: AbortSignal) =>
   get<Message[]>(`/threads/${threadId}/messages`, undefined, signal)
 export const sendMessage = (threadId: string, input: SendMessageInput, signal?: AbortSignal) =>
@@ -186,6 +203,25 @@ export const listAudit = (
   query?: { bot_id?: string; event_type?: string; limit?: number; before?: string },
   signal?: AbortSignal,
 ) => get<AuditEvent[]>("/audit", query as Query | undefined, signal)
+
+/* -------------------------------------------------------------- work items */
+/*
+ * The bots' own record of what they are working on. Six endpoints have existed
+ * since the work-item lane shipped and nothing in this client called any of
+ * them, which `docs/STATUS.md` recorded as "/work-items still has none" — so a
+ * chief of staff filing "Lead Generator: generate 20 qualified leads" wrote a
+ * row the person who asked for it had no way to read.
+ */
+
+export const listWorkItems = (
+  query?: { type?: string; status?: string; owner_bot_id?: string; limit?: number },
+  signal?: AbortSignal,
+) => get<WorkItem[]>("/work-items", query as Query | undefined, signal)
+export const getWorkItem = (id: string, signal?: AbortSignal) =>
+  get<WorkItem>(`/work-items/${id}`, undefined, signal)
+/** The hand-off ledger: who moved this item, to whom, and why. */
+export const listWorkItemTransfers = (id: string, signal?: AbortSignal) =>
+  get<WorkItemTransfer[]>(`/work-items/${id}/transfers`, undefined, signal)
 
 /* --------------------------------------------------------------- approvals */
 
@@ -342,7 +378,12 @@ export const listAwaitingHumanRuns = (limit = 20, signal?: AbortSignal) =>
  *
  * Three answers matter to a caller:
  *
- *  - `{resumed: true}` — the agent picked the task back up.
+ *  - `{resumed: true}` — the agent has been *started* picking the task back
+ *    up. It answers as soon as the run is claimed and the loop then runs
+ *    server-side, so this returns in milliseconds and carries no result: what
+ *    the bot goes on to do arrives in the thread over SSE. It used to hold the
+ *    response open for the whole loop, which is why the button appeared to
+ *    hang for minutes and why a dropped connection could leave the run stuck.
  *  - `{resumed: false}` — **not an error.** The status update is conditional,
  *    so a second call while the first is still running loses the race and says
  *    so instead of starting a second loop. Show "already going".

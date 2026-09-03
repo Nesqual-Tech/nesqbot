@@ -2,13 +2,36 @@
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 
-from sqlalchemy import select
+import pytest_asyncio
+from sqlalchemy import event, func, select
 
-from app.models import Approval, AuditEvent, Message, Run
+from app.models import Approval, AuditEvent, Message, Run, ThreadBot
 
 MISSING = uuid.UUID("00000000-0000-0000-0000-0000000000ff")
+
+
+@contextlib.contextmanager
+def counted_statements(db_connection):
+    """Every statement the engine sends while the block runs.
+
+    The only assertion that catches a regression back to a per-row query: the
+    payload is identical either way, so asserting on the payload proves nothing
+    about how many round trips produced it.
+    """
+    seen: list[str] = []
+
+    def before(conn, cursor, statement, parameters, context, executemany):
+        seen.append(statement)
+
+    engine = db_connection.sync_engine
+    event.listen(engine, "before_cursor_execute", before)
+    try:
+        yield seen
+    finally:
+        event.remove(engine, "before_cursor_execute", before)
 
 
 async def test_create_thread_requires_bot_ids(authed):
@@ -42,6 +65,97 @@ async def test_create_thread_with_an_initial_message_runs_a_turn(authed, bot_a, 
     rows = await db.execute(select(Message).where(Message.thread_id == uuid.UUID(thread_id)))
     roles = [m.role for m in rows.scalars().all()]
     assert "user" in roles and "assistant" in roles
+
+
+async def test_creating_a_thread_with_an_unknown_bot_id_is_a_404_with_a_code(authed):
+    """`thread_bots.bot_id` is a foreign key, and an unknown id used to reach it.
+
+    The IntegrityError came back through `app.errors`' catch-all as
+    `{"detail": "internal_error", "code": "internal_error"}` — an opaque 500 on
+    an ordinary user action (a bot deleted in another window, a stale client
+    cache), which is exactly what the error envelope exists to prevent.
+    """
+    response = await authed.post("/api/threads", json={"bot_ids": [str(MISSING)]})
+    assert response.status_code == 404
+    assert response.json()["code"] == "bot_not_found"
+
+
+async def test_creating_a_thread_with_another_users_bot_writes_no_membership(
+    authed, bot_b, db
+):
+    """Membership is trusted at read time, so it has to be checked at write time.
+
+    The orchestrator's roster query joins `thread_bots` with no visibility
+    predicate. A bot id belonging to someone else's custom bot, accepted here,
+    becomes a participant in the thread and answers with its own system prompt
+    and its own connector set.
+    """
+    response = await authed.post("/api/threads", json={"bot_ids": [str(bot_b.id)]})
+    assert response.status_code == 404
+    assert response.json()["code"] == "bot_not_found"
+
+    rows = await db.execute(
+        select(func.count()).select_from(ThreadBot).where(ThreadBot.bot_id == bot_b.id)
+    )
+    assert int(rows.scalar_one()) == 0, "the membership row was written anyway"
+
+
+async def test_creating_a_thread_naming_the_same_bot_twice_keeps_one_membership(
+    authed, bot_a, db
+):
+    """`thread_bots` has a composite primary key: `[x, x]` was a second 500."""
+    response = await authed.post(
+        "/api/threads", json={"bot_ids": [str(bot_a.id), str(bot_a.id)]}
+    )
+    assert response.status_code == 200
+    assert response.json()["bot_ids"] == [str(bot_a.id)]
+
+    thread_id = uuid.UUID(response.json()["id"])
+    rows = await db.execute(
+        select(func.count()).select_from(ThreadBot).where(ThreadBot.thread_id == thread_id)
+    )
+    assert int(rows.scalar_one()) == 1
+
+
+async def test_listing_threads_does_not_cost_a_query_per_thread(
+    authed, db_connection, make_thread, user_a, bot_a
+):
+    """`GET /threads` was 1+N: the sidebar's roster came from a SELECT per row.
+
+    Counted rather than timed, and compared against itself with more rows rather
+    than against a fixed number, so the assertion says the one thing that
+    matters — the cost does not grow with the list — without pinning the exact
+    query plan of the auth dependency or the ORM.
+    """
+    await make_thread(user_a, [bot_a], title="one")
+    with counted_statements(db_connection) as one_thread:
+        assert (await authed.get("/api/threads")).status_code == 200
+
+    for index in range(5):
+        await make_thread(user_a, [bot_a], title=f"thread {index}")
+    with counted_statements(db_connection) as six_threads:
+        listed = await authed.get("/api/threads")
+    assert len(listed.json()) == 6
+
+    assert len(six_threads) == len(one_thread), (
+        "listing six threads cost more statements than listing one — the roster "
+        f"lookup is back inside the loop: {len(one_thread)} -> {len(six_threads)}"
+    )
+
+
+async def test_listing_threads_reports_every_bot_on_the_thread(
+    authed, make_thread, user_a, bot_a, make_bot
+):
+    """The grouped roster query has to return the same membership as the loop did."""
+    second = await make_bot(user_a, name="Second")
+    thread = await make_thread(user_a, [bot_a, second])
+
+    listed = (await authed.get("/api/threads")).json()
+    row = next(t for t in listed if t["id"] == str(thread.id))
+    assert set(row["bot_ids"]) == {str(bot_a.id), str(second.id)}
+    assert row["bot_ids"] == sorted(row["bot_ids"]), (
+        "the roster order is pinned by the query's ORDER BY, not left to the plan"
+    )
 
 
 async def test_list_threads_is_owner_scoped(authed, make_thread, user_a, user_b, bot_a):
@@ -210,3 +324,135 @@ async def test_delete_thread_keeps_the_owner_able_to_see_their_orphaned_run(
     assert (await authed.get(f"/api/runs/{run_id}")).status_code == 200
     listed = {row["id"] for row in (await authed.get("/api/runs")).json()}
     assert str(run_id) in listed, "the owner should still see their own orphaned run"
+
+
+
+@pytest_asyncio.fixture
+async def mate(make_bot, user_a):
+    """A second bot belonging to the *caller*.
+
+    Not `bot_b`, which belongs to user B: seating that one is correctly a 404,
+    and a roster test written against it proves the visibility check rather
+    than the feature.
+    """
+    return await make_bot(user_a, name="A's second bot", slug="a-second-bot")
+
+# ---------------------------------------------------------------------------
+# The roster: what makes delegation possible at all
+# ---------------------------------------------------------------------------
+#
+# `orchestrator._delegate_targets` is "everyone else in this room", so a
+# one-bot thread means `delegate_to_bot` is never even advertised and a chief
+# of staff asked to hand work over holds no tool that can. The desktop app
+# created every thread with exactly one bot
+# (`ChatPane.tsx`: `bot_ids: [activeBot.id]`), so in the shipped product no
+# thread ever had a second participant - which is the whole of every "it never
+# delegated" report. A roster could only be set at creation until these two
+# routes existed.
+
+
+async def test_more_bots_can_be_seated_on_an_existing_thread(authed, db, bot_a, mate):
+    created = (
+        await authed.post("/api/threads", json={"bot_ids": [str(bot_a.id)], "title": "Kickoff"})
+    ).json()
+    assert created["bot_ids"] == [str(bot_a.id)]
+
+    response = await authed.post(
+        f"/api/threads/{created['id']}/bots", json={"bot_ids": [str(mate.id)]}
+    )
+
+    assert response.status_code == 200, response.text
+    assert set(response.json()["bot_ids"]) == {str(bot_a.id), str(mate.id)}
+
+
+async def test_seating_a_bot_twice_is_not_an_error(authed, bot_a, mate):
+    """`thread_bots` has a composite primary key, so a second insert is a 500.
+
+    The obvious client behaviour is to send the whole intended roster rather
+    than the difference, so idempotence here is the difference between a
+    working "add these three" button and an intermittent server error.
+    """
+    created = (await authed.post("/api/threads", json={"bot_ids": [str(bot_a.id)]})).json()
+    first = await authed.post(
+        f"/api/threads/{created['id']}/bots", json={"bot_ids": [str(mate.id)]}
+    )
+    second = await authed.post(
+        f"/api/threads/{created['id']}/bots",
+        json={"bot_ids": [str(bot_a.id), str(mate.id)]},
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200, second.text
+    assert set(second.json()["bot_ids"]) == {str(bot_a.id), str(mate.id)}
+
+
+async def test_a_bot_the_caller_cannot_see_is_refused(authed, bot_a, user_b, make_bot):
+    """The write side of the visibility boundary `create_thread` also enforces.
+
+    Membership is trusted at read time by a query with no visibility predicate
+    in it, so accepting a stranger's bot here would seat a participant that
+    answers with its own prompt and its own connectors.
+    """
+    theirs = await make_bot(user_b, name="Not Yours", slug="not-yours-roster")
+    created = (await authed.post("/api/threads", json={"bot_ids": [str(bot_a.id)]})).json()
+
+    response = await authed.post(
+        f"/api/threads/{created['id']}/bots", json={"bot_ids": [str(theirs.id)]}
+    )
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "bot_not_found"
+
+
+async def test_an_empty_roster_request_is_refused(authed, bot_a):
+    created = (await authed.post("/api/threads", json={"bot_ids": [str(bot_a.id)]})).json()
+    response = await authed.post(f"/api/threads/{created['id']}/bots", json={"bot_ids": []})
+    assert response.status_code == 400
+    assert response.json()["code"] == "bot_ids_required"
+
+
+async def test_a_bot_can_be_unseated(authed, bot_a, mate):
+    created = (
+        await authed.post("/api/threads", json={"bot_ids": [str(bot_a.id), str(mate.id)]})
+    ).json()
+
+    response = await authed.delete(f"/api/threads/{created['id']}/bots/{mate.id}")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["bot_ids"] == [str(bot_a.id)]
+
+
+async def test_the_last_bot_cannot_be_unseated(authed, bot_a):
+    """`_turn` raises "thread has no bots", so an empty roster is a dead page."""
+    created = (await authed.post("/api/threads", json={"bot_ids": [str(bot_a.id)]})).json()
+
+    response = await authed.delete(f"/api/threads/{created['id']}/bots/{bot_a.id}")
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "last_bot_in_thread"
+
+
+async def test_unseating_a_bot_that_was_never_there_is_a_404(authed, bot_a, mate):
+    created = (await authed.post("/api/threads", json={"bot_ids": [str(bot_a.id)]})).json()
+    response = await authed.delete(f"/api/threads/{created['id']}/bots/{mate.id}")
+    assert response.status_code == 404
+    assert response.json()["code"] == "bot_not_in_thread"
+
+
+async def test_another_users_thread_is_not_reachable(authed, db, user_b, make_bot, bot_a):
+    """Thread ownership is checked first, as everywhere else."""
+    from app.models import Thread, ThreadBot
+
+    theirs = Thread(title="Theirs", owner_user_id=user_b.id)
+    db.add(theirs)
+    await db.commit()
+    await db.refresh(theirs)
+    their_bot = await make_bot(user_b, name="Theirs", slug="theirs-roster")
+    db.add(ThreadBot(thread_id=theirs.id, bot_id=their_bot.id))
+    await db.commit()
+
+    response = await authed.post(
+        f"/api/threads/{theirs.id}/bots", json={"bot_ids": [str(bot_a.id)]}
+    )
+
+    assert response.status_code == 404

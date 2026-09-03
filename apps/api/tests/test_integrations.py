@@ -85,7 +85,46 @@ async def test_list_bindings_is_empty_for_a_fresh_bot(authed, bot_a):
     assert response.json() == []
 
 
-async def test_bind_a_connector(authed, db, bot_a):
+
+def _returning(value: str):
+    """A `SecretClient.get_secret` that answers for any name.
+
+    Fine here because this test is about the binding row, not about the guard;
+    `tests/services/test_connector_secret_storage.py` uses a vault fake with a
+    real inventory precisely so the guard is exercised against absent names.
+    """
+    from types import SimpleNamespace
+
+    async def _get_secret(_name: str):
+        return SimpleNamespace(value=value)
+
+    return _get_secret
+
+
+async def test_bind_a_connector(authed, db, bot_a, monkeypatch):
+    """A `kv://` ref binds when the vault confirms the secret is really there.
+
+    The stub is the point rather than scaffolding. Binding used to accept any
+    string that *looked* like a ref, which meant a credential pasted into the
+    field was stored verbatim and then echoed by `GET /bots/{id}/connectors` to
+    every user who could see the bot. `secrets.check_ref` now asks the vault
+    whether the name exists, so a test binding a real-looking ref has to supply
+    a vault that has it — and a deployment with no credential at all can no
+    longer save a `kv://` ref, which could never have resolved there anyway.
+    """
+    from types import SimpleNamespace
+
+    from app.services import secrets
+
+    monkeypatch.setattr(
+        secrets,
+        "_get_client",
+        lambda _url: SimpleNamespace(
+            get_secret=_returning("the-real-crm-key"),
+        ),
+    )
+    secrets.reset_cache()
+
     response = await authed.post(
         f"/api/bots/{bot_a.id}/connectors/crm",
         json={"secret_ref": "kv://vault/crm-key", "status": "connected"},

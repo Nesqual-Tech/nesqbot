@@ -4,38 +4,34 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { REQUIRES_SIGN_IN } from "./api/client"
 import { getHealth } from "./api/endpoints"
-import { ApprovalsPanel } from "./components/ApprovalsPanel"
-import { AuditPanel } from "./components/AuditPanel"
-import { BuilderPanel } from "./components/BuilderPanel"
 import { ChatPane } from "./components/ChatPane"
+import { ConversationList } from "./components/ConversationList"
 import { DesktopPane } from "./components/DesktopPane"
 import { ErrorBoundary } from "./components/ErrorBoundary"
-import { Icon, type IconName } from "./components/Icon"
-import { IntegrationsPanel } from "./components/IntegrationsPanel"
-import { KnowledgePanel } from "./components/KnowledgePanel"
+import { Icon } from "./components/Icon"
 import { PaneSplitter } from "./components/PaneSplitter"
-import { RoutinesPanel } from "./components/RoutinesPanel"
 import { SessionBootScreen, SignInScreen } from "./components/SignInScreen"
+import { SettingsSheet, type SettingsSection } from "./components/SettingsSheet"
 import { SetupWizard } from "./components/SetupWizard"
-import { Sidebar } from "./components/Sidebar"
 import { TakeoverBeacon } from "./components/TakeoverBeacon"
 import { ToastViewport } from "./components/Toast"
-import { UsagePanel } from "./components/UsagePanel"
 import { useApprovals } from "./hooks/useApprovals"
 import { useAsyncResource } from "./hooks/useAsync"
 import { useBots } from "./hooks/useBots"
 import { useDesktopLayout } from "./hooks/useDesktopLayout"
+import { useThreads } from "./hooks/useThreads"
+import { useUsage } from "./hooks/useUsage"
 import { completeEntraRedirect, useAuth } from "./auth"
-import { cx } from "./lib/format"
+import { cx, usd } from "./lib/format"
 import { dur, ease, gsap, useGSAP } from "./lib/motion"
 import { onShellEvent, parseDeepLink } from "./lib/tauri"
 import { CommandPalette, type Command } from "./components/CommandPalette"
-import { AppProviders, useSelection, useToast, type PanelTab } from "./state/AppState"
+import { AppProviders, useSelection, useToast } from "./state/AppState"
 import { hasCompletedSetup, resetSetupCompletion } from "./state/setup"
 import { useTakeover } from "./state/takeover"
 import { ThemeProvider, useTheme } from "./state/theme"
 import type { TakeoverRequest } from "./lib/takeover"
-import type { HealthOut } from "./types"
+import type { HealthOut, Thread } from "./types"
 
 export function App() {
   return (
@@ -70,8 +66,7 @@ export function App() {
  * mount.
  *
  * `key={resetCount}` remounts the wizard (fresh internal step state) when
- * `openSetup` reopens it from the running app — see `Shell`'s "Setup" command
- * and sidebar entry.
+ * `openSetup` reopens it from the running app — see the General settings page.
  */
 function SetupGate({ children }: { children: ReactNode }) {
   const [done, setDone] = useState(hasCompletedSetup())
@@ -91,40 +86,9 @@ function SetupGate({ children }: { children: ReactNode }) {
   return <>{children}</>
 }
 
-/** Reopens the setup wizard from anywhere inside the shell — see `SetupGate`. */
+/** Reopens the setup wizard from anywhere inside the shell. */
 export function openSetup(): void {
   window.dispatchEvent(new Event("nesq:open-setup"))
-}
-
-/**
- * The sidebar's order, in one place.
- *
- * `Ctrl+1…6`, the palette's "Go to" group and the sidebar itself all have to
- * agree about which section is third, and three separate literal lists is how
- * they stop agreeing.
- */
-const TAB_ORDER: PanelTab[] = ["chat", "approvals", "integrations", "routines", "usage", "audit", "knowledge", "builder"]
-
-const TAB_LABELS: Record<PanelTab, string> = {
-  chat: "Chat",
-  approvals: "Approvals",
-  integrations: "Integrations",
-  routines: "Routines",
-  usage: "Usage",
-  audit: "Audit",
-  knowledge: "Knowledge",
-  builder: "Builder",
-}
-
-const TAB_GLYPHS: Record<PanelTab, IconName> = {
-  chat: "chat",
-  approvals: "shield",
-  integrations: "plug",
-  routines: "repeat",
-  usage: "chart",
-  audit: "list",
-  knowledge: "book",
-  builder: "blocks",
 }
 
 /**
@@ -154,19 +118,43 @@ function AuthGate() {
   return <Shell />
 }
 
+/**
+ * Where a deep link's `tab` id lands now that the sections live in the
+ * settings sheet. `nesqbot://tab/usage` still has to go somewhere, and the
+ * links are printed in notifications that outlive any one build.
+ */
+const DEEP_LINK_SECTIONS: Record<string, SettingsSection> = {
+  approvals: "approvals",
+  integrations: "connectors",
+  connectors: "connectors",
+  routines: "routines",
+  usage: "usage",
+  audit: "audit",
+  knowledge: "knowledge",
+  builder: "profile",
+  profile: "profile",
+  work: "work",
+  models: "models",
+  general: "general",
+}
+
 function Shell() {
   const toast = useToast()
-  const { toggleTheme } = useTheme()
-  const { tab, setTab, activeBotId, setActiveBotId, setActiveThreadId, focusApprovalId, setFocusApprovalId } =
+  const { theme, toggleTheme } = useTheme()
+  const { activeBotId, setActiveBotId, activeThreadId, setActiveThreadId, focusApprovalId, setFocusApprovalId } =
     useSelection()
 
   const bots = useBots()
+  const threads = useThreads()
   const approvals = useApprovals("pending")
   const handoff = useTakeover()
+  const usage = useUsage(1)
   const [usageRefresh, setUsageRefresh] = useState(0)
-  // Width, maximised-or-not and scale for the Bot Desktop pane, remembered
-  // across restarts. Owned here because the splitter and the pane are siblings
-  // in the shell grid, and the width is a grid track.
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("general")
+  // Width, maximised-or-not, open-or-closed and scale for the Agent Computer
+  // pane, remembered across restarts. Owned here because the splitter and the
+  // pane are siblings in the shell grid, and the width is a grid track.
   const desktopLayout = useDesktopLayout()
 
   const health = useAsyncResource<HealthOut | null>((signal) => getHealth(signal), [], {
@@ -181,13 +169,18 @@ function Shell() {
     if (!activeBotId && bots.bots.length > 0) setActiveBotId(bots.bots[0].id)
   }, [activeBotId, bots.bots, setActiveBotId])
 
+  const openSettings = useCallback((section: SettingsSection) => {
+    setSettingsSection(section)
+    setSettingsOpen(true)
+  }, [])
+
   const openApproval = useCallback(
     (approvalId: string) => {
-      setTab("approvals")
       setFocusApprovalId(approvalId)
+      openSettings("approvals")
       void approvals.refetch()
     },
-    [setTab, setFocusApprovalId, approvals],
+    [setFocusApprovalId, openSettings, approvals],
   )
 
   const onApprovalRaised = useCallback(
@@ -201,64 +194,118 @@ function Shell() {
 
   const onTurnComplete = useCallback(() => {
     void approvals.refetch()
+    void usage.refetch()
     setUsageRefresh((value) => value + 1)
-  }, [approvals])
+  }, [approvals, usage])
+
+  /* ------------------------------------------------------------------ *
+   * Picking a conversation
+   *
+   * The list selects a *thread*, and the bot follows from it — the opposite of
+   * the old rail, which selected a bot and let `ensureThreadForBot` guess at
+   * the conversation. The guess is what made group threads unfindable: any
+   * thread the bot was in would do, so the one you were last in was as likely
+   * to be skipped as opened.
+   * ------------------------------------------------------------------ */
+
+  const selectThread = useCallback(
+    (thread: Thread) => {
+      setActiveThreadId(thread.id)
+      const seated = thread.bot_ids ?? []
+      // Keep the current bot if it is in this room — in a group, the person
+      // answering is whoever was addressed, not whoever sorts first.
+      if (seated.length > 0 && !seated.includes(activeBotId ?? "")) setActiveBotId(seated[0])
+    },
+    [setActiveThreadId, setActiveBotId, activeBotId],
+  )
+
+  const startWithBot = useCallback(
+    (bot: { id: string; name: string; slug: string }) => {
+      setActiveBotId(bot.id)
+      void threads
+        .ensureThreadForBot(bot as Parameters<typeof threads.ensureThreadForBot>[0])
+        .then((thread) => setActiveThreadId(thread.id))
+        .catch((err: unknown) => toast.error("Could not open a conversation", err instanceof Error ? err.message : undefined))
+    },
+    [threads, setActiveBotId, setActiveThreadId, toast],
+  )
+
+  const startGroup = useCallback(
+    (botIds: string[]) => {
+      const names = botIds.map((id) => bots.byId[id]?.name).filter(Boolean)
+      void threads
+        .createThread({ bot_ids: botIds, title: names.join(", ") || "Group" })
+        .then((thread) => {
+          setActiveThreadId(thread.id)
+          if (botIds[0]) setActiveBotId(botIds[0])
+        })
+        .catch((err: unknown) => toast.error("Could not start the group", err instanceof Error ? err.message : undefined))
+    },
+    [threads, bots.byId, setActiveThreadId, setActiveBotId, toast],
+  )
 
   /* ------------------------------------------------------------------ *
    * Human handoff
    *
    * The state lives in `state/takeover`; what belongs here is the *staging* —
-   * which bot is selected, which tab is up, and whether the Bot Desktop pane is
+   * which bot is selected, whether the pane is open, and whether it is
    * covering the window. Those are shell concerns and the provider deliberately
    * knows nothing about them.
    * ------------------------------------------------------------------ */
 
   const setExpanded = desktopLayout.setExpanded
+  const setDesktopOpen = desktopLayout.setOpen
 
   /*
    * Maximising for a takeover must not become the person's saved preference.
    *
-   * `useDesktopLayout` persists `expanded` on purpose — somebody who works in
-   * takeover should not re-expand the pane every morning. But that is about
-   * *their* choice. A run parking on a login is not a choice, and letting it
-   * write the preference means one interruption silently changes how the app
-   * opens forever. So the pre-takeover value is held here and put back once
-   * nothing is waiting. A ref, so toggling the pane does not rebuild
+   * `useDesktopLayout` persists `expanded` and `open` on purpose — somebody who
+   * works in takeover should not re-open the pane every morning. But that is
+   * about *their* choice. A run parking on a login is not a choice, and letting
+   * it write the preference means one interruption silently changes how the app
+   * opens forever. So the pre-takeover values are held here and put back once
+   * nothing is waiting. Refs, so toggling the pane does not rebuild
    * `focusTakeover` and re-run the effect that calls it.
    */
   const mainRef = useRef<HTMLElement | null>(null)
 
   const expandedRef = useRef(desktopLayout.expanded)
   expandedRef.current = desktopLayout.expanded
-  const expandedBeforeTakeover = useRef<boolean | null>(null)
+  const openRef = useRef(desktopLayout.open)
+  openRef.current = desktopLayout.open
+  const layoutBeforeTakeover = useRef<{ open: boolean; expanded: boolean } | null>(null)
 
   /**
-   * Put one parked run in front of the person: its bot, its thread, the chat
-   * tab, and the desktop maximised so the screen they have to sign in on is
-   * the biggest thing on the display. `TakeoverCard` renders itself once the
-   * pane's bot matches.
+   * Put one parked run in front of the person: its bot, its thread, and the
+   * computer maximised so the screen they have to sign in on is the biggest
+   * thing on the display. `TakeoverCard` renders itself once the pane's bot
+   * matches.
    */
   const focusTakeover = useCallback(
     (request: TakeoverRequest) => {
       handoff.undismiss(request.runId)
       if (request.botId) setActiveBotId(request.botId)
       if (request.threadId) setActiveThreadId(request.threadId)
-      setTab("chat")
-      if (expandedBeforeTakeover.current === null) expandedBeforeTakeover.current = expandedRef.current
+      if (layoutBeforeTakeover.current === null) {
+        layoutBeforeTakeover.current = { open: openRef.current, expanded: expandedRef.current }
+      }
+      setDesktopOpen(true)
       setExpanded(true)
     },
-    [handoff, setActiveBotId, setActiveThreadId, setTab, setExpanded],
+    [handoff, setActiveBotId, setActiveThreadId, setDesktopOpen, setExpanded],
   )
 
   const outstandingTakeovers = handoff.requests.length
   useEffect(() => {
     if (outstandingTakeovers > 0) return
-    const previous = expandedBeforeTakeover.current
-    expandedBeforeTakeover.current = null
-    // Only ever un-maximise. If they were already maximised, or maximised it
-    // themselves while dealing with this, that is their layout to keep.
-    if (previous === false) setExpanded(false)
-  }, [outstandingTakeovers, setExpanded])
+    const previous = layoutBeforeTakeover.current
+    layoutBeforeTakeover.current = null
+    if (!previous) return
+    // Only ever put back what was there. If they were already maximised, or
+    // maximised it themselves while dealing with this, that is their layout.
+    if (!previous.expanded) setExpanded(false)
+    if (!previous.open) setDesktopOpen(false)
+  }, [outstandingTakeovers, setExpanded, setDesktopOpen])
 
   /*
    * Only a *live* arrival gets to grab the window — `unpresented` never yields
@@ -296,13 +343,15 @@ function Shell() {
         if (target.kind === "approval" && target.id) {
           openApproval(target.id)
         } else if (target.kind === "thread" && target.id) {
-          setTab("chat")
+          setSettingsOpen(false)
           setActiveThreadId(target.id)
         } else if (target.kind === "bot" && target.id) {
-          setTab("chat")
+          setSettingsOpen(false)
           setActiveBotId(target.id)
         } else if (target.kind === "tab" && target.id) {
-          setTab(target.id as PanelTab)
+          const section = DEEP_LINK_SECTIONS[target.id]
+          if (section) openSettings(section)
+          else setSettingsOpen(false)
         } else if (target.kind === "auth") {
           // An OAuth redirect. Never echo `target.raw` or `target.params` —
           // they carry a one-time authorization code. `completeEntraRedirect`
@@ -319,23 +368,23 @@ function Shell() {
     const offMenu = onShellEvent<string>("menu", (command) => {
       switch (command) {
         case "new-thread":
-          setTab("chat")
+          setSettingsOpen(false)
           setActiveThreadId(null)
           break
         case "toggle-theme":
           toggleTheme()
           break
         case "open-approvals":
-          setTab("approvals")
+          openSettings("approvals")
           break
         case "open-integrations":
-          setTab("integrations")
+          openSettings("connectors")
           break
         case "open-routines":
-          setTab("routines")
+          openSettings("routines")
           break
         case "open-usage":
-          setTab("usage")
+          openSettings("usage")
           break
         case "reload":
           location.reload()
@@ -349,7 +398,7 @@ function Shell() {
       offDeepLink()
       offMenu()
     }
-  }, [openApproval, setActiveBotId, setActiveThreadId, setTab, toggleTheme, toast])
+  }, [openApproval, openSettings, setActiveBotId, setActiveThreadId, toggleTheme, toast])
 
   /* ------------------------------------------------------------------ *
    * Keyboard
@@ -364,19 +413,16 @@ function Shell() {
    *  - The typing guard is applied **per binding**, not to the whole handler.
    *    A blanket "do nothing while a field has focus" was the first version and
    *    it was wrong in practice: the composer takes focus on load, so the app
-   *    opened with every shortcut already disabled and `Ctrl+1` — which the
-   *    palette advertises next to "Chat" — did nothing at all until you clicked
-   *    somewhere neutral first. A shortcut the product advertises and does not
-   *    honour is worse than one it never mentions.
+   *    opened with every shortcut already disabled.
    *
    *    So the test is whether the chord could plausibly be text editing.
-   *    Ctrl/Cmd with a digit cannot be; neither can Ctrl/Cmd+Shift+D. Those
-   *    work everywhere. `Ctrl+N` is a real readline binding people use inside
+   *    Ctrl/Cmd+comma cannot be; neither can Ctrl/Cmd+Shift+D. Those work
+   *    everywhere. `Ctrl+N` is a real readline binding people use inside
    *    textareas, so that one still stands down while a field has focus.
-   *  - `Ctrl/Cmd+Shift+D` for the desktop pane rather than F11, which the
+   *  - `Ctrl/Cmd+Shift+D` for the computer pane rather than F11, which the
    *    WebView reserves.
    * ------------------------------------------------------------------ */
-  const toggleDesktop = desktopLayout.toggleExpanded
+  const toggleDesktopOpen = desktopLayout.toggleOpen
   const [paletteOpen, setPaletteOpen] = useState(false)
 
   useEffect(() => {
@@ -402,21 +448,14 @@ function Shell() {
       if (event.shiftKey) {
         if (key === "d") {
           event.preventDefault()
-          toggleDesktop()
+          toggleDesktopOpen()
         }
         return
       }
 
-      // Ctrl/Cmd+1…6 walks the sidebar in the order the sidebar is drawn in.
-      // `event.code` rather than `event.key`, so it survives a layout where
-      // the top row produces symbols instead of digits.
-      const digit = /^Digit([1-9])$/.exec(event.code)?.[1]
-      if (digit) {
-        const index = Number(digit)
-        if (index <= TAB_ORDER.length) {
-          event.preventDefault()
-          setTab(TAB_ORDER[index - 1])
-        }
+      if (key === ",") {
+        event.preventDefault()
+        openSettings("general")
         return
       }
 
@@ -424,21 +463,22 @@ function Shell() {
       // readline "next line" chord and people use it inside textareas.
       if (key === "n" && !typing) {
         event.preventDefault()
-        setTab("chat")
+        setSettingsOpen(false)
         setActiveThreadId(null)
       }
     }
     window.addEventListener("keydown", onKeyDown)
     return () => window.removeEventListener("keydown", onKeyDown)
-  }, [toggleDesktop, setTab, setActiveThreadId])
+  }, [toggleDesktopOpen, openSettings, setActiveThreadId])
 
   /*
    * What the palette can reach.
    *
    * Teammates first, because "talk to Vesna" is the most common intent in the
-   * product and because it is the list that changes. Then the sections, then
-   * the handful of window-level things. Nothing here decides an approval — see
-   * the note at the top of `CommandPalette`.
+   * product and because it is the list that changes. Then the conversations
+   * themselves, then the settings sections, then the handful of window-level
+   * things. Nothing here decides an approval — see the note at the top of
+   * `CommandPalette`.
    */
   const commands = useMemo<Command[]>(() => {
     const items: Command[] = bots.bots.map((bot) => ({
@@ -449,20 +489,49 @@ function Shell() {
       glyph: "bot",
       keywords: bot.slug,
       run: () => {
-        setActiveBotId(bot.id)
-        setTab("chat")
+        setSettingsOpen(false)
+        startWithBot(bot)
       },
     }))
 
-    for (const [index, entry] of TAB_ORDER.entries()) {
+    for (const thread of threads.threads.slice(0, 12)) {
+      const seated = (thread.bot_ids ?? []).map((id) => bots.byId[id]?.name).filter(Boolean)
       items.push({
-        id: `tab-${entry}`,
-        label: TAB_LABELS[entry],
-        detail: entry === "approvals" && approvals.pendingCount > 0 ? `${approvals.pendingCount} waiting` : undefined,
-        shortcut: `Ctrl ${index + 1}`,
+        id: `thread-${thread.id}`,
+        label: thread.title || "Untitled conversation",
+        detail: seated.length > 1 ? seated.join(", ") : undefined,
+        group: "Conversations",
+        glyph: "chat",
+        run: () => {
+          setSettingsOpen(false)
+          selectThread(thread)
+        },
+      })
+    }
+
+    const sections: Array<[SettingsSection, string]> = [
+      ["general", "General"],
+      ["models", "Models"],
+      ["approvals", "Approvals"],
+      ["connectors", "Connectors"],
+      ["routines", "Routines"],
+      ["usage", "Usage"],
+      ["profile", "Profile"],
+      ["work", "Work"],
+      ["audit", "Audit"],
+      ["knowledge", "Knowledge"],
+    ]
+    for (const [section, label] of sections) {
+      items.push({
+        id: `settings-${section}`,
+        label,
+        detail:
+          section === "approvals" && approvals.pendingCount > 0
+            ? `${approvals.pendingCount} waiting`
+            : "Settings",
         group: "Go to",
-        glyph: TAB_GLYPHS[entry],
-        run: () => setTab(entry),
+        glyph: "sliders",
+        run: () => openSettings(section),
       })
     }
 
@@ -475,18 +544,18 @@ function Shell() {
         group: "Actions",
         glyph: "plus",
         run: () => {
-          setTab("chat")
+          setSettingsOpen(false)
           setActiveThreadId(null)
         },
       },
       {
         id: "act-desktop",
-        label: desktopLayout.expanded ? "Restore the Bot Desktop pane" : "Maximise the Bot Desktop",
+        label: desktopLayout.open ? "Close the Agent Computer" : "Open the Agent Computer",
         shortcut: "Ctrl ⇧ D",
         group: "Actions",
         glyph: "monitor",
-        keywords: "screen fullscreen expand",
-        run: toggleDesktop,
+        keywords: "screen desktop computer",
+        run: toggleDesktopOpen,
       },
       {
         id: "act-theme",
@@ -512,6 +581,7 @@ function Shell() {
         keywords: "reload refetch",
         run: () => {
           void bots.refetch()
+          void threads.refetch()
           void approvals.refetch()
           void health.refetch()
         },
@@ -521,51 +591,33 @@ function Shell() {
     return items
   }, [
     bots,
+    threads,
     approvals,
     health,
     activeBot,
-    desktopLayout.expanded,
-    setActiveBotId,
-    setTab,
+    desktopLayout.open,
+    selectThread,
+    startWithBot,
+    openSettings,
     setActiveThreadId,
-    toggleDesktop,
+    toggleDesktopOpen,
     toggleTheme,
   ])
 
   const apiDown = Boolean(health.error)
 
   /*
-   * What the footer reports.
-   *
-   * `version` is the API contract number, hand-maintained in the server source;
-   * `build` is the image tag stamped at docker build time. Showing only the
-   * former made a fresh deploy look like a stale one - the footer read
-   * "API 0.2.0" while image v0.3.0 was serving. Prefer the build, because that
-   * is the question someone reads this line to answer.
-   */
-  const build = health.data?.build
-  const apiLabel =
-    build && build !== "unknown" ? build : (health.data?.version ?? "connected")
-
-  /*
-   * Switching panels.
-   *
-   * Six tabs that used to swap their entire contents between one frame and the
-   * next, which reads as a page reload rather than as a move within one app.
-   * A short rise settles the incoming panel, so the change is legible as a
-   * change.
-   *
-   * Opacity resolves over `fast` and only the offset takes `base`: the panel a
-   * person just asked for must never be waiting on an animation. `revertOnUpdate`
-   * so each switch starts from a clean slate rather than compounding transforms
-   * on a pane that is scrolled.
+   * A short rise settles the chat pane when the conversation changes, so the
+   * switch is legible as a move within one app rather than a page load.
+   * Opacity resolves over `fast` and only the offset takes `base`: what a
+   * person just asked for must never be waiting on an animation.
    */
   useGSAP(
     () => {
       gsap.from(mainRef.current, { y: 8, duration: dur("base"), ease: ease("entrance") })
       gsap.from(mainRef.current, { autoAlpha: 0, duration: dur("fast"), ease: ease("entrance") })
     },
-    { dependencies: [tab], revertOnUpdate: true },
+    { dependencies: [activeThreadId], revertOnUpdate: true },
   )
 
   return (
@@ -573,87 +625,57 @@ function Shell() {
       ref={desktopLayout.shellRef}
       className={cx(
         "app",
-        desktopLayout.expanded && "app--desktop-expanded",
+        desktopLayout.open ? "app--desktop-open" : "app--desktop-closed",
+        desktopLayout.open && desktopLayout.expanded && "app--desktop-expanded",
         desktopLayout.resizing && "app--resizing",
       )}
     >
-      <Sidebar
-        tab={tab}
-        onTabChange={setTab}
-        onOpenPalette={() => setPaletteOpen(true)}
-        pendingApprovals={approvals.pendingCount}
-        statusLine={apiDown ? "API unreachable" : `API ${apiLabel}`}
-        statusTone={apiDown ? "error" : "ok"}
-        botList={{
-          bots: bots.bots,
-          loading: bots.initialising,
-          error: bots.error,
-          activeBotId,
-          onSelect: (bot) => {
-            setActiveBotId(bot.id)
-            setTab("chat")
-          },
-          onRetry: () => void bots.refetch(),
-        }}
+      <ConversationList
+        threads={threads.threads}
+        bots={bots.bots}
+        loading={threads.initialising || bots.initialising}
+        error={threads.error ?? bots.error}
+        activeThreadId={activeThreadId}
+        onSelectThread={selectThread}
+        onStartWithBot={startWithBot}
+        onStartGroup={startGroup}
+        spendLabel={apiDown ? "API unreachable" : usd(usage.totalSpend, true)}
+        desktopOpen={desktopLayout.open}
+        onToggleDesktop={toggleDesktopOpen}
+        onOpenSettings={() => openSettings("general")}
+        themeButton={
+          <button
+            type="button"
+            className="rail__tool"
+            onClick={toggleTheme}
+            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+            title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+          >
+            <Icon name={theme === "dark" ? "sun" : "moon"} size={15} />
+          </button>
+        }
       />
 
       <main className="main" ref={mainRef}>
-        {tab === "chat" ? (
-          <ErrorBoundary label="Chat">
-            <ChatPane
-              bots={bots.bots}
-              botsLoading={bots.initialising}
-              botsError={bots.error}
-              onApprovalRaised={onApprovalRaised}
-              onTurnComplete={onTurnComplete}
-            />
-          </ErrorBoundary>
-        ) : null}
-
-        {tab === "approvals" ? (
-          <ErrorBoundary label="Approvals">
-            <ApprovalsPanel approvals={approvals} bots={bots.bots} />
-          </ErrorBoundary>
-        ) : null}
-
-        {tab === "integrations" ? (
-          <ErrorBoundary label="Integrations">
-            <IntegrationsPanel bots={bots.bots} activeBotId={activeBotId} onSelectBot={setActiveBotId} />
-          </ErrorBoundary>
-        ) : null}
-
-        {tab === "routines" ? (
-          <ErrorBoundary label="Routines">
-            <RoutinesPanel bots={bots.bots} activeBotId={activeBotId} onSelectBot={setActiveBotId} />
-          </ErrorBoundary>
-        ) : null}
-
-        {tab === "usage" ? (
-          <ErrorBoundary label="Usage">
-            <UsagePanel refreshKey={usageRefresh} />
-          </ErrorBoundary>
-        ) : null}
-
-        {tab === "audit" ? (
-          <ErrorBoundary label="Audit">
-            <AuditPanel bots={bots.bots} />
-          </ErrorBoundary>
-        ) : null}
-
-        {tab === "knowledge" ? (
-          <ErrorBoundary label="Knowledge">
-            <KnowledgePanel />
-          </ErrorBoundary>
-        ) : null}
-
-        {tab === "builder" ? (
-          <ErrorBoundary label="Builder">
-            <BuilderPanel bots={bots} activeBotId={activeBotId} onSelectBot={setActiveBotId} />
-          </ErrorBoundary>
-        ) : null}
+        <ErrorBoundary label="Chat">
+          <ChatPane
+            bots={bots.bots}
+            botsLoading={bots.initialising}
+            botsError={bots.error}
+            threads={threads}
+            onApprovalRaised={onApprovalRaised}
+            onTurnComplete={onTurnComplete}
+            desktopOpen={desktopLayout.open}
+            onToggleDesktop={toggleDesktopOpen}
+            onEditProfile={(botId) => {
+              setActiveBotId(botId)
+              openSettings("profile")
+            }}
+          />
+        </ErrorBoundary>
       </main>
 
-      {desktopLayout.expanded ? null : (
+      {desktopLayout.open && !desktopLayout.expanded ? (
         <PaneSplitter
           width={desktopLayout.width}
           min={desktopLayout.minWidth}
@@ -663,11 +685,25 @@ function Shell() {
           onReset={desktopLayout.resetWidth}
           onResizingChange={desktopLayout.setResizing}
         />
-      )}
+      ) : null}
 
-      <ErrorBoundary label="Bot Desktop">
-        <DesktopPane bot={activeBot} layout={desktopLayout} />
-      </ErrorBoundary>
+      {desktopLayout.open ? (
+        <ErrorBoundary label="Agent Computer">
+          <DesktopPane bot={activeBot} layout={desktopLayout} onClose={() => setDesktopOpen(false)} />
+        </ErrorBoundary>
+      ) : null}
+
+      <SettingsSheet
+        open={settingsOpen}
+        section={settingsSection}
+        onSection={setSettingsSection}
+        onClose={() => setSettingsOpen(false)}
+        bots={bots}
+        approvals={approvals}
+        activeBotId={activeBotId}
+        onSelectBot={setActiveBotId}
+        usageRefreshKey={usageRefresh}
+      />
 
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} />
 
@@ -677,11 +713,11 @@ function Shell() {
         requests={offscreenTakeovers}
         nameFor={takeoverName}
         onOpen={focusTakeover}
-        stacked={Boolean(focusApprovalId) && tab !== "approvals"}
+        stacked={Boolean(focusApprovalId) && !settingsOpen}
       />
 
-      {focusApprovalId && tab !== "approvals" ? (
-        <button type="button" className="floating-hint" onClick={() => setTab("approvals")}>
+      {focusApprovalId && !settingsOpen ? (
+        <button type="button" className="floating-hint" onClick={() => openSettings("approvals")}>
           <Icon name="shield" size={15} />
           An approval is waiting — open Approvals
         </button>

@@ -27,6 +27,7 @@ Two rules shape the loop:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -34,17 +35,23 @@ import os
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from functools import lru_cache
 from typing import Any
+from urllib.parse import unquote_plus
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
+
+# The postgres dialect's INSERT, for `ON CONFLICT DO NOTHING` on a composite
+# primary key - see `_seat_bot`.
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.db import release_transaction
 from app.models import (
     Approval,
     AuditEvent,
@@ -63,7 +70,12 @@ from app.models import (
 )
 from app.services import agent_work_items, events, rag, simulation
 from app.services import browser as browser_ops
-from app.services.agent_work_items import WORK_ITEM_TOOL_NAMES, WORK_ITEM_TOOL_SCHEMAS
+from app.services.agent_work_items import (
+    TOOL_CREATE_WORK_ITEM,
+    TOOL_TRANSFER_WORK_ITEM,
+    WORK_ITEM_TOOL_NAMES,
+    WORK_ITEM_TOOL_SCHEMAS,
+)
 from app.services.approvals import create_approval
 from app.services.connectors import validate_action_input
 from app.services.context_budget import (
@@ -172,6 +184,56 @@ it. If an action failed, say it failed. If the desktop would not start, say so.
 If you have no credential for a site, say that instead of pretending. Never
 describe a screen you were not shown, and never report held or planned work as
 work you completed."""
+
+# ---------------------------------------------------------------------------
+# How to search for something, which is not the same as knowing how to type
+# ---------------------------------------------------------------------------
+#
+# The reported failure, verbatim: *"If i tell the leads agent to search for
+# companies that needs CRMs on linkedin and instagram that is the exact query
+# that the bot does: 'Companies that need CRM'."*
+#
+# That query cannot work, and the reason is worth stating precisely because it
+# generalises to every research task the product will ever be given: a search
+# index matches **strings that appear on pages**, and no company writes its own
+# unmet needs on its own website. The ask is a judgement about a company; the
+# index only holds what somebody typed. So the query returns vendor pages and
+# listicles, the bot reads them, and it reports back categories instead of
+# accounts — while having done every step it was asked to do.
+#
+# What closes the gap is a translation step the model will not perform unless it
+# is told to: from the judgement it was handed to the observable footprint that
+# judgement leaves behind. "Needs a CRM" is not written down anywhere, but "we
+# are hiring our first sales ops manager" is, and so is a job ad whose tool list
+# has no CRM in it, and so is a founder complaining about lost follow-ups. Those
+# are searchable strings, and each one is evidence a human would accept.
+#
+# It lives in the static block with the desktop vocabulary rather than in
+# `bots/lead_generator.yaml` for the same two reasons that text does: every bot
+# with a browser has this problem, and the static block is the part of the
+# prompt Azure's cache pays for — see `compose_system_prompt`. Worked examples
+# and not just rules, because "decompose the query" is itself an abstraction and
+# the failure being fixed is a failure to make one concrete.
+
+RESEARCH_TRADECRAFT = """## Finding things out
+
+A search box matches words on a page, not intent. Nobody publishes their own
+gaps, so `companies that need a CRM` returns vendors and listicles and no account
+you could contact: typing the request you were given into a search box is the
+most common way research fails, and it fails while looking busy.
+
+Turn the ask into **footprints** — what somebody else wrote down *because* the
+thing you want is true: a job ad for a first SDR hire, a tool list with no CRM in
+it, "we track deals in a spreadsheet", a one-star review of a rival, a funding or
+headcount jump. Search those, in the words that page would use. Three to six
+narrow queries, one per footprint, with site: operators, quoted exact phrases and
+the site's own filters; when a surface is dry, change surface — job boards,
+review sites, Reddit, Instagram, Maps — rather than rephrasing.
+
+Report names, each with a URL and the line that made you pick it. "SaaS companies
+in Milan" is the brief restated back; ten named companies with a reason each is an
+answer. Found four, say four. Deliver what makes the answer useful — a name, a
+person, a reason to act now — not only what the sentence literally asked for."""
 
 #: `action` -> the one line the model reads about it. The protocol block is
 #: generated from this table, so the vocabulary the prompt advertises and the
@@ -744,6 +806,31 @@ DESKTOP_MAX_UNCHANGED_SCREENS = _env_int("DESKTOP_MAX_UNCHANGED_SCREENS", 3)
 #: what keeps that honest.
 AGENT_LOOP_TASK = "deep_plan"
 
+#: What an *ordinary* loop iteration asks for, as opposed to a decision.
+#:
+#: `AGENT_LOOP_TASK` routes to the reason tier, which on this deployment is one
+#: 50,000-token-a-minute Grok deployment holding its model's entire regional
+#: quota (50 of a limit of 50, measured 2026-09-03). At the ~9,800-token mean
+#: of a loop request that is about five calls a minute, and a single run makes
+#: dozens - so pinning every iteration to it throttled the product into
+#: appearing broken.
+#:
+#: The split is by what the call is *for*. `browser_snapshot` -> read the refs
+#: -> `browser_click(ref)` is execution: the plan was made earlier and this step
+#: is carrying it out, which the mini tier does perfectly well on a deployment
+#: with forty times the headroom. Judgement keeps the reasoning model - see
+#: `_step_task`.
+AGENT_STEP_TASK = "agent_step"
+
+#: How many opening steps keep the reasoning model before the loop drops to the
+#: mini tier for continuations.
+#:
+#: Three, because that is where the shape of a run is decided: look at the
+#: screen, decide the approach, take the first real action. A run that has got
+#: past its third step without failing is executing a plan, and
+#: `_step_task` escalates it straight back the moment that stops being true.
+AGENT_REASONING_STEPS = _env_int("AGENT_REASONING_STEPS", 3)
+
 #: The one extra model call a truncated run is allowed to make, and the tier it
 #: makes it on. `compact` routes to `nano`: this is a summary of a transcript
 #: that is already in the request, not a decision, and paying reason-tier prices
@@ -833,6 +920,95 @@ REPROMPT_FOR_ACTION = (
     "plainly that you did not act and why — do not present a plan as progress."
 )
 
+#: The delegation-shaped variant of the same failure. A bot that writes
+#: "Jordan, generate the list" has addressed nobody: the other bots on a thread
+#: do not read each other's messages and are not woken by being named. The
+#: reply is posted to the person and the work never starts, which is exactly
+#: what a chief of staff briefing two specialists in prose looks like from the
+#: outside — three confident replies and nothing running.
+REPROMPT_FOR_DELEGATION = (
+    "You wrote instructions to another bot as prose. That does nothing: the other bots "
+    "on this thread never see your messages and are not started by being named — only "
+    f"`{TOOL_DELEGATE_TO_BOT}` starts them, and it is the only way work reaches them. "
+    "Call it now, once per bot you are briefing, putting what you just wrote to them "
+    "into the brief. If you meant to do the work yourself, call the tool for the first "
+    "step instead. If there is genuinely nothing to run, call `task_complete` and say "
+    "plainly that nothing was delegated — do not present a plan as progress."
+)
+
+#: The third shape, and the only one where the bot really did take the step it
+#: was asked for. `RESEARCH_TRADECRAFT` tells the model how to search; this is
+#: what it is told at the moment it does not, with the query it actually typed
+#: quoted back at it. Stated as a mechanical fact about search indexes rather
+#: than as a style note, because "be more creative" is not actionable and "no
+#: page contains this sentence" is.
+REPROMPT_FOR_QUERY_CRAFT = (
+    "That query was not run, and nothing else about your task has changed. You typed "
+    "{query!r} — that is a judgement about a company, and a search index only matches "
+    "words that are actually written on a page. No company publishes that it needs "
+    "something, so this returns vendor pages and listicles and no accounts.\n"
+    "Translate it into a footprint somebody else wrote down *because* the thing you "
+    "want is true — a job ad for the role that implies the gap, a tool list that is "
+    "missing something, a complaint about the current tool, a funding or headcount "
+    "change — and search for that, in the words that page would use. Use the site's "
+    "own filters and site: operators. Run several narrow searches, not one broad one. "
+    "Then send the next tool call; do not reply with prose."
+)
+
+#: An entity class followed by a relative clause about what it needs: "companies
+#: that need a CRM", "businesses looking for a new supplier", "shops that don't
+#: have a website". The reported bug, as a pattern.
+#:
+#: Written narrowly on purpose, and the exclusions matter more than the matches.
+#: `companies that use Salesforce` is a *good* query — it is a footprint, it is
+#: on pages, and a bot that gets re-prompted for typing it has been given a
+#: confident wrong correction, which is worse than the bug. So the verb list is
+#: only ever about need, absence or want; `use`, `sell`, `run`, `hire` and
+#: everything else a page states as fact are deliberately absent, and no
+#: restatement-of-the-ask check sits beside this — "dentists in Milan" is both a
+#: near-copy of the brief and exactly the right thing to type.
+JUDGEMENT_QUERY_RE = re.compile(
+    r"\b(?:compan(?:y|ies)|business(?:es)?|startups?|firms?|brands?|clients?|"
+    r"customers?|leads?|prospects?|organi[sz]ations?|shops?|stores?|restaurants?|"
+    r"agenc(?:y|ies)|smes?|smbs?|people|owners?|founders?)\b"
+    r"[\w\s,'-]{0,40}?"
+    r"(?:"
+    # A relative clause: "companies **that need** a CRM".
+    r"\b(?:that|who|which)\b\s*"
+    r"(?:need|needs|want|wants|require|requires|lack|lacks|miss|missing|"
+    r"could use|would benefit|are looking|is looking|are in the market|"
+    r"do ?n[o']t have|does ?n[o']t have|have no|has no)\b"
+    # Or the same thing as a participle: "companies **looking for** a supplier".
+    r"|\b(?:needing|wanting|lacking|seeking|missing|looking for|in need of|"
+    r"in the market for|without a|without any)\b"
+    r")",
+    re.IGNORECASE,
+)
+
+#: How many judgement queries a run may have refused for it. One is the whole
+#: design: the point is to teach the turn, and a guard that can fire on every
+#: step of a run is a guard that can trap a run whose ask genuinely reads that
+#: way. After the allowance is spent the query goes through and the bot answers
+#: for the result it gets.
+AGENT_MAX_QUERY_NUDGES = _env_int("AGENT_MAX_QUERY_NUDGES", 1)
+
+#: How many times a run may be refused a close for having filed work items about
+#: other bots without handing any of them the work. One, on the same reasoning
+#: as `AGENT_MAX_QUERY_NUDGES`: the point is to teach the turn, and "file it for
+#: later, start nobody" is a legitimate ending that must stay reachable.
+AGENT_MAX_CLOSE_NUDGES = _env_int("AGENT_MAX_CLOSE_NUDGES", 1)
+
+#: The arguments a query can arrive in. `browser_navigate` is here because a
+#: model that already knows the URL shape types the query into it — a bare
+#: `https://www.google.com/search?q=companies+that+need+a+crm` is the same
+#: failure with the search box skipped.
+QUERY_BEARING_ARGUMENTS: dict[str, str] = {
+    "browser_type": "text",
+    "browser_navigate": "url",
+    "type": "text",
+    "clipboard_set": "text",
+}
+
 
 # ---------------------------------------------------------------------------
 # Bot-to-bot delegation
@@ -857,7 +1033,7 @@ REPROMPT_FOR_ACTION = (
 # stops working. The same key makes a parked delegated run resumable by that
 # person — `resolve_run_owner` reads it off `runs.context_ledger`. What the
 # audit gains instead of "the sales bot did it" is the whole path:
-# `norbert → lead_generator → sales`.
+# `avery → lead_generator → sales`.
 #
 # **Delegation is a new way to spend money with no human turn in between**, so
 # it is bounded three ways at once and each bound answers a different shape of
@@ -948,8 +1124,8 @@ RUN_REQUESTED_BY_KEY = "requested_by"
 def _actor_label(user: User) -> str:
     """Short name for the human at the head of a chain, for the audit path.
 
-    The local part of the address, not the display name: `norbert` reads as an
-    identity in `norbert → lead_generator → sales`, where "Norbert Vandenberg"
+    The local part of the address, not the display name: `avery` reads as an
+    identity in `avery → lead_generator → sales`, where "Avery Vandenberg"
     reads as prose, and the address is the field that is always populated.
     Never the full address — an audit path is rendered in UIs and in logs, and
     a chain is not a place to spray a contact detail.
@@ -1345,6 +1521,51 @@ class SnapshotRefs:
     refs: dict[str, tuple[str, str]]
 
 
+
+def mentioned_bots(text: str, candidates: Iterable[Bot]) -> list[Bot]:
+    r"""The bots an `@` mention in `text` resolves to, longest name first.
+
+    Pure and module-level on purpose. This is the whole of the rule that
+    decides who joins a conversation, it was wrong once in a way that was
+    invisible from the outside, and a function with no database in it can be
+    tested in a line — see `test_mentions_seat_bots.py`.
+
+    Matched against each bot's own name and slug rather than by grabbing the
+    token after an `@`, because names have spaces in them ("@Lead Generator")
+    and a handle that resolves to nothing is prose. `[\s_-]*` between the words
+    makes "@Lead Generator", "@lead_generator" and "@lead-generator" one
+    mention. Longest name first so "@Lead Generator" cannot match a bot called
+    "Lead" and stop there.
+
+    `ADDRESSED_BOT_MIN_TOKEN_CHARS` keeps a very short name from matching inside
+    an ordinary word, which is the same reason `_addresses_another_bot` has it.
+    """
+    if "@" not in (text or ""):
+        return []
+    # Matched text is consumed as it is claimed, longest name first. Without
+    # that, "@Lead Generator" also matches a bot called "Lead" - the prefix is
+    # a legitimate match for the shorter handle, and the person mentioned one
+    # bot, not two. Blanked rather than removed so every later match is still
+    # looking at the original offsets.
+    remaining = text
+    found: list[Bot] = []
+    for bot in sorted(candidates, key=lambda b: len(b.name or ""), reverse=True):
+        for handle in (bot.name or "", bot.slug or ""):
+            handle = handle.strip()
+            if len(handle) < ADDRESSED_BOT_MIN_TOKEN_CHARS:
+                continue
+            pattern = r"[\s_-]*".join(re.escape(part) for part in handle.split())
+            hit = re.search(r"@\s*" + pattern, remaining, re.IGNORECASE)
+            if hit:
+                found.append(bot)
+                remaining = (
+                    remaining[: hit.start()]
+                    + " " * (hit.end() - hit.start())
+                    + remaining[hit.end() :]
+                )
+                break
+    return found
+
 @dataclass
 class AgentSession:
     """Everything one agent run accumulates, and how it ended.
@@ -1433,6 +1654,16 @@ class AgentSession:
     #: exists. Ids and not rows — the row can change underneath the run and the
     #: tools re-read it every time.
     work_item_ids: set[str] = field(default_factory=set)
+    #: Names of bots the *person* addressed on this message and who are not the
+    #: one answering — the `@Sales @Lead Generator` on a message sent to the
+    #: chief of staff.
+    #:
+    #: Carried on the session so the loop can ask the question the close guard
+    #: needs: the person named these bots, did any of them actually get the
+    #: work? A tag is the clearest statement of intent the product has — it says
+    #: whose job the person thinks this is — and it was previously visible only
+    #: to the prompt.
+    addressed_teammates: set[str] = field(default_factory=set)
 
     def remember_refs(self, snapshot: SnapshotRefs) -> None:
         """Record one snapshot's provenance, dropping the oldest beyond the cap."""
@@ -1494,7 +1725,44 @@ ANNOUNCEMENT_PHRASES: tuple[str, ...] = (
     "shall i ",
     "i can start by",
     "i'll take it from here",
+    # The second wave, from a thread where a chief of staff briefed two
+    # specialists in prose and all three then reported for duty without a
+    # single tool call between them. Present tense and bare futures: the
+    # original list only caught "I'll" and "let me", so "Starting research
+    # now" and "Will pull named accounts" sailed straight through the gate.
+    "starting now",
+    "starting research",
+    "starting desktop",
+    "i'm starting",
+    "i am starting",
+    "i'm on it",
+    "on it,",
+    "will pull",
+    "will draft",
+    "will prepare",
+    "will compile",
+    "will start",
+    "will begin",
+    "will post",
+    "will report",
+    "i'll pull",
+    "i'll draft",
+    "i'll prepare",
+    "i'll compile",
+    "i'll approve",
+    "i'll put together",
+    "i'll stay on",
+    "stand by",
+    "standing by",
+    "once the list",
+    "do not message yet",
+    "no messages sent",
 )
+
+#: Slugs are snake_case and roles are prose; both are matched case-folded
+#: against a reply, so a chief of staff writing "Jordan, generate a list" is
+#: recognised as addressing `lead_generator`. See `_addresses_another_bot`.
+ADDRESSED_BOT_MIN_TOKEN_CHARS = 3
 
 # Fanned out to passive `/threads/{id}/events` subscribers. `token` is absent on
 # purpose: the requesting client gets deltas on its own SSE response, and a
@@ -1726,8 +1994,18 @@ def desktop_static_block() -> str:
     than once per turn, and because a cache prefix has to be *identical*: one
     string, built once, removes the possibility of two callers rendering the
     same vocabulary two subtly different ways.
+
+    `RESEARCH_TRADECRAFT` joins them for both reasons at once. It is the same on
+    every request — it is about how a search index works, not about this bot,
+    this thread or this task — so it extends the cached prefix rather than
+    ending it, and it is only worth 50% of its ~380 tokens after the first call
+    of the day. It sits last of the three because the two above it are what a
+    model needs in order to take any step at all; this is what it needs in order
+    for the step to be worth taking.
     """
-    return DESKTOP_CAPABILITY + "\n\n" + desktop_protocol_block()
+    return "\n\n".join(
+        (DESKTOP_CAPABILITY, desktop_protocol_block(), RESEARCH_TRADECRAFT)
+    )
 
 
 #: Prefix length, in tokens, that Azure OpenAI requires before its automatic
@@ -1738,9 +2016,53 @@ def desktop_static_block() -> str:
 CACHE_PREFIX_MIN_TOKENS = 1024
 
 
+def persona_block(bot: Bot) -> str:
+    """Who this bot is, as opposed to what it does.
+
+    `system_prompt` is the standing job. This is the identity it is carried out
+    under — the address a draft comes from, the voice it is written in, the
+    sign-off, and which applications this one reaches for on its own machine.
+    All four were added because every bot wrote in the same anonymous register
+    and signed nothing: five teammates whose output was indistinguishable, in a
+    product whose whole premise is that they are different people.
+
+    Each line is omitted when its field is unset, so a bot with no persona gets
+    no block at all and behaves exactly as it did before. Per-bot and stable
+    between turns, so it belongs in the cached half of the prompt, immediately
+    behind the bot's own prompt — see `compose_system_prompt`.
+
+    The email line is deliberately explicit about what the address is *not*.
+    A model told "your address is ops@nesqualtech.com" will otherwise claim to
+    have checked its inbox, and there is no inbox: mail arrives only through a
+    configured inbound source, and sending is a `send`-class action that waits
+    for a human either way.
+    """
+    lines: list[str] = []
+    if bot.email:
+        # Three facts in one sentence, deliberately: this is paid on every
+        # request of every run, so the wording is a token budget decision as
+        # much as a clarity one. The long version said the same thing about
+        # inbound sources and mail connectors, which is machinery this bot
+        # cannot act on anyway.
+        lines.append(
+            f"You draft as {bot.email}. It is an identity, not an inbox: you cannot "
+            "read mail there, and sending always waits for a human."
+        )
+    if bot.voice:
+        lines.append(f"How you write: {bot.voice.strip()}")
+    if bot.signature:
+        lines.append(f"Sign what you write: {bot.signature.strip()}")
+    if bot.desktop_habits:
+        lines.append(f"On your own machine: {bot.desktop_habits.strip()}")
+    if not lines:
+        return ""
+    return "Who you are:\n\n" + "\n\n".join(lines)
+
+
 def compose_system_prompt(
     *,
     bot_prompt: str,
+    persona: str = "",
     connector_block: str = "",
     memory_block: str = "",
     ledger_block: str = "",
@@ -1757,6 +2079,7 @@ def compose_system_prompt(
 
         stable   desktop vocabulary    2,173 tokens, identical for every bot
                  the bot's own prompt  85-400 tokens, identical per bot
+                 its persona           ~90 tokens, identical per bot
                  its connectors        changes when somebody edits a config
         ------   the cache boundary sits somewhere below here ---------------
         volatile RAG memories          re-ranked against every user message
@@ -1777,6 +2100,11 @@ def compose_system_prompt(
     that: the ordering, and that no block was dropped on the way.
     """
     stable = [desktop_static_block(), bot_prompt.strip()]
+    # Behind the prompt and still inside the cached half: persona is per-bot
+    # and does not change between turns, so it extends the stable prefix rather
+    # than ending it.
+    if persona:
+        stable.append(persona)
     if connector_block:
         stable.append(connector_block)
     volatile = [block for block in (memory_block, ledger_block, desktop_state) if block]
@@ -2266,6 +2594,97 @@ class Orchestrator:
     def __init__(self) -> None:
         self.router = ModelRouter()
 
+    # --------------------------------------------------- talking to the model
+    #
+    # Every model call this module makes goes through `_ask_model` or
+    # `_stream_model`, for one reason that has nothing to do with models.
+    #
+    # Production incident, 2026-09-02 09:31 UTC. A chief-of-staff turn logged
+    # two work items and then died on the *third* statement it tried:
+    #
+    #     find work items      2.8s
+    #     create work item    57.0s
+    #     create work item      46ms
+    #     sqlalchemy.exc.InterfaceError: (asyncpg.InterfaceError)
+    #         connection is closed
+    #     [SQL: INSERT INTO cost_ledger …]
+    #
+    # `nesqbot-pg` runs with `idle_in_transaction_session_timeout =
+    # 60000`. SQLAlchemy opens a transaction on the first statement and holds
+    # it until commit, so the turn's opening reads left one open; the model
+    # then thought for 57 seconds at the `reason` tier; Postgres saw a backend
+    # idle *in a transaction* past 60 seconds and terminated it; and the next
+    # statement — the cost-ledger insert — found a dead socket and took the
+    # whole turn down with it.
+    #
+    # Nothing about that is specific to `cost_ledger`, to work items, or to
+    # that prompt. Any turn whose gap between two statements exceeds a minute
+    # dies, and a reason-tier call routinely takes 30-90 seconds, so the
+    # product's most capable path was its least reliable one.
+    #
+    # The fix is to stop being idle *in a transaction* across the slow await:
+    # an idle connection is fine, it is the open transaction that is on a
+    # timer, and holding one across a model call was never doing any work
+    # anyway. Committing at that boundary is also the honest thing to do —
+    # everything read before a model call has been read, and anything written
+    # is a completed unit of work, or it should not be pending at a point where
+    # the process is about to wait a minute on a third party.
+    #
+    # A chokepoint rather than a commit pasted in front of ten call sites,
+    # because the eleventh is what this comment would otherwise be explaining
+    # again in six months. Same argument as `simulation.perform` for desktop
+    # effects: one door, so the invariant cannot be forgotten at one of them.
+
+
+    def _step_task(
+        self, *, step_no: int, consecutive_failures: int, unchanged_screens: int, nudged: bool
+    ) -> str:
+        """Reasoning model, or the cheap one, for the next loop iteration.
+
+        Four cases get the reasoning tier, and each is a case where the model
+        has to *decide* rather than execute:
+
+        * **The first few steps.** The opening of a run is where the approach is
+          chosen, and a bad plan cheaply made is the most expensive thing in the
+          system.
+        * **After a failure.** `consecutive_failures` means the obvious move
+          just did not work, which is exactly when a better model earns its
+          quota.
+        * **A screen that stopped changing.** The loop is repeating itself and
+          needs a different idea, not another attempt at the same one.
+        * **After a re-prompt.** Something the run did was refused - a
+          judgement-shaped search query, filing instead of delegating - and the
+          retry is the model reconsidering.
+
+        Everything else is a continuation, and continuations are the bulk of a
+        run: a browse of twenty steps is two or three decisions and seventeen
+        mechanical moves.
+        """
+        if nudged or consecutive_failures or unchanged_screens:
+            return AGENT_LOOP_TASK
+        return AGENT_LOOP_TASK if step_no <= AGENT_REASONING_STEPS else AGENT_STEP_TASK
+
+    async def _release_db(self, db: AsyncSession) -> None:
+        """End any open transaction so the connection survives the model call.
+
+        The rule and the incident behind it are in `db.release_transaction`,
+        which the Bot Desktop lane calls for the same reason from
+        `simulation.perform`. This is a named method rather than a bare call so
+        that the chokepoints below read as one thing.
+        """
+        await release_transaction(db)
+
+    async def _ask_model(self, db: AsyncSession, **kwargs: Any) -> ChatResult:
+        """One model call, with the database left in a state that can survive it."""
+        await self._release_db(db)
+        return await self.router.chat(**kwargs)
+
+    async def _stream_model(self, db: AsyncSession, **kwargs: Any) -> AsyncIterator[str]:
+        """The streaming variant. `router.last_result` is still where the result lands."""
+        await self._release_db(db)
+        async for delta in self.router.stream_chat(**kwargs):
+            yield delta
+
     # ------------------------------------------------------------------ public
 
     async def handle_user_message(
@@ -2364,6 +2783,33 @@ class Orchestrator:
             bots = await self._thread_bots(db, thread.id)
             if not bots:
                 raise RuntimeError("thread has no bots")
+
+            # ---- whoever the person @-mentioned is now in the room ---------
+            #
+            # This is the bug behind every "it never delegated" report in this
+            # product's history, and it was never in the prompts or the loop.
+            #
+            # `apps/desktop/src/components/ChatPane.tsx` creates a thread with
+            # `bot_ids: [activeBot.id]` — exactly one bot, always. So on a real
+            # thread `_delegate_targets` is empty, `_can_delegate` is False, and
+            # `delegate_to_bot` is not even advertised: the chief of staff was
+            # being told to hand work over while holding no tool that could.
+            # Meanwhile "@Lead Generator" in the message text was plain prose
+            # that nothing parsed. The person was addressing teammates who were
+            # not in the room, and every guard written to catch a bot that
+            # failed to delegate is gated on `_can_delegate` — so all of them
+            # stayed correctly, uselessly silent.
+            #
+            # Reading the message decides who is in the room. An `@` mention
+            # that resolves to a bot this user may see is a request for that
+            # bot, so it is seated on the thread and stays seated — the
+            # follow-up ("now close them") has to reach the same room.
+            mentioned = await self._seat_mentioned_bots(
+                db, thread=thread, user=user, content=content, roster=bots
+            )
+            if mentioned and any(b.id not in {r.id for r in bots} for b in mentioned):
+                bots = await self._thread_bots(db, thread.id)
+
             # The roster, captured before the mention filter narrows it. An
             # `@lead_generator` says who the person is *talking to*; it does not
             # take the other bots out of the room, and making delegation
@@ -2371,6 +2817,11 @@ class Orchestrator:
             # a capability that flickers for no reason the user could name.
             # Thread membership stays the one boundary — see `_delegate`.
             roster = list(bots)
+            # Deliberately *not* widened by the text mentions: this decides who
+            # *answers*, and the app names that in `mention_bot_ids`. A message
+            # to the chief of staff that mentions Sales is still a message to
+            # the chief of staff; Sales being in the room is what lets it hand
+            # the work over rather than answer in its place.
             if mention_bot_ids:
                 bots = [b for b in bots if b.id in mention_bot_ids] or bots
 
@@ -2466,6 +2917,15 @@ class Orchestrator:
                 )
 
             # ---- context -------------------------------------------------
+            # Tagged, and not the one answering. Both channels count: the app
+            # names the bot it is addressing in `mention_bot_ids`, and the
+            # person names teammates in the text - and the text is the one that
+            # matters here, because the app only ever names the bot whose chat
+            # window is open. What the prompt says was addressed, and what the
+            # close guard checks was started, are the same fact.
+            addressed_ids = set(mention_bot_ids or ()) | {b.id for b in mentioned}
+            tagged = [b for b in delegate_targets if b.id in addressed_ids]
+
             memories = await rag.search_memories(db, primary.id, user.id, content)
             ledger = await self._get_ledger(db, thread.id)
             history = await self._history(db, thread.id)
@@ -2473,6 +2933,7 @@ class Orchestrator:
 
             system = compose_system_prompt(
                 bot_prompt=primary.system_prompt,
+                persona=persona_block(primary),
                 connector_block=(
                     self._connector_block(bot_connectors) if bot_connectors else ""
                 ),
@@ -2483,7 +2944,7 @@ class Orchestrator:
                     else ""
                 ),
                 desktop_state=await self._desktop_state_line(db, primary.id),
-                delegation_block=self._delegation_block(delegate_targets, chain),
+                delegation_block=self._delegation_block(delegate_targets, chain, tagged=tagged),
             )
 
             # ---- read-only tool pass -------------------------------------
@@ -2538,7 +2999,8 @@ class Orchestrator:
                 )
             )
             if stream:
-                async for delta in self.router.stream_chat(
+                async for delta in self._stream_model(
+                    db,
                     task="agent_turn",
                     messages=messages,
                     tools=tools,
@@ -2550,7 +3012,8 @@ class Orchestrator:
                 if result is None:  # pragma: no cover - stream always sets it
                     raise RuntimeError("stream produced no result")
             else:
-                result = await self.router.chat(
+                result = await self._ask_model(
+                    db,
                     task="agent_turn",
                     messages=messages,
                     tools=tools,
@@ -2581,11 +3044,28 @@ class Orchestrator:
             latest = result
             refusal = ""
 
+            # Two shapes of the same failure, and the second one is why this
+            # `or` exists. A turn can narrate ("Starting research now, stand
+            # by") or it can delegate in prose ("Jordan, generate the list") —
+            # and the second reads as competent coordination while starting
+            # exactly nothing, because a bot is only ever woken by
+            # `delegate_to_bot`. Whichever tripped, the re-prompt names it.
+            said = self._said_in(result.content, calls)
+            prose_delegation = (
+                self._can_delegate(chain, delegate_targets)
+                and self._addresses_another_bot(said, delegate_targets)
+            )
+            # `not self._actionable(calls)` and not `not calls`, which is a third
+            # shape of it: a turn whose only call is
+            # `task_complete("I'll start pulling the list now")` has ended the
+            # run without acting, and the summary is posted as the answer. An
+            # empty list is not actionable either, so the narrating-prose case
+            # reads the same as it did.
             if (
-                not calls
+                not self._actionable(calls)
                 and connector_directive is None
                 and self.router.supports_tools_for(primary)
-                and self._announces_action(result.content)
+                and (self._announces_action(said) or prose_delegation)
             ):
                 # The reported bug, exactly: a turn that announces a first step
                 # and takes none. One explicit second chance, escalated to the
@@ -2593,9 +3073,11 @@ class Orchestrator:
                 # then an honest report either way. Nothing here executes
                 # anything — the retry only asks the model again, and only a real
                 # tool call can still cause an effect.
-                convo.append({"role": "assistant", "content": result.content})
-                convo.append({"role": "user", "content": REPROMPT_FOR_ACTION})
-                retry = await self.router.chat(
+                convo.append({"role": "assistant", "content": said or result.content})
+                nudge = REPROMPT_FOR_DELEGATION if prose_delegation else REPROMPT_FOR_ACTION
+                convo.append({"role": "user", "content": nudge})
+                retry = await self._ask_model(
+                    db,
                     task=AGENT_LOOP_TASK,
                     messages=convo,
                     tools=tools,
@@ -2611,7 +3093,13 @@ class Orchestrator:
                         thread.id, "token", {"delta": "\n\n" + retry.content}
                     )
                 reply_text = self._strip_directive(retry.content) or reply_text
-                if not calls:
+                if not self._actionable(calls) and prose_delegation:
+                    refusal = (
+                        "I briefed the other bots in writing instead of handing them the "
+                        "work, and did it again when asked. Nothing was delegated and "
+                        "none of them started."
+                    )
+                elif not self._actionable(calls):
                     refusal = (
                         "I described what I would do and then did not do it, twice. "
                         "Nothing ran and nothing was opened, clicked or sent."
@@ -2626,6 +3114,7 @@ class Orchestrator:
                     bot_id=primary.id,
                     user_id=user.id,
                     delegation=chain,
+                    addressed_teammates={b.name for b in tagged},
                 )
                 if calls[0].native:
                     convo.append(
@@ -2864,8 +3353,80 @@ class Orchestrator:
             # `thread_id` captured above, never `thread.id` - see the note there.
             logger.exception("turn failed for thread %s", thread_id)
             await self._fail_run(db, run, exc)
+            # Then say so *in the thread*. Marking the run `failed` and emitting
+            # an SSE `error` frame - which is all this did - leaves the
+            # transcript holding the person's own message and nothing else, and
+            # the SSE frame is gone the moment they switch tabs. That is the
+            # reported "I messaged and nothing happened at all... go back to the
+            # chat and it's like I never messaged": the message was always
+            # there, the failure never was. An assistant message is otherwise
+            # only written when a turn *finishes*.
+            await self._say_the_turn_failed(db, thread_id=thread_id, exc=exc)
             out.setdefault("error", str(exc))
             yield await self._emit(thread_id, "error", {"detail": str(exc)})
+
+    async def _say_the_turn_failed(
+        self, db: AsyncSession, *, thread_id: uuid.UUID | None, exc: BaseException
+    ) -> None:
+        """Persist one honest sentence about a turn that died mid-flight.
+
+        Deliberately not the exception text. What reached the person before this
+        existed, verbatim from their screen:
+
+            (sqlalchemy.dialects.postgresql.asyncpg.InterfaceError) <class
+            'asyncpg.exceptions._base.InterfaceError'>: connection is closed
+            [SQL: INSERT INTO cost_ledger …
+
+        The exception is kept on `runs.error`, where somebody debugging can read
+        it; the thread gets a sentence about what it means for the work. Rate
+        limiting is named specifically because it is the one failure that is
+        neither a bug nor the person's fault, and because the honest advice for
+        it - wait a minute, or give the bot less to do - is different from the
+        advice for anything else.
+
+        Never raises: this runs inside the failure handler, and a second failure
+        here would replace a reported error with an unreported one.
+        """
+        if thread_id is None:
+            return
+        rate_limited = type(exc).__name__ in ("RateLimitError", "APIStatusError") and (
+            "429" in str(exc) or "rate limit" in str(exc).lower()
+        )
+        if rate_limited:
+            body = (
+                "**I ran out of model capacity partway through and stopped.** The "
+                "reasoning model this deployment uses is limited to a fixed number of "
+                "tokens a minute, and a long task can reach it mid-step. Nothing was "
+                "half-sent: anything consequential still needs your approval, and "
+                "anything I had already done is in Work and Audit.\n\n"
+                "Ask again in a minute, or give me a narrower piece of it - one bot, "
+                "one list, one platform - and it will fit."
+            )
+        else:
+            body = (
+                "**Something broke partway through this turn and I stopped.** Whatever "
+                "I had already done is recorded in Work and Audit; nothing is still "
+                "running in the background, and nothing consequential went out without "
+                "your approval.\n\n"
+                "Send it again to retry. If it breaks in the same place twice, that is "
+                "a bug worth chasing rather than bad luck - the details are on the run "
+                "in Audit."
+            )
+        try:
+            db.add(
+                Message(
+                    thread_id=thread_id,
+                    bot_id=None,
+                    role="assistant",
+                    content=body,
+                    meta={"turn_failed": True, "error_type": type(exc).__name__},
+                )
+            )
+            await db.commit()
+        except Exception:  # noqa: BLE001 - the failure handler cannot itself fail
+            logger.warning("could not record the turn failure in thread %s", thread_id)
+            with contextlib.suppress(Exception):
+                await db.rollback()
 
     async def _fail_run(self, db: AsyncSession, run: Run | None, exc: BaseException) -> None:
         if run is None:
@@ -3107,6 +3668,135 @@ class Orchestrator:
         """
         blob = (assistant_content or "").lower()
         return any(phrase in blob for phrase in ANNOUNCEMENT_PHRASES)
+
+    def _addresses_another_bot(self, assistant_content: str, targets: list[Bot]) -> bool:
+        """Did the reply brief a bot on this thread in prose, instead of calling the tool?
+
+        Same narrow scope as `_announces_action`: this only decides whether to
+        **ask the model again**. No effect follows from it — a hand-off still
+        has to go through `_delegate`, which re-checks every rule.
+
+        The check is worth having because prose delegation is invisible from the
+        outside. "Jordan, generate a fresh list of 10-15 named companies" is a
+        complete, confident, well-formed instruction that reaches nobody: the
+        other bots do not read the thread and are not woken by their own name.
+        The person sees three bots agreeing to work and no work.
+
+        Matched against slug, role and the first word of the display name, since
+        a model addresses a colleague as "Jordan", not as `lead_generator`.
+
+        Vocative position only — `@sales`, or the name opening a sentence and
+        followed by a comma or colon. A bare mention is not enough and must not
+        be: "I'll pass this to sales once it's qualified" is a bot describing
+        its own plan, and re-prompting it with "you wrote instructions to
+        another bot" would be a confident, wrong correction.
+        """
+        blob = (assistant_content or "").lower()
+        if not blob:
+            return False
+        for target in targets:
+            candidates = {
+                (target.slug or "").lower(),
+                (target.role or "").lower(),
+                (target.name or "").split(" ", 1)[0].lower(),
+            }
+            for token in candidates:
+                # A two-letter name would match inside ordinary words; the whole
+                # point is to be cheap and quiet, not to catch every case.
+                if len(token) < ADDRESSED_BOT_MIN_TOKEN_CHARS:
+                    continue
+                name = re.escape(token)
+                if re.search(rf"@\s*{name}\b", blob):
+                    return True
+                if re.search(rf"(?:^|[.!?\n]\s*){name}\s*[,:—-]", blob):
+                    return True
+        return False
+
+    def _teammates_named_in(
+        self, arguments: dict[str, Any], targets: list[Bot]
+    ) -> set[str]:
+        """Which bots on this thread a set of tool arguments names.
+
+        `_addresses_another_bot` asks the same question of prose and is the
+        wrong shape here: what the chief of staff actually produced was
+
+            create_work_item(type="task",
+                             title="Lead Generator: Generate 20 qualified leads…")
+
+        so the teammate is named in a *value*, in a title that reads like a
+        to-do list entry rather than like a sentence addressed to anybody. The
+        prose guard finds nothing in that and the run looks like real work.
+
+        Deliberately looser than the prose version — a bare name counts, no `@`
+        and no trailing punctuation required — because the question being asked
+        is different. There it decides whether a *reply* was written at another
+        bot, where a bare mention is usually just discussion. Here the string is
+        already known to be the subject line of a record somebody filed, so
+        "Sales" in it means this row is about Sales. Full names and slugs only;
+        `ADDRESSED_BOT_MIN_TOKEN_CHARS` still keeps a two-letter name from
+        matching inside an ordinary word.
+        """
+        blob = " ".join(
+            str(value) for value in arguments.values() if isinstance(value, (str, int, float))
+        )
+        if not blob.strip():
+            return set()
+        named: set[str] = set()
+        for bot in targets:
+            for token in (bot.name, bot.slug, bot.slug.replace("_", " ")):
+                token = token.strip()
+                if len(token) < ADDRESSED_BOT_MIN_TOKEN_CHARS:
+                    continue
+                if re.search(rf"\b{re.escape(token)}\b", blob, re.IGNORECASE):
+                    named.add(bot.name)
+                    break
+        return named
+
+    def _said_in(self, content: str, calls: list[AgentCall]) -> str:
+        """Everything a turn actually said to the person — prose *and* summary.
+
+        `task_complete(summary="Starting research now, stand by")` puts the
+        announcement in a tool argument and leaves the reply empty, and that
+        summary is what gets posted to the thread. A guard reading only
+        `content` sees "" there and waves the ack through, which is the third
+        way the reported failure shows up: the run ends, nothing ran, and the
+        person is told work is starting.
+        """
+        parts = [content or ""]
+        parts += [
+            str(call.arguments.get("summary") or "")
+            for call in calls
+            if call.name in (TOOL_TASK_COMPLETE, DESKTOP_DONE)
+        ]
+        return "\n".join(part for part in parts if part.strip())
+
+    def _query_in(self, action: str, arguments: dict[str, Any]) -> str:
+        """The text a step is about to search with, if it is searching at all.
+
+        A URL is unquoted first, so `?q=companies+that+need+a+crm` reads as the
+        sentence it is. Only the value that can carry a query is looked at — a
+        `browser_type` into a password field is not a search and the pattern
+        below could not match one anyway.
+        """
+        field_name = QUERY_BEARING_ARGUMENTS.get(action)
+        if not field_name:
+            return ""
+        raw = str(arguments.get(field_name) or "")
+        return unquote_plus(raw) if field_name == "url" else raw
+
+    def _is_a_judgement_query(self, query: str) -> bool:
+        """Is this a search for an opinion about a company rather than for a page?
+
+        The reported bug: asked to find companies that need a CRM, the bot typed
+        exactly that. It is a well-formed English description of the target and a
+        query no index can answer, because the sentence appears on no page that
+        is not selling something.
+
+        Same narrow remit as the two guards above — this only decides whether to
+        refuse **one** step and ask again, `AGENT_MAX_QUERY_NUDGES` times in a
+        run. Nothing is executed off it and no reply is written from it.
+        """
+        return bool(query.strip()) and JUDGEMENT_QUERY_RE.search(query) is not None
 
     # ---------------------------------------------------------- agent agency
     #
@@ -4002,6 +4692,22 @@ class Orchestrator:
         unchanged_screens = 0
         consecutive_failures = 0
         browser_fallbacks = 0
+        #: Queries refused for stating a judgement instead of a footprint. Spent,
+        #: never reset: one lesson per run, and then the run gets on with it.
+        query_nudges = 0
+        #: Teammates this run has *filed a work item about* without handing them
+        #: the work. Names rather than a count, because the sentence the person
+        #: reads has to say who was not started. Cleared by a real hand-off:
+        #: filing the record and then delegating is the correct order.
+        filed_for: set[str] = set()
+        #: Whether `delegate_to_bot` was called at all. One flag for the whole
+        #: run, not per target: a run that woke somebody is not the failure this
+        #: is looking for, even if it also filed rows about a third bot.
+        delegated_this_run = False
+        #: Closes refused for filing instead of delegating. Same one-lesson
+        #: budget as `query_nudges`, and for the same reason — a run that really
+        #: did mean to leave the work filed must be able to end.
+        close_nudges = 0
         #: Latched the first time the sidecar says its `/browser` lane is not
         #: there. `browser_fallbacks` counts the model's *mistakes* and resets;
         #: this records a *fact about the machine* and does not, because a
@@ -4013,18 +4719,26 @@ class Orchestrator:
         last_screen: str | None = None
         reprompted = False
         booted_ok = await self._desktop_is_running(db, bot.id)
-        #: Read once. The thread's roster does not change under a running turn,
-        #: and re-querying it per request would put a database round trip inside
-        #: the hot loop to answer a question whose answer cannot have moved.
-        delegate_targets = await self._delegate_targets(db, thread, bot, session.delegation)
-        #: Who a *work item* may be handed to. The same thread-membership
-        #: boundary, and not the same list: `_delegate_targets` is empty on a
-        #: run that cannot delegate at all, and a run with no hops left can
-        #: still hand a lead to Sales — it just cannot wake them. Costs a second
-        #: query only on the runs where the first list came back empty.
-        handover_targets = delegate_targets or [
-            b for b in await self._thread_bots(db, thread.id) if b.id != bot.id
-        ]
+        #: Read once. Neither this person's team nor the thread's roster changes
+        #: under a running turn, and re-querying either per request would put a
+        #: database round trip inside the hot loop to answer a question whose
+        #: answer cannot have moved.
+        delegate_targets = await self._delegate_targets(
+            db, thread, bot, session.delegation, user
+        )
+        #: Who a *work item* may be assigned to. The same team as above, and
+        #: not the same list object: `delegate_targets` is empty on a run that
+        #: cannot delegate at all (no chain, or the hops are spent), and such a
+        #: run can still perfectly well hand a lead to Sales — assignment is
+        #: durable and asynchronous, so it does not care about the chain's
+        #: budget.
+        #:
+        #: An hour of this afternoon was spent with this narrowed to the thread
+        #: roster on the theory that a transfer "wakes nobody" and so should be
+        #: visible before it happens. It wakes somebody now
+        #: (`services.work_dispatch`), which is the point, and the dispatcher
+        #: seats the new owner when it does.
+        handover_targets = delegate_targets or await self._team(db, bot, user)
         #: Read once, like the roster above. Only ever grows during a turn — a
         #: create makes it true — and `work_item_held` covers that case, so a
         #: stale False cannot withhold a tool that has become useful.
@@ -4104,8 +4818,107 @@ class Orchestrator:
 
                 if call.name == TOOL_TASK_COMPLETE:
                     summary = str(call.arguments.get("summary") or "").strip()
+                    # ---- filing is not delegating ---------------------------
+                    #
+                    # The third shape of "nothing started", reported verbatim:
+                    # *"nothing was sent to either sales nor leads"*. What the
+                    # chief of staff actually did:
+                    #
+                    #     create_work_item  "Lead Generator: Generate 20 leads…"
+                    #     create_work_item  "Sales: Prepare to close deals…"
+                    #     update_work_item  → waiting
+                    #     update_work_item  → waiting
+                    #     task_complete     "Routed main goal tasks…"
+                    #
+                    # and its reply said it had *routed* the work. It had not.
+                    # A work item is a row in the customer's records; it wakes
+                    # nobody, and `services/work_items.py` is explicit that even
+                    # a real `transfer_work_item` is a durable change of owner
+                    # rather than a hand-off. Only `delegate_to_bot` starts
+                    # another bot.
+                    #
+                    # Neither existing guard could see it. `_announces_action`
+                    # runs on a turn that produced no tool calls, and this turn
+                    # produced five; `_addresses_another_bot` reads prose, and
+                    # here the teammates were named inside tool arguments. So
+                    # the run looked like work, cost five model calls, and
+                    # started nothing — which is the most expensive version of
+                    # this failure, because the person is told it was routed.
+                    #
+                    # Checked at the close rather than at the file, because
+                    # filing a record *and then* delegating is correct and
+                    # common: the item is how Sales finds the lead again. What
+                    # is wrong is only ever the ending.
+                    #
+                    # The second shape of the same ending, reported the day the
+                    # first was fixed: *"instead of delegating the work, it
+                    # started doing it himself"*. The chief of staff was told
+                    # that filing a row starts nobody, and drew the wrong
+                    # conclusion — it opened its own desktop and worked the
+                    # whole goal alone, on a thread where the person had tagged
+                    # the two specialists who own those accounts.
+                    #
+                    # Which is why the guard reads `owed`, not `filed_for`. A
+                    # tag is the clearest statement of intent this product has:
+                    # the person named those bots because they believe it is
+                    # those bots' job. A run that ends having done the work in
+                    # their place has not routed anything either, and the
+                    # sequential single-bot version of four bots' work is the
+                    # slower, worse product.
+                    #
+                    # Gated on the run having *done* something, so a turn that
+                    # simply answers a question on a thread where somebody
+                    # happens to be tagged is not interrogated about it.
+                    owed = filed_for | session.addressed_teammates
+                    if (
+                        close_nudges < AGENT_MAX_CLOSE_NUDGES
+                        and not delegated_this_run
+                        and owed
+                        and (steps or filed_for)
+                        and self._can_delegate(session.delegation, delegate_targets)
+                    ):
+                        close_nudges += 1
+                        who = ", ".join(sorted(owed))
+                        did_it_itself = bool(steps) and not filed_for
+                        opening = (
+                            f"Not closed. You did this work yourself while {who} "
+                            "— named on the message by the person asking — were "
+                            "never given any of it."
+                            if did_it_itself
+                            else (
+                                f"Not closed. {who} were named on this task and "
+                                "nothing reached them: you filed records and did "
+                                "not hand the work over, and a work item is a row "
+                                "in the customer's own list that the bot it names "
+                                "never sees."
+                            )
+                        )
+                        if call.native:
+                            convo.append(
+                                tool_result_message(
+                                    call.id,
+                                    f"{opening} Call `{TOOL_DELEGATE_TO_BOT}` now, once "
+                                    "per bot, with the instruction in the brief — they "
+                                    "are signed into the accounts this needs and you are "
+                                    "not, and they work at the same time instead of one "
+                                    "after another. If the work really was yours to do, "
+                                    f"call `{TOOL_TASK_COMPLETE}` again and say plainly "
+                                    "that you did it yourself and why nobody else could.",
+                                )
+                            )
+                        continue
                     if summary:
                         session.prose = summary
+                    if owed and not delegated_this_run and (steps or filed_for):
+                        # It closed anyway. The reply says so, in the words the
+                        # person needs, because "Routed main goal tasks" read as
+                        # work in progress when nothing was in progress.
+                        notes.append(
+                            f"{', '.join(sorted(owed))} were named on this and I did not "
+                            "hand any of it over, so nobody else has started — what you "
+                            "see here is only what I did myself. Ask me again and I will "
+                            "delegate it."
+                        )
                     session.outcome = "completed"
                     if call.native:
                         convo.append(tool_result_message(call.id, "Run closed."))
@@ -4150,6 +4963,12 @@ class Orchestrator:
                     # do, and a refusal still cost a model call to produce — so
                     # neither gets to sit outside the step cap.
                     step_no += 1
+                    # Set on the *attempt*, before the call is even validated.
+                    # A run that tried to hand work over and was refused for a
+                    # bad slug or an exhausted allowance has not made the
+                    # mistake the close guard is looking for, and being lectured
+                    # about filing on top of a refusal would be noise.
+                    delegated_this_run = True
                     handover: DelegationResult | None = None
                     async for item in self._delegate(
                         db,
@@ -4240,8 +5059,25 @@ class Orchestrator:
                     # request. Ids only, never rows: the record can move
                     # underneath the run and every tool re-reads it.
                     session.work_item_ids.update(filed.ids)
+                    # Said at the moment of the mistake as well as at the close,
+                    # because by the close the model has usually written its
+                    # summary in its head. The roster is checked against what
+                    # the model actually typed — a title like
+                    # `"Lead Generator: Generate 20 leads"` names a teammate as
+                    # plainly as `@lead_generator` does, and that is the string
+                    # the chief of staff really produced.
+                    naming = ""
+                    if filed.ok and self._can_delegate(session.delegation, delegate_targets):
+                        named = self._teammates_named_in(call.arguments, delegate_targets)
+                        if named:
+                            filed_for.update(named)
+                            naming = (
+                                f" This is a record, not a hand-off: {', '.join(sorted(named))} "
+                                "has not been told anything and is not running. "
+                                f"`{TOOL_DELEGATE_TO_BOT}` is the only thing that starts them."
+                            )
                     if call.native:
-                        convo.append(tool_result_message(call.id, filed.to_model))
+                        convo.append(tool_result_message(call.id, filed.to_model + naming))
                     if not (filed.ok and call.name == agent_work_items.TOOL_FIND_WORK_ITEMS):
                         # A successful lookup is not an event. Every write and
                         # every refusal is, and gets its sentence in the reply.
@@ -4282,6 +5118,32 @@ class Orchestrator:
                     terminal = True
                     finish()
                     continue
+
+                # ---- the query the whole task turns on ----------------------
+                #
+                # Before the step is counted, because the step does not happen:
+                # a search for `companies that need a CRM` costs a page load and
+                # returns material that can only produce a wrong answer, and a
+                # bot that reads it goes on to report vendor names as accounts.
+                # Refusing it is cheaper than letting it run and arguing with
+                # the result afterwards.
+                #
+                # Model-facing only. No `notes` entry, no `steps` row and no
+                # `tool` event: nothing happened on the desktop, and telling the
+                # person their bot typed a bad query and was asked to try again
+                # is narrating this module's control flow at somebody who wants
+                # ten company names. `AGENT_MAX_QUERY_NUDGES` bounds it so a run
+                # can never be trapped here.
+                if query_nudges < AGENT_MAX_QUERY_NUDGES:
+                    typed = self._query_in(call.name, call.arguments)
+                    if self._is_a_judgement_query(typed):
+                        query_nudges += 1
+                        told = REPROMPT_FOR_QUERY_CRAFT.format(query=typed.strip())
+                        if call.native:
+                            convo.append(tool_result_message(call.id, told))
+                        else:  # pragma: no cover - the fallback parser is text-only
+                            convo.append({"role": "user", "content": told})
+                        continue
 
                 step_no += 1
                 arguments = dict(call.arguments)
@@ -4739,8 +5601,15 @@ class Orchestrator:
             # was in when the run started.
             prune_screenshots(convo)
             compact_conversation(convo)
-            follow = await self.router.chat(
-                task=AGENT_LOOP_TASK,
+            step_task = self._step_task(
+                step_no=step_no,
+                consecutive_failures=consecutive_failures,
+                unchanged_screens=unchanged_screens,
+                nudged=bool(query_nudges or close_nudges),
+            )
+            follow = await self._ask_model(
+                db,
+                task=step_task,
                 messages=convo,
                 tools=agent_tools_for(tool_context()),
                 reasoning_effort=(
@@ -4781,7 +5650,8 @@ class Orchestrator:
                 convo.append({"role": "user", "content": REPROMPT_FOR_ACTION})
                 prune_screenshots(convo)
                 compact_conversation(convo)
-                retry = await self.router.chat(
+                retry = await self._ask_model(
+                    db,
                     task=AGENT_LOOP_TASK,
                     messages=convo,
                     tools=agent_tools_for(tool_context()),
@@ -4866,29 +5736,106 @@ class Orchestrator:
         thread: Thread | None,
         bot: Bot,
         chain: DelegationChain | None,
+        user: User,
     ) -> list[Bot]:
-        """Bots this one may hand work to: everyone else in the room, and nobody else.
+        """Bots this one may hand work to: **this person's team**.
 
-        Thread membership is the whole boundary, and it is a *refusal* boundary
-        rather than an auto-add one. Three reasons, in the order they matter:
+        This used to be thread membership — everyone else already seated in the
+        room, and nobody else. That boundary was defensible in the abstract and
+        wrong in practice, and it is worth writing down exactly how, because it
+        cost the product its headline feature for weeks.
 
-        * `bots.slug` is globally unique but bots are not globally visible.
-          Auto-adding a slug the model produced would let a bot on one person's
-          thread pull in another person's custom bot by guessing a name — a
-          model-authored string escalating what a run can reach.
-        * a delegated run posts its answer into this thread under the target's
-          name. Who is in the room is the human's decision and should not be
-          quietly rewritten by a bot mid-run.
-        * refusing is recoverable and auto-adding is not: the error names the
-          slugs that *are* here, so the model's next call is a correct one,
-          whereas an unwanted member has to be noticed and removed by hand.
+        What the person sent, from their one-to-one chat with the orchestrator:
 
-        Adding a bot to a thread already has a front door with a person behind
-        it. This one stays shut.
+            "Maya, I give you the challenge to make 25k euros by end of the
+            month. Use Jordan to capture leads on Instagram and LinkedIn and
+            Sales to close the deals. I count on you"
+
+        What came back:
+
+            "I did not act beyond logging and checking the two work items. No
+            leads were captured, no accounts were contacted... The work items
+            remain open for Lead Generator and Sales to execute."
+
+        The bot was not being lazy and the prompt was not weak. Every thread in
+        that database had exactly one bot in it, because a one-to-one chat is
+        what the app creates when you click a teammate — so `_delegate_targets`
+        returned `[]`, `_can_delegate` was False, `delegate_to_bot` was never
+        advertised, and filing a work item was the only thing Maya *could* do.
+        Then every guard written to catch a bot that files instead of handing
+        over is gated on `_can_delegate`, so they all stayed correctly and
+        uselessly silent. The person read that reply as the product not working,
+        and they were right.
+
+        A person who says "use Jordan" is not asking to assemble a room first.
+        Every comparable product routes between agents from whichever chat you
+        are in — the agent's own description is the routing signal — and none of
+        them ask you to seat the recipient by hand beforehand.
+
+        So the boundary moves from "in this room" to "on your team", and the
+        three original objections are answered rather than ignored:
+
+        * **Visibility.** The candidate list is computed here, server-side:
+          system bots plus this person's own, the same rule
+          `routers/deps.bot_visibility_clause` states and `_seat_mentioned_bots`
+          repeats — written out rather than imported because services do not
+          depend on routers in this codebase, and asserted identical by
+          `test_mentions_seat_bots.py`. The model never supplies a name that is
+          looked up globally; it picks from a list it was handed, so a guessed
+          slug cannot reach another tenant's bot. `_delegate` re-checks
+          membership of *this* list before it starts anything.
+        * **Who is in the room.** A hand-off seats the recipient (see
+          `_delegate`), so their answer lands in the conversation the work came
+          from, attributed, where the person can read it. That is the honest
+          representation of what happened, and the alternative — a bot replying
+          into a room it was never shown in — is the confusing one.
+        * **Recoverability.** Seating is now visible and reversible in the app:
+          the conversation menu lists who is seated with a remove button beside
+          each name, and `DELETE /threads/{id}/bots/{id}` is the same door.
+
+        Capped, and system bots first: this list is rendered into the system
+        prompt on every request of every delegating run, so a tenant with forty
+        custom bots must not turn it into a directory.
         """
         if chain is None or thread is None:
             return []
-        return [b for b in await self._thread_bots(db, thread.id) if b.id != bot.id]
+        return await self._team(db, bot, user)
+
+    async def _team(self, db: AsyncSession, bot: Bot, user: User) -> list[Bot]:
+        """This person's other bots: system ones plus their own.
+
+        The one definition of "your teammates", shared by the two acts that
+        need it and deliberately not by anything else:
+
+        * `_delegate_targets` — start one of them now and wait for the answer;
+        * `handover_targets` — assign one of them a work item, which
+          `services.work_dispatch` then wakes them about.
+
+        Same rule `routers/deps.bot_visibility_clause` states and
+        `_seat_mentioned_bots` repeats, written out because services do not
+        depend on routers in this codebase; `test_mentions_seat_bots.py`
+        asserts the copies agree. The point is that the *server* builds this
+        list — a model picks a slug from what it was handed, so a name it
+        invented or guessed cannot reach another tenant's bot.
+        """
+        rows = await db.execute(
+            select(Bot)
+            .where(
+                or_(Bot.is_system.is_(True), Bot.owner_user_id == user.id),
+                Bot.id != bot.id,
+            )
+            .order_by(Bot.is_system.desc(), Bot.name)
+            .limit(self.DELEGATION_MAX_TARGETS)
+        )
+        return list(rows.scalars().all())
+
+    #: How many teammates are named in the hand-off block of a system prompt.
+    #:
+    #: The list is per-request text on every step of every delegating run, so
+    #: this is a real token cost, and a person with forty custom bots does not
+    #: need all forty offered to decide who pulls a lead list. System bots sort
+    #: first, so the five specialists are never the ones cut.
+    DELEGATION_MAX_TARGETS = 12
 
     async def _has_work_items(self, db: AsyncSession, user: User) -> bool:
         """Does this human have any work item at all? One indexed row lookup.
@@ -4925,7 +5872,58 @@ class Orchestrator:
             and chain.seconds_left > 0
         )
 
-    def _delegation_block(self, targets: list[Bot], chain: DelegationChain | None) -> str:
+    async def _seat_bot(
+        self,
+        db: AsyncSession,
+        *,
+        thread: Thread,
+        bot: Bot,
+        user: User,
+        run: Run | None = None,
+        via: str,
+    ) -> bool:
+        """Put `bot` on `thread` if it is not already there. Returns whether it moved.
+
+        One INSERT and an audit row. `ON CONFLICT DO NOTHING` rather than a
+        read-then-write: two hand-offs to the same teammate inside one turn are
+        ordinary, and a composite primary key is the right place to settle that
+        race rather than in application logic.
+
+        The audit event is the same `thread_bot_seated` the `@mention` path
+        writes, with `via` naming what did it — a person's mention, or the slug
+        of the bot that handed work over. "Who added Sales to this thread" has
+        exactly one place to look either way.
+        """
+        seated = await db.execute(
+            pg_insert(ThreadBot)
+            .values(thread_id=thread.id, bot_id=bot.id)
+            .on_conflict_do_nothing(index_elements=["thread_id", "bot_id"])
+            .returning(ThreadBot.bot_id)
+        )
+        if seated.first() is None:
+            return False
+        db.add(
+            AuditEvent(
+                actor_user_id=user.id,
+                bot_id=bot.id,
+                event_type="thread_bot_seated",
+                detail={
+                    "thread_id": str(thread.id),
+                    "bot_slug": bot.slug,
+                    "via": via,
+                    **({"run_id": str(run.id)} if run is not None else {}),
+                },
+            )
+        )
+        logger.info("seated %s on thread %s (via %s)", bot.slug, thread.id, via)
+        return True
+
+    def _delegation_block(
+        self,
+        targets: list[Bot],
+        chain: DelegationChain | None,
+        tagged: list[Bot] | None = None,
+    ) -> str:
         """The hand-off half of a bot's system prompt — or nothing at all.
 
         Empty on a single-bot thread and on a chain with no hops left, which is
@@ -4938,27 +5936,67 @@ class Orchestrator:
         The remaining allowance is stated rather than left implicit. A model
         told it has one hop left spends it on the right thing; a model that
         discovers the cap by being refused has already paid for the call.
+
+        `tagged` is the reported scenario, as a sentence: *"I message chief of
+        staff and tag sales and leads too and tell the chief of staff what to
+        tell the other to do."* A tag narrows who **answers** and does nothing
+        else — the other tagged bots are not woken, do not read the message and
+        do not appear anywhere in this turn. From the person's side it looks like
+        three bots were addressed, so the one that answers has to be told both
+        halves: that they were named, and that naming them was not delivery.
         """
         if chain is None or not self._can_delegate(chain, targets):
             return ""
-        roster = "\n".join(f"- {b.slug} — {b.name}, {b.role}" for b in targets)
+        # Slug and role only. The name was next to a slug that already spells
+        # it, and this list is now sent on every request of every delegating
+        # run rather than only on the group threads the old boundary allowed.
+        roster = "\n".join(f"- {b.slug}: {b.role}" for b in targets)
         hops_left = DELEGATION_MAX_DEPTH - chain.depth
         pot_left = DELEGATION_MAX_TOTAL - chain.spent[0]
+        addressed = ""
+        if tagged:
+            named = ", ".join(f"{b.name} (`{b.slug}`)" for b in tagged)
+            addressed = (
+                f"\nThe person tagged {named} on this message as well as you. That "
+                "chose who answers; it did not reach them. They have not seen the "
+                "message, they are not running, and they will not read your reply. "
+                "Naming them is also the plainest statement you will get of whose job "
+                "the person thinks this is, so the default is to hand it to each of "
+                f"them with `{TOOL_DELEGATE_TO_BOT}` in this turn, with the instruction "
+                "in the brief — not to do their work for them. Then say what they came "
+                "back with, not that you told them."
+            )
         return (
             "\n\n### Handing work to another bot\n"
-            "These bots are on this thread with you:\n"
+            "These are your teammates:\n"
             f"{roster}\n"
             f"Call `{TOOL_DELEGATE_TO_BOT}` to give one of them a piece of this task and "
-            "get its answer back before you carry on. They start fresh: they see your "
+            "get its answer back before you carry on. They need not already be in this "
+            "conversation: the call brings them in. They start fresh: they see your "
             "brief, your payload and the last few messages of this thread, and none of "
             "your reasoning or tool calls — so write the brief as if to someone who has "
             "not been following.\n"
+            "The tool call is the only thing that reaches them. They do not read this "
+            "thread as it happens and naming them in your reply does not wake them, so "
+            "writing 'Jordan, pull the list' gives the person a message and gives Jordan "
+            "nothing. Brief two bots by calling the tool twice.\n"
+            "For anything that will outlast this turn, assign it instead. "
+            f"`{TOOL_CREATE_WORK_ITEM}` writes the item and `{TOOL_TRANSFER_WORK_ITEM}` "
+            "gives it to whoever's job it is — and that starts them: they get their own "
+            "run on it, work it with their own tools, and report back on this thread "
+            "without the person waiting on you. Use this for a goal with several parts, "
+            "or a week of work, or anything you cannot finish inside one reply. Filing "
+            "the row alone still reaches nobody; the assignment is what starts them.\n"
+            "So: hand off when you need the answer *now* to carry on, and assign when the "
+            "work is theirs to own. A turn that files rows and assigns none of them has "
+            "started nobody, whatever its status column says.\n"
             f"You are {chain.depth} hand-off(s) from {chain.actor_label}, who asked for "
             f"this. At most {hops_left} more from you, and {pot_left} left across "
             "everyone working on it — past that you will be refused and will have to "
             "finish with what you have.\n"
             f"{chain.actor_label} stays the person this is for at every hop, so anything "
             "the other bot has to hold goes to them to approve, not to you."
+            f"{addressed}"
         )
 
     def _delegation_history_block(self, history: list[Message], names: dict[str, str]) -> str:
@@ -5127,11 +6165,11 @@ class Orchestrator:
             available = ", ".join(sorted(b.slug for b in targets)) or "nobody"
             yield refuse(
                 "unknown_target",
-                f"There is no bot called '{slug}' on this thread, so nothing was started. "
-                f"On this thread: {available}. Use one of those or do the work yourself — "
-                "a bot cannot add another bot to a person's thread.",
-                f"I wanted to hand this to '{slug}', who is not on this thread. Here with "
-                f"me: {available}.",
+                f"There is no bot called '{slug}' on this person's team, so nothing was "
+                f"started. Your teammates: {available}. Use one of those or do the work "
+                "yourself.",
+                f"I wanted to hand this to '{slug}', who is not on the team. Available: "
+                f"{available}.",
             )
             return
 
@@ -5148,6 +6186,19 @@ class Orchestrator:
                 f"(${spent_today:.2f} of ${target_budget:.2f}). Nothing ran on its side.",
             )
             return
+
+        # Seat them, so their answer lands where the work came from.
+        #
+        # A delegated run posts under the target's own name into this thread.
+        # Before this, that could only ever happen to a bot the person had
+        # already seated by hand — which is why delegation from an ordinary
+        # one-to-one chat was impossible; see `_delegate_targets`. Seating on
+        # the hand-off rather than up front keeps the roster a record of who
+        # actually worked on something instead of a list of who might.
+        #
+        # Idempotent, and after every refusal above: nothing is seated for a
+        # hand-off that does not happen.
+        await self._seat_bot(db, thread=thread, bot=target, user=user, run=run, via=bot.slug)
 
         # Spend the hop before the work starts, never after. A delegated run
         # that crashes still consumed a hand-off, and a counter that only
@@ -5269,7 +6320,7 @@ class Orchestrator:
                     "from_slug": parent_bot.slug,
                     "to_slug": target.slug,
                     # The whole path, so one field answers "on whose behalf":
-                    # `norbert → lead_generator → sales`.
+                    # `avery → lead_generator → sales`.
                     "chain": chain.audit_path,
                     "depth": chain.depth,
                     "delegations_used": chain.spent[0],
@@ -5314,6 +6365,7 @@ class Orchestrator:
         connectors = await self._bot_connectors(db, target.id)
         system = compose_system_prompt(
             bot_prompt=target.system_prompt,
+            persona=persona_block(target),
             connector_block=self._connector_block(connectors) if connectors else "",
             memory_block=self._memory_block(memories),
             desktop_state=await self._desktop_state_line(db, target.id),
@@ -5333,42 +6385,104 @@ class Orchestrator:
             {"role": "user", "content": self._delegation_brief(parent_bot, chain, brief, payload)}
         )
 
-        opening = await self.router.chat(
+        # Hoisted out of the call because the second chance below has to be
+        # offered the same tools. A retry given a smaller vocabulary than the
+        # turn it is correcting would be told to act and handed less to act with.
+        tools = agent_tools_for(
+            ToolContext(
+                desktop_running=await self._desktop_is_running(db, target.id),
+                delegates_available=self._can_delegate(chain, onward),
+                # A delegated bot is usually the one that has to *find* the
+                # record the brief is about — the sales bot handed a lead —
+                # so this is exactly where these earn their tokens.
+                work_items_available=True,
+                work_items_exist=await self._has_work_items(db, user),
+                handover_available=bool(onward),
+            )
+        )
+        opening = await self._ask_model(
+            db,
             task="agent_turn",
             messages=messages,
-            tools=agent_tools_for(
-                ToolContext(
-                    desktop_running=await self._desktop_is_running(db, target.id),
-                    delegates_available=self._can_delegate(chain, onward),
-                    # A delegated bot is usually the one that has to *find* the
-                    # record the brief is about — the sales bot handed a lead —
-                    # so this is exactly where these earn their tokens.
-                    work_items_available=True,
-                    work_items_exist=await self._has_work_items(db, user),
-                    handover_available=bool(onward),
-                )
-            ),
+            tools=tools,
             reasoning_effort=AGENT_EFFORT_OPENING,
             bot=target,
         )
         await self.router.record_cost(db, target.id, opening)
 
+        # ---- the same second chance the chat turn gets --------------------
+        #
+        # The reported failure, and the half of it the chat-turn guard could not
+        # reach: *"It tells them but they ack and don't really do what they are
+        # asked."* A hand-off is not a chat turn, so a briefed bot answering
+        # "Starting research now, stand by" fell straight past
+        # `_announces_action` into the `else` below, and its ack was posted to
+        # the thread as its answer and reported to the caller by
+        # `_delegation_answer` as what came back. Three bots, three confident
+        # replies, no runs — with the delegation itself working perfectly.
+        #
+        # So the guard belongs on both entrances, and here it matters more: a
+        # briefed bot has been handed an explicit instruction by another bot,
+        # which is the least defensible moment to answer with a plan.
+        latest = opening
+        calls = self._agent_calls(opening)
+        extra_cost = Decimal("0")
+        refusal = ""
+        said = self._said_in(opening.content, calls)
+        prose_delegation = self._can_delegate(chain, onward) and self._addresses_another_bot(
+            said, onward
+        )
+        if (
+            not self._actionable(calls)
+            and self.router.supports_tools_for(target)
+            and (self._announces_action(said) or prose_delegation)
+        ):
+            # Appended to `messages` rather than to a copy, because `messages` is
+            # what the loop's `convo` is built from below: a retry the model
+            # cannot see it was given would be corrected into a conversation
+            # where it was never corrected.
+            messages.append({"role": "assistant", "content": said or opening.content})
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        REPROMPT_FOR_DELEGATION if prose_delegation else REPROMPT_FOR_ACTION
+                    ),
+                }
+            )
+            retry = await self._ask_model(
+                db,
+                task=AGENT_LOOP_TASK,
+                messages=messages,
+                tools=tools,
+                reasoning_effort=AGENT_EFFORT_RECOVER,
+                bot=target,
+            )
+            await self.router.record_cost(db, target.id, retry)
+            extra_cost += retry.cost_usd
+            latest = retry
+            calls = self._agent_calls(retry)
+            if not self._actionable(calls):
+                refusal = (
+                    f"{parent_bot.name} handed me this and I acknowledged it twice "
+                    "without doing any of it. Nothing ran."
+                )
+
         session = AgentSession(
             goal=brief,
-            prose=self._prose(opening.content),
+            prose=self._prose(latest.content),
             thread_id=thread.id,
             bot_id=target.id,
             user_id=user.id,
             delegation=chain,
         )
-        session.cost_usd = opening.cost_usd
-        calls = self._agent_calls(opening)
+        session.cost_usd = opening.cost_usd + extra_cost
         if calls and self._actionable(calls):
             convo: list[dict[str, Any]] = list(messages)
             if calls[0].native:
-                convo.append(assistant_tool_call_message(opening.content, opening.tool_calls))
+                convo.append(assistant_tool_call_message(latest.content, latest.tool_calls))
             else:
-                convo.append({"role": "assistant", "content": opening.content})
+                convo.append({"role": "assistant", "content": latest.content})
             async for event in self._agent_loop(
                 db,
                 thread=thread,
@@ -5388,6 +6502,12 @@ class Orchestrator:
                 summary = str(calls[0].arguments.get("summary") or "").strip()
                 if summary:
                     session.prose = summary
+            if refusal:
+                # Said in the bot's own reply and therefore in the answer the
+                # caller reads, because `_delegation_answer` quotes `prose`. A
+                # caller that is told "starting now" writes its own summary on
+                # top of an ack; one that is told nothing ran cannot.
+                session.prose = f"{session.prose}\n\n---\n{refusal}".strip()
             session.compose(session.prose)
 
         assistant = Message(
@@ -5487,6 +6607,20 @@ class Orchestrator:
             if len(body) > DELEGATION_MAX_PAYLOAD_CHARS:
                 body = body[:DELEGATION_MAX_PAYLOAD_CHARS] + " [...truncated]"
             blocks.append(f"What they passed you:\n{body}")
+        if self._is_a_judgement_query(brief):
+            # The brief was forwarded rather than decomposed: it describes what
+            # the caller wants to be true of a company, which is the one thing
+            # no page says. `RESEARCH_TRADECRAFT` already told this bot how to
+            # handle that; this says *now*, on the brief it applies to, because
+            # a standing rule read four screens ago loses to an instruction from
+            # another bot that reads like a query. Costs nothing on a brief that
+            # does not have the shape.
+            blocks.append(
+                "One thing about that brief before you start: it names what you are "
+                "looking for, not anything that is written down. Do not put it in a "
+                "search box. Translate it into footprints first - see 'Finding things "
+                "out' in your instructions - and hand back names with evidence."
+            )
         blocks.append(
             "Do the work now — call tools, do not describe them. `task_complete` is how "
             f"you answer: {parent_bot.name} is waiting on that summary and will act on "
@@ -5653,7 +6787,8 @@ class Orchestrator:
             # - and a bot pinned to an expensive model must not pay that price
             # on every closing summary just because it also has an opinion
             # about the model it talks with.
-            asked = await self.router.chat(
+            asked = await self._ask_model(
+                db,
                 task=SUMMARY_TASK,
                 messages=[
                     *convo,
@@ -5909,9 +7044,10 @@ class Orchestrator:
         # capability text may both have changed since the run parked, and a
         # resumed run frozen at an old prompt is the same bug `seed_system`'s
         # reconcile pass exists to stop.
-        resume_targets = await self._delegate_targets(db, thread, bot, chain)
+        resume_targets = await self._delegate_targets(db, thread, bot, chain, user)
         system = compose_system_prompt(
             bot_prompt=bot.system_prompt,
+            persona=persona_block(bot),
             desktop_state=await self._desktop_state_line(db, bot.id),
             delegation_block=self._delegation_block(resume_targets, chain),
         )
@@ -6050,7 +7186,8 @@ class Orchestrator:
                 )
             prune_screenshots(convo)
             compact_conversation(convo)
-            opening = await self.router.chat(
+            opening = await self._ask_model(
+                db,
                 task=AGENT_LOOP_TASK,
                 messages=convo,
                 # A handback always has a live desktop — the human was just
@@ -6243,7 +7380,8 @@ class Orchestrator:
         # the router's ordinary `route` tier regardless of what any candidate
         # bot is pinned to.
         names = ", ".join(b.slug for b in bots)
-        result = await self.router.chat(
+        result = await self._ask_model(
+            db,
             task="route",
             messages=[
                 {
@@ -6260,6 +7398,92 @@ class Orchestrator:
         return next((b for b in bots if b.slug == slug), None)
 
     # --------------------------------------------------------------- context
+
+
+    #: How many bots one message may pull into a thread. A cap, not a policy:
+    #: four is more teammates than any real request names, and it stops a
+    #: pasted email full of `@` handles from quietly seating the whole roster.
+    MENTION_SEAT_LIMIT = 4
+
+    async def _seat_mentioned_bots(
+        self,
+        db: AsyncSession,
+        *,
+        thread: Thread,
+        user: User,
+        content: str,
+        roster: list[Bot],
+    ) -> list[Bot]:
+        """Resolve `@` mentions to bots and make sure they are on this thread.
+
+        Returns every mentioned bot, whether it was already seated or has just
+        been added, because the caller needs the full set to know who the
+        message was addressed to.
+
+        Matched against the bot's own name and slug rather than by grabbing the
+        token after an `@`: names have spaces in them ("@Lead Generator"), and a
+        handle that resolves to nothing is prose, not an instruction. So an
+        unknown `@someone` is ignored entirely instead of becoming an error the
+        person has to think about.
+
+        Visibility is the same rule `routers/deps.bot_visibility_clause`
+        states — a system bot, or one this user owns — repeated here rather than
+        imported because services do not depend on routers in this codebase.
+        `test_mentions_seat_bots.py` asserts the two agree, so the copy cannot
+        drift into letting somebody seat another tenant's bot by typing its
+        name.
+
+        Seating is permanent and additive. Nothing is ever unseated: the
+        follow-up message ("now close those leads") has to reach the same room,
+        and a bot that silently left between two messages would be the same
+        class of invisible failure this whole function exists to end.
+        """
+        text = content or ""
+        if "@" not in text:
+            return []
+
+        visible = (
+            (
+                await db.execute(
+                    select(Bot).where(
+                        or_(Bot.is_system.is_(True), Bot.owner_user_id == user.id)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        seated_ids = {b.id for b in roster}
+        mentioned = mentioned_bots(text, visible)
+
+        if not mentioned:
+            return []
+
+        to_seat = [b for b in mentioned if b.id not in seated_ids][: self.MENTION_SEAT_LIMIT]
+        if not to_seat:
+            return mentioned
+
+        for bot in to_seat:
+            db.add(ThreadBot(thread_id=thread.id, bot_id=bot.id))
+            db.add(
+                AuditEvent(
+                    bot_id=bot.id,
+                    actor_user_id=user.id,
+                    event_type="thread_bot_seated",
+                    detail={
+                        "thread_id": str(thread.id),
+                        "reason": "mentioned_in_message",
+                    },
+                )
+            )
+        await db.commit()
+        logger.info(
+            "seated %d mentioned bot(s) on thread %s: %s",
+            len(to_seat),
+            thread.id,
+            ", ".join(b.slug for b in to_seat),
+        )
+        return mentioned
 
     async def _thread_bots(self, db: AsyncSession, thread_id: uuid.UUID) -> list[Bot]:
         result = await db.execute(

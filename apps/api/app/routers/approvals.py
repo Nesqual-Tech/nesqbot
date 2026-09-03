@@ -44,7 +44,7 @@ from app.schemas import (
     StandingApprovalListOut,
     StandingApprovalOut,
 )
-from app.services import standing_approvals
+from app.services import background, standing_approvals
 from app.services.orchestrator import (
     RUN_AGENT_KEY,
     RUN_AWAITING_APPROVAL,
@@ -169,7 +169,9 @@ async def _continue_run(
     A continuation that fails is logged and swallowed. The decision itself
     stands and is already recorded; turning "the bot could not carry on" into a
     500 on the decide endpoint would make it look as though the approval had not
-    been registered, which is worse than a task that stopped.
+    been registered, which is worse than a task that stopped. That is now true
+    by construction rather than by a `try`: the loop runs on its own task, so
+    there is no exception path back into this response at all.
     """
     if approval.run_id is None:
         return None
@@ -194,31 +196,49 @@ async def _continue_run(
         ).scalar_one_or_none() or "gone"
         logger.info("run %s not continued after decision: status is %s", run.id, current)
         return {"continued": False, "run_id": str(run.id), "status": current}
-    # Commit the claim before the loop runs: it can take minutes and a second
-    # decision has to see the transition immediately.
+    # Commit the claim before returning: a second decision has to see the
+    # transition immediately, and so does the task about to pick it up.
     await db.commit()
     await db.refresh(run)
 
-    try:
-        out = await orchestrator.continue_after_decision(
-            db,
-            user=user,
-            run=run,
-            approval=approval,
+    # And then get out of the request.
+    #
+    # This used to await the whole loop, on the comment "it can take minutes",
+    # which is the same defect the resume button had: the person's Approve
+    # spins for as long as the bot works, and a client that disconnects first
+    # takes the loop down with it and leaves the run `running` with nothing
+    # driving it. Reported as a button that "just keeps loading and it does
+    # nothing else so the task remains like that hanging". See
+    # `services/background.py`.
+    run_id = run.id
+    user_id = user.id
+    approval_id = approval.id
+
+    async def _carry_on(session: AsyncSession) -> None:
+        fresh_run = await session.get(Run, run_id)
+        fresh_user = await session.get(User, user_id)
+        fresh_approval = await session.get(Approval, approval_id)
+        if fresh_run is None or fresh_user is None or fresh_approval is None:
+            logger.warning(
+                "continuation for run %s: run, user or approval vanished first", run_id
+            )
+            return
+        await orchestrator.continue_after_decision(
+            session,
+            user=fresh_user,
+            run=fresh_run,
+            approval=fresh_approval,
             decision=decision,
             execution=execution,
             announce=announce,
         )
-    except Exception as exc:  # noqa: BLE001 - the decision stands either way
-        logger.exception("continuing run %s after decision failed", run.id)
-        return {"continued": False, "run_id": str(run.id), "error": str(exc)}
-    return {
-        "continued": bool(out.get("resumed")),
-        "run_id": str(run.id),
-        "status": out.get("status"),
-        "outcome": out.get("outcome"),
-        "message_id": out.get("message_id"),
-    }
+
+    background.run_detached(_carry_on, label=f"approval-continue:{run_id}")
+
+    # `continued: true` means started, not finished — the same change of
+    # meaning `POST /runs/{id}/resume` has. What the bot goes on to do arrives
+    # in the thread over SSE.
+    return {"continued": True, "run_id": str(run.id), "status": "running"}
 
 
 @router.get("/approvals", response_model=list[ApprovalOut])

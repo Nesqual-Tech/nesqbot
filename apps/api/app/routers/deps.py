@@ -45,8 +45,10 @@ logger = logging.getLogger("nesqbot.routers")
 #: reshapes a route. It says nothing about which image is running - /health
 #: reports that separately as "build". Bumped 0.2.0 -> 0.3.0 for the human
 #: handoff surface (the `takeover` event, POST /runs/{id}/resume) and the
-#: browser tool set.
-API_VERSION = "0.3.0"
+#: browser tool set; 0.3.0 -> 0.4.0 for the thread roster and the persona:
+#: POST/DELETE /threads/{id}/bots, GET /bots/{id}/persona, and
+#: `email`/`voice`/`signature`/`desktop_habits` on every bot read and write.
+API_VERSION = "0.4.0"
 
 #: Payload key naming the human who triggered a risk-gated action. Approvals
 #: carrying it are only visible to that user; routine-created ones omit it and

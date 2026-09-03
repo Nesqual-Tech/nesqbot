@@ -39,6 +39,12 @@ import type { Bot, DesktopActionInput } from "../types"
 export interface DesktopPaneProps {
   bot: Bot | null
   layout: DesktopLayoutApi
+  /**
+   * Closes the pane. Present because the pane is no longer a permanent
+   * column: it is opened from a conversation, so it has to be closable from
+   * where it is rather than only from the button that opened it.
+   */
+  onClose?: () => void
 }
 
 type ViewMode = "stream" | "canvas"
@@ -74,7 +80,7 @@ const POLL_TAKEOVER_MS = 600
 /** How long the "you clicked here" marker stays readable under reduced motion. */
 const MARKER_STATIC_S = 0.45
 
-export function DesktopPane({ bot, layout }: DesktopPaneProps) {
+export function DesktopPane({ bot, layout, onClose }: DesktopPaneProps) {
   const toast = useToast()
   const recorder = useRecorder()
   const handoff = useTakeover()
@@ -575,17 +581,17 @@ export function DesktopPane({ bot, layout }: DesktopPaneProps) {
       <section
         ref={paneRef}
         className={cx("desktop-pane", expanded && "desktop-pane--expanded")}
-        aria-label="Bot Desktop"
+        aria-label="Agent Computer"
       >
         <div className="pane__header">
-          <h2 className="pane__title">Bot Desktop</h2>
+          <h2 className="pane__title">Agent Computer</h2>
           {expanded ? (
             <button
               type="button"
               className="btn btn--ghost btn--icon"
               onClick={layout.toggleExpanded}
               title="Restore the pane (Esc)"
-              aria-label="Restore the Bot Desktop pane"
+              aria-label="Restore the Agent Computer pane"
             >
               <Icon name="collapse" size={16} />
             </button>
@@ -622,14 +628,14 @@ export function DesktopPane({ bot, layout }: DesktopPaneProps) {
         takeover && "desktop-pane--takeover",
         keyboardLive && "desktop-pane--keys",
       )}
-      aria-label={`Bot Desktop for ${bot.name}`}
+      aria-label={`Agent Computer for ${bot.name}`}
     >
       {/* The handoff ring. Purely an event marker; parked invisible. */}
       <span className="desktop-pane__arm" aria-hidden="true" />
 
       <div className="pane__header">
         <div>
-          <h2 className="pane__title">Bot Desktop</h2>
+          <h2 className="pane__title">{bot.name}&rsquo;s Computer</h2>
           <div className="pane__subtitle">
             {/*
               `data-state` carries the real lifecycle value so the pill can wear
@@ -675,7 +681,7 @@ export function DesktopPane({ bot, layout }: DesktopPaneProps) {
             onClick={layout.toggleExpanded}
             aria-pressed={expanded}
             title={expanded ? "Restore the pane (Esc)" : "Maximise the desktop"}
-            aria-label={expanded ? "Restore the Bot Desktop pane" : "Maximise the Bot Desktop"}
+            aria-label={expanded ? "Restore the Agent Computer pane" : "Maximise the Agent Computer"}
           >
             <Icon name={expanded ? "collapse" : "expand"} size={16} />
           </button>
@@ -688,6 +694,17 @@ export function DesktopPane({ bot, layout }: DesktopPaneProps) {
           >
             <Icon name="refresh" size={16} />
           </button>
+          {onClose ? (
+            <button
+              type="button"
+              className="btn btn--ghost btn--icon"
+              onClick={onClose}
+              aria-label="Close the Agent Computer"
+              title="Close (Ctrl ⇧ D)"
+            >
+              <Icon name="close" size={16} />
+            </button>
+          ) : null}
         </div>
       </div>
 

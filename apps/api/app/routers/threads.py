@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, Request
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
@@ -25,13 +25,21 @@ from app.routers.deps import (
     SSE_HEADERS,
     SSE_PING_SECONDS,
     get_owned_thread,
+    get_visible_bot,
     iter_until_disconnect,
     normalise_stream_chunk,
     optional_service,
     orchestrator,
     sse_event,
 )
-from app.schemas import CreateThreadIn, MessageOut, OkOut, SendMessageIn, ThreadOut
+from app.schemas import (
+    CreateThreadIn,
+    MessageOut,
+    OkOut,
+    SendMessageIn,
+    ThreadBotsIn,
+    ThreadOut,
+)
 
 logger = logging.getLogger("nesqbot.threads")
 
@@ -71,10 +79,45 @@ def _idempotency_put(key: str, value: dict[str, Any]) -> None:
         _idempotency_cache.popitem(last=False)
 
 
-async def _thread_bot_ids(db: AsyncSession, thread_id: uuid.UUID) -> list[uuid.UUID]:
-    rows = await db.execute(select(ThreadBot.bot_id).where(ThreadBot.thread_id == thread_id))
-    return list(rows.scalars().all())
+async def _bot_ids_by_thread(
+    db: AsyncSession, thread_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, list[uuid.UUID]]:
+    """Roster for many threads in one round trip.
 
+    This used to be a per-thread SELECT called from inside the `GET /threads`
+    loop, which made the endpoint the desktop shell refetches most into 1+N
+    queries — opening the app with 200 threads was 201 round trips to draw a
+    sidebar. `routers/work_items.py` names this exact mistake in its own words
+    and then does it correctly; this is the same fix.
+
+    `bot_id` is ordered explicitly. The old query had no ORDER BY at all, so the
+    order the client saw was whatever Postgres returned — in practice insertion
+    order for a table this small, but nothing guaranteed it, and a grouped query
+    changes the plan. Pinning it means the payload cannot start varying between
+    two identical requests.
+    """
+    if not thread_ids:
+        return {}
+    rows = await db.execute(
+        select(ThreadBot.thread_id, ThreadBot.bot_id)
+        .where(ThreadBot.thread_id.in_(thread_ids))
+        .order_by(ThreadBot.thread_id, ThreadBot.bot_id)
+    )
+    grouped: dict[uuid.UUID, list[uuid.UUID]] = {tid: [] for tid in thread_ids}
+    for thread_id, bot_id in rows.all():
+        grouped.setdefault(thread_id, []).append(bot_id)
+    return grouped
+
+
+
+async def _thread_bot_ids(db: AsyncSession, thread_id: uuid.UUID) -> list[uuid.UUID]:
+    """One thread's roster, ordered. See `_bot_ids_by_thread` for the list view."""
+    rows = await db.execute(
+        select(ThreadBot.bot_id)
+        .where(ThreadBot.thread_id == thread_id)
+        .order_by(ThreadBot.bot_id)
+    )
+    return list(rows.scalars().all())
 
 @router.get("/threads", response_model=list[ThreadOut])
 async def list_threads(
@@ -84,18 +127,18 @@ async def list_threads(
     result = await db.execute(
         select(Thread).where(Thread.owner_user_id == user.id).order_by(Thread.updated_at.desc())
     )
-    out: list[ThreadOut] = []
-    for t in result.scalars().all():
-        out.append(
-            ThreadOut(
-                id=t.id,
-                title=t.title,
-                bot_ids=await _thread_bot_ids(db, t.id),
-                created_at=t.created_at,
-                updated_at=t.updated_at,
-            )
+    threads = list(result.scalars().all())
+    rosters = await _bot_ids_by_thread(db, [t.id for t in threads])
+    return [
+        ThreadOut(
+            id=t.id,
+            title=t.title,
+            bot_ids=rosters.get(t.id, []),
+            created_at=t.created_at,
+            updated_at=t.updated_at,
         )
-    return out
+        for t in threads
+    ]
 
 
 @router.post("/threads", response_model=ThreadOut)
@@ -106,11 +149,39 @@ async def create_thread(
 ) -> ThreadOut:
     if not body.bot_ids:
         raise AppError(400, "bot_ids_required", "bot_ids required")
+
+    # Every `bot_ids` entry is checked before anything is written, because
+    # `thread_bots.bot_id` was being trusted twice over:
+    #
+    # * as a foreign key — an id that does not exist (a bot deleted in another
+    #   window, a stale client cache) reached the INSERT and came back as an
+    #   IntegrityError, which `app.errors`' catch-all renders as
+    #   `{"detail": "internal_error", "code": "internal_error", …}`. An ordinary
+    #   user action is not an internal error, and the envelope exists so a client
+    #   can tell the difference.
+    # * as an authorization decision — nothing here asked whether the caller may
+    #   *see* the bot, and membership is trusted at read time: the orchestrator's
+    #   roster query joins `thread_bots` with no visibility predicate. Another
+    #   user's custom bot, accepted here, becomes a participant that answers with
+    #   its own system prompt and its own connector set. `routers/deps.py`
+    #   declares visibility as the model of the whole API; this was the write
+    #   side that never enforced it.
+    #
+    # Duplicates are dropped rather than rejected: `thread_bots` has a composite
+    # primary key, so `[x, x]` was a second way to turn a request into a 500, and
+    # "this bot twice" has one obvious meaning.
+    bot_ids: list[uuid.UUID] = []
+    for bid in body.bot_ids:
+        if bid in bot_ids:
+            continue
+        await get_visible_bot(db, bid, user)  # 404 bot_not_found, never a 500
+        bot_ids.append(bid)
+
     thread = Thread(title=body.title or "New thread", owner_user_id=user.id)
     db.add(thread)
     await db.commit()
     await db.refresh(thread)
-    for bid in body.bot_ids:
+    for bid in bot_ids:
         db.add(ThreadBot(thread_id=thread.id, bot_id=bid))
     await db.commit()
     if body.initial_message:
@@ -121,7 +192,7 @@ async def create_thread(
     return ThreadOut(
         id=thread.id,
         title=thread.title,
-        bot_ids=body.bot_ids,
+        bot_ids=bot_ids,
         created_at=thread.created_at,
         updated_at=thread.updated_at,
     )
@@ -207,6 +278,120 @@ async def _expire_approvals_for_thread(
         )
 
     return expired
+
+
+@router.post("/threads/{thread_id}/bots", response_model=ThreadOut)
+async def add_thread_bots(
+    thread_id: uuid.UUID,
+    body: ThreadBotsIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ThreadOut:
+    """Seat more bots on an existing thread.
+
+    The roster is not decoration: it is the only thing that makes delegation
+    possible. `orchestrator._delegate_targets` is "everyone else in this room",
+    so a one-bot thread means `delegate_to_bot` is never even advertised, and a
+    chief of staff asked to hand work over holds no tool that can. Until this
+    endpoint existed a roster could only be set at creation, and
+    `apps/desktop/src/components/ChatPane.tsx` creates every thread with exactly
+    one bot - so in the shipped product no thread ever had a second
+    participant, and every report of "it never delegated" was that.
+
+    Additive and idempotent. A bot already seated is not an error and not a
+    duplicate row (`thread_bots` has a composite primary key, so a second
+    insert would be a 500), which matters because the obvious client behaviour
+    is to send the whole intended roster rather than the difference.
+
+    Visibility is checked per bot, the same way `create_thread` does it: a
+    membership row is trusted at read time by a query with no visibility
+    predicate in it, so this is the write side of that boundary. A bot the
+    caller cannot see is a 404, never a silent skip.
+    """
+    thread = await get_owned_thread(db, thread_id, user)
+    if not body.bot_ids:
+        raise AppError(400, "bot_ids_required", "bot_ids required")
+
+    seated = set(await _thread_bot_ids(db, thread.id))
+    added: list[uuid.UUID] = []
+    for bot_id in body.bot_ids:
+        if bot_id in seated:
+            continue
+        await get_visible_bot(db, bot_id, user)  # 404 bot_not_found, never a 500
+        db.add(ThreadBot(thread_id=thread.id, bot_id=bot_id))
+        seated.add(bot_id)
+        added.append(bot_id)
+
+    if added:
+        thread.updated_at = datetime.now(timezone.utc)
+        db.add(
+            AuditEvent(
+                actor_user_id=user.id,
+                event_type="thread_bots_added",
+                detail={"thread_id": str(thread.id), "bot_ids": [str(b) for b in added]},
+            )
+        )
+        await db.commit()
+        await db.refresh(thread)
+
+    return ThreadOut(
+        id=thread.id,
+        title=thread.title,
+        bot_ids=await _thread_bot_ids(db, thread.id),
+        created_at=thread.created_at,
+        updated_at=thread.updated_at,
+    )
+
+
+@router.delete("/threads/{thread_id}/bots/{bot_id}", response_model=ThreadOut)
+async def remove_thread_bot(
+    thread_id: uuid.UUID,
+    bot_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ThreadOut:
+    """Unseat one bot, unless it is the last one.
+
+    A thread with no bots cannot answer anything - `_turn` raises "thread has
+    no bots" - so emptying the roster would turn a conversation into a dead
+    page with no way back. Refused as a 409 rather than silently ignored,
+    because the caller asked for something specific and got nothing.
+
+    History stays. Messages that bot already wrote are what happened, and
+    removing it from the roster does not un-say them.
+    """
+    thread = await get_owned_thread(db, thread_id, user)
+    seated = await _thread_bot_ids(db, thread.id)
+    if bot_id not in seated:
+        raise AppError(404, "bot_not_in_thread", "that bot is not on this thread")
+    if len(seated) <= 1:
+        raise AppError(
+            409,
+            "last_bot_in_thread",
+            "a thread needs at least one bot to answer in it - add another before "
+            "removing this one, or delete the thread",
+        )
+
+    await db.execute(
+        delete(ThreadBot).where(ThreadBot.thread_id == thread.id, ThreadBot.bot_id == bot_id)
+    )
+    thread.updated_at = datetime.now(timezone.utc)
+    db.add(
+        AuditEvent(
+            actor_user_id=user.id,
+            event_type="thread_bot_removed",
+            detail={"thread_id": str(thread.id), "bot_id": str(bot_id)},
+        )
+    )
+    await db.commit()
+    await db.refresh(thread)
+    return ThreadOut(
+        id=thread.id,
+        title=thread.title,
+        bot_ids=await _thread_bot_ids(db, thread.id),
+        created_at=thread.created_at,
+        updated_at=thread.updated_at,
+    )
 
 
 @router.delete("/threads/{thread_id}", response_model=OkOut)

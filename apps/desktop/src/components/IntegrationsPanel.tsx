@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react"
 import { riskLabels } from "@nesqbot/ui"
-import { errorMessage } from "../api/client"
+import { errorMessage, post } from "../api/client"
 import { useConnectors } from "../hooks/useConnectors"
 import { dur, ease, gsap, stagger, useGSAP } from "../lib/motion"
 import { byRisk, gatedCount, highestRisk, tallyRisks } from "../lib/risk"
@@ -226,6 +226,46 @@ export function IntegrationsPanel({ bots, activeBotId, onSelectBot }: Integratio
     }
   }
 
+  /**
+   * `POST /bots/{bot}/connectors/{connector}/secret` — the credential itself.
+   *
+   * Called through the generic `post` rather than added to `useConnectors`
+   * because the hook, `api/endpoints.ts` and the `BindConnectorInput` type all
+   * live outside what this change owns. The response shape is declared inline
+   * for the same reason; `packages/protocol` is where it belongs once that lane
+   * is free, and the API is the source of truth for it either way.
+   *
+   * `backend` is reported to the person, not swallowed: the whole point of the
+   * endpoint is that Key Vault may refuse the write and the value then lives
+   * encrypted in the deployment's own database instead. Saying "saved" without
+   * saying where is how somebody comes to believe a key is in a vault.
+   */
+  const storeSecretValue = async (connectorId: string, value: string) => {
+    if (!activeBotId) {
+      toast.error("Select a bot first", "A credential is stored against one bot's binding.")
+      return
+    }
+    setBusyConnector(connectorId)
+    try {
+      const stored = await post<{ backend: string; secret_ref: string; detail: string }>(
+        `/bots/${activeBotId}/connectors/${connectorId}/secret`,
+        { value, status: "connected" },
+      )
+      // The listing carries the backend too, so the answer survives a reload
+      // rather than living only in this toast.
+      await connectors.refetchBindings()
+      if (stored.backend === "key_vault") {
+        toast.success("Credential stored in Key Vault", stored.detail)
+      } else {
+        toast.info("Credential stored, but not in Key Vault", stored.detail)
+      }
+    } catch (err) {
+      toast.error("Could not store the credential", errorMessage(err))
+    } finally {
+      setBusyConnector(null)
+    }
+  }
+
   const unbind = async (connectorId: string) => {
     setBusyConnector(connectorId)
     try {
@@ -383,6 +423,7 @@ export function IntegrationsPanel({ bots, activeBotId, onSelectBot }: Integratio
               botName={activeBot?.name ?? null}
               busy={busyConnector === connector.id}
               onBind={(secretRef) => bind(connector.id, secretRef)}
+              onStoreValue={(value) => storeSecretValue(connector.id, value)}
               onUnbind={() => unbind(connector.id)}
               onDelete={connector.first_party ? undefined : () => removeConnector(connector.id)}
             />

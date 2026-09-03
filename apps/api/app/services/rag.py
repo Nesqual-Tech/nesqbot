@@ -13,6 +13,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.db import release_transaction
 from app.models import CostLedger, KbArticle, Memory
 from app.services.model_router import ModelRouter, estimate_cost_usd
 
@@ -89,10 +90,15 @@ async def embed(
     db: AsyncSession | None = None,
     bot_id: uuid.UUID | None = None,
 ) -> list[list[float]] | None:
-    """Embed texts through the Azure embeddings deployment.
+    """Embed texts through the configured `embed` deployment.
 
-    Returns None when Azure is unconfigured or the call fails, which is the
-    signal for callers to fall back to keyword scoring.
+    Returns None when the provider is unconfigured or the call fails, which is
+    the signal for callers to fall back to keyword scoring.
+
+    `db` is the caller's session. It is used for two things: recording the cost
+    row afterwards (needs `bot_id` as well), and — regardless of `bot_id` —
+    closing the caller's open transaction *before* the HTTP call below. See
+    `embed`'s call to `release_transaction` for why the second one matters more.
     """
     clean = [t for t in (texts or []) if t and t.strip()]
     if not clean:
@@ -113,6 +119,36 @@ async def embed(
         return None
 
     settings = get_settings()
+
+    # The third slow await in this codebase, and `db.release_transaction`'s
+    # docstring counts only two ("a model call and a Bot Desktop step"). This is
+    # the same shape as the 2026-09-02 incident: `request_timeout_seconds` is
+    # 60.0 (config.py) and the OpenAI clients in `model_router` are built with
+    # no `max_retries` override, so the SDK's default of 2 retries makes the
+    # worst case three 60-second attempts on one call — against a server
+    # `db.release_transaction` records as running
+    # `idle_in_transaction_session_timeout = 60000`.
+    #
+    # Every caller arrives with a transaction already open, because
+    # `get_current_user` shares the request's session and does its own SELECTs
+    # before the handler runs. `POST /kb` is the clearest: it commits, then
+    # `db.refresh(article)` reopens the transaction, then embeds.
+    #
+    # This is dormant only while embeddings are mocked (STATUS.md: "No Azure ⇒
+    # `embed()` returns `None`" — the `client is None` return above, with no
+    # HTTP call at all). It arms itself on the first deployment that configures
+    # the embed tier, which is the same deployment that has the 60-second timer.
+    #
+    # The cost of doing it here: `release_transaction` *commits*, so a caller
+    # holding uncommitted work across this call has it committed rather than
+    # kept rollback-able. That is already the house rule (`db.py`), but rag is
+    # the first place it applies to callers that did not opt into it — every
+    # caller in the tree today commits immediately before embedding, so there is
+    # nothing pending to lose, and a new one that wanted "embed, then maybe roll
+    # this back" has to write it the other way round.
+    if db is not None:
+        await release_transaction(db)
+
     try:
         resp = await client.embeddings.create(
             model=model,
@@ -191,7 +227,10 @@ async def search_kb(db: AsyncSession, query: str, limit: int = 5) -> list[tuple[
 
     Scores are similarities in 0..1 (higher is better).
     """
-    vectors = await embed([query])
+    # `db=` is passed for the transaction release, not for cost accounting: with
+    # no `bot_id` there is nobody to bill a search to, and `_record_embed_cost`
+    # returns immediately in that case. See `embed`.
+    vectors = await embed([query], db=db)
     if vectors:
         try:
             async with _contained(db):
@@ -236,7 +275,8 @@ async def search_memories(
     limit: int = 8,
 ) -> list[Memory]:
     """Most relevant memories for this bot/user pair."""
-    vectors = await embed([query])
+    # `db=` for the transaction release; no `bot_id`, so no cost row. See `embed`.
+    vectors = await embed([query], db=db)
     if vectors:
         try:
             async with _contained(db):

@@ -47,9 +47,21 @@ def _touch_health(settings: Settings) -> None:
         log.debug("%s", kv(event="health.touch.failed", error=str(exc)[:200]))
 
 
-async def _health_loop(settings: Settings) -> None:
+async def _health_loop(settings: Settings, worker: Worker | None = None) -> None:
+    """Refresh the marker only while the worker is actually polling.
+
+    The loop used to start before `Worker(...)` even existed, so the container
+    HEALTHCHECK went green during boot and stayed green if the worker shut down
+    while the process lingered — a wedged worker that looks healthy. Gating each
+    touch on `Worker.is_running` (a public property: True only between start and
+    shutdown) strictly removes green windows and cannot add one: refusing to
+    touch lets the marker go stale, which is what the probe is for.
+    """
     while True:
-        _touch_health(settings)
+        if worker is None or worker.is_running:
+            _touch_health(settings)
+        else:
+            log.warning("%s", kv(event="health.touch.refused", reason="worker_not_running"))
         await asyncio.sleep(settings.worker_health_interval_seconds)
 
 
@@ -101,10 +113,27 @@ async def fetch_routines(settings: Settings) -> list[dict[str, Any]] | None:
 
 
 async def reconcile(client: Client, settings: Settings) -> None:
-    """Best-effort: a schedule sync failure must never stop the worker booting."""
+    """Best-effort AND time-bounded: this runs before the worker serves.
+
+    A schedule sync failure must never stop the worker booting, and neither may
+    a schedule sync that never returns. Temporal can accept a connection and
+    then stall on `create_schedule`, and `reconcile_schedules` awaits one upsert
+    per routine with no deadline of its own — so without the `wait_for` below,
+    boot hangs, the health marker is never written, and the HEALTHCHECK restarts
+    the container into a loop. Serving the task queue with a stale schedule
+    beats not serving it at all.
+    """
     if not settings.worker_reconcile_schedules:
         log.info("%s", kv(event="schedule.reconcile.disabled"))
         return
+    budget = settings.worker_reconcile_timeout_seconds
+    try:
+        await asyncio.wait_for(_reconcile_once(client, settings), timeout=budget)
+    except asyncio.TimeoutError:
+        log.warning("%s", kv(event="schedule.reconcile.timeout", budget_s=budget))
+
+
+async def _reconcile_once(client: Client, settings: Settings) -> None:
     routines = await fetch_routines(settings)
     if routines is None:
         log.warning("%s", kv(event="schedule.reconcile.skipped", reason="api_unreachable"))
@@ -187,9 +216,6 @@ async def run_worker(settings: Settings | None = None) -> None:
 
     await reconcile(client, settings)
 
-    _touch_health(settings)
-    health_task = asyncio.create_task(_health_loop(settings), name="health")
-
     worker = Worker(
         client,
         task_queue=settings.temporal_task_queue,
@@ -207,14 +233,22 @@ async def run_worker(settings: Settings | None = None) -> None:
             host=settings.temporal_host,
         ),
     )
+    health_task: asyncio.Task[None] | None = None
     try:
         async with worker:
+            # First touch only once the worker is polling the task queue: the
+            # Dockerfile's HEALTHCHECK comment already promises this ("once it
+            # is serving the task queue"), and its 90s start-period plus 3
+            # retries covers connect + the bounded reconcile above.
+            _touch_health(settings)
+            health_task = asyncio.create_task(_health_loop(settings, worker), name="health")
             await stop.wait()
         log.info("%s", kv(event="worker.drained"))
     finally:
-        health_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await health_task
+        if health_task is not None:
+            health_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await health_task
         with contextlib.suppress(OSError):
             Path(settings.worker_health_file).unlink(missing_ok=True)
         log.info("%s", kv(event="worker.stopped"))

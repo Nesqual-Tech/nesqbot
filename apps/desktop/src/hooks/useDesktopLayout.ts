@@ -18,6 +18,19 @@ import { clamp } from "../lib/desktopGeometry"
 export type DesktopZoom = "fit" | "actual"
 
 export interface DesktopLayoutApi {
+  /**
+   * Whether the pane is on screen at all.
+   *
+   * Closed by default, and closed on a fresh install. The pane used to be a
+   * permanent fourth column, which made the app read as two messengers side by
+   * side and gave a third of the window to a 1440x900 desktop scaled to 30%
+   * that nobody had asked to see. It is a place you go when a bot is doing
+   * something you want to watch - so it opens from the conversation, and the
+   * choice is remembered.
+   */
+  open: boolean
+  setOpen: (value: boolean) => void
+  toggleOpen: () => void
   /** Docked width in CSS pixels. Ignored while `expanded`. */
   width: number
   minWidth: number
@@ -56,6 +69,7 @@ const RESERVED_FOR_REST = 660
 
 interface StoredLayout {
   width?: number
+  open?: boolean
   expanded?: boolean
   zoom?: DesktopZoom
 }
@@ -84,6 +98,9 @@ export function useDesktopLayout(): DesktopLayoutApi {
     const initial = stored.current.width ?? DESKTOP_PANE_DEFAULT_WIDTH
     return Number.isFinite(initial) ? Math.round(initial) : DESKTOP_PANE_DEFAULT_WIDTH
   })
+  // `=== true`, so a store written before this field existed opens closed
+  // rather than opening onto a pane the person never asked for.
+  const [open, setOpenState] = useState(() => stored.current.open === true)
   const [expanded, setExpandedState] = useState(() => stored.current.expanded === true)
   const [zoom, setZoomState] = useState<DesktopZoom>(() => (stored.current.zoom === "actual" ? "actual" : "fit"))
   const [resizing, setResizing] = useState(false)
@@ -122,11 +139,11 @@ export function useDesktopLayout(): DesktopLayoutApi {
 
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ width: effectiveWidth, expanded, zoom }))
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ width: effectiveWidth, open, expanded, zoom }))
     } catch {
       /* a full or blocked store is not worth a broken pane */
     }
-  }, [effectiveWidth, expanded, zoom])
+  }, [effectiveWidth, open, expanded, zoom])
 
   const previewWidth = useCallback(
     (value: number) => applyWidth(clamp(value, DESKTOP_PANE_MIN_WIDTH, maxWidth)),
@@ -148,6 +165,9 @@ export function useDesktopLayout(): DesktopLayoutApi {
       resetWidth: () => setWidth(DESKTOP_PANE_DEFAULT_WIDTH),
       resizing,
       setResizing,
+      open,
+      setOpen: setOpenState,
+      toggleOpen: () => setOpenState((value) => !value),
       expanded,
       setExpanded: setExpandedState,
       toggleExpanded: () => setExpandedState((value) => !value),
@@ -156,6 +176,6 @@ export function useDesktopLayout(): DesktopLayoutApi {
       toggleZoom: () => setZoomState((value) => (value === "fit" ? "actual" : "fit")),
       shellRef,
     }),
-    [effectiveWidth, maxWidth, previewWidth, commitWidth, resizing, expanded, zoom, shellRef],
+    [effectiveWidth, maxWidth, previewWidth, commitWidth, resizing, open, expanded, zoom, shellRef],
   )
 }

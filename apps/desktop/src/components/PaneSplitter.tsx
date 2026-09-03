@@ -35,7 +35,7 @@ export function PaneSplitter({
   onCommit,
   onReset,
   onResizingChange,
-  label = "Resize the Bot Desktop pane",
+  label = "Resize the Agent Computer pane",
 }: PaneSplitterProps) {
   const drag = useRef<{ startX: number; startWidth: number; pointerId: number } | null>(null)
 

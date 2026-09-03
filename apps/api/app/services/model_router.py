@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
 import importlib
 import json
 import logging
@@ -21,6 +22,7 @@ from openai import (
     RateLimitError,
 )
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_exponential
 
@@ -44,6 +46,7 @@ TaskClass = Literal[
     "agent_turn",
     "computer_use_recover",
     "deep_plan",
+    "agent_step",
     "compact",
     "embed",
 ]
@@ -376,6 +379,29 @@ def route_task(task: TaskClass, fail_count: int = 0) -> Tier:
         return "embed"
     if task == "deep_plan":
         return "reason"
+    # ---- the step that is not a decision ---------------------------------
+    #
+    # Every iteration of the agent loop used to be `deep_plan`, so every
+    # iteration went to the reason tier. Measured against what that tier
+    # actually is on this deployment:
+    #
+    #   grok-4-1-fast-reasoning  GlobalStandard  capacity 50   (= 50k TPM,
+    #   and 50 of a regional limit of 50 - it cannot be raised)
+    #
+    # at a measured mean of ~9,800 prompt tokens per loop request, which is
+    # about five calls a minute for a loop that makes dozens. The product was
+    # rate-limited into looking broken.
+    #
+    # Most of those calls are not planning. `browser_snapshot` -> read the refs
+    # -> `browser_click(ref)` is mechanical: the decision was made several
+    # steps ago and the model is executing it. Sending that to a reasoning
+    # model buys nothing and spends the scarcest resource in the system. So the
+    # loop asks for `agent_step` on an ordinary continuation and keeps
+    # `deep_plan` for the calls where judgement is the point - the opening
+    # plan, a recovery after failures, and a re-prompt. See
+    # `orchestrator._agent_loop`.
+    if task == "agent_step":
+        return "mini"
     if task == "computer_use_recover":
         return "reason" if fail_count >= 2 else "mini"
     return "mini"
@@ -601,6 +627,29 @@ def cached_prompt_tokens(usage: object) -> int:
     return int(getattr(details, "cached_tokens", 0) or 0)
 
 
+
+#: Where a throttled tier finishes its call instead of failing the turn.
+#:
+#: Only `reason` has an entry, and that is the whole design rather than an
+#: omission: it is the tier pinned to a single 50,000-token-per-minute
+#: deployment that every agent-loop step goes through, and `mini` lives on a
+#: different account with its own quota. `mini` and `nano` have nowhere better
+#: to go, and `embed` has no substitute at all - a different embedding model
+#: would produce vectors that do not compare with the ones already stored.
+THROTTLE_FALLBACK: dict[str, Tier] = {"reason": "mini"}
+
+
+def _throttle_fallback(tier: Tier, bot_pinned: bool) -> Tier | None:
+    """The tier to finish a throttled call on, or None to let it raise.
+
+    A bot pinned to a specific provider and model by its owner is never
+    silently moved: they asked for that model, and answering on another one
+    without being asked is the kind of helpfulness nobody can debug.
+    """
+    if bot_pinned:
+        return None
+    return THROTTLE_FALLBACK.get(tier)
+
 def is_retryable(exc: BaseException) -> bool:
     """Transient failures only: connection drops, throttling, and 5xx."""
     if isinstance(exc, (APIConnectionError, RateLimitError)):
@@ -788,6 +837,12 @@ class ChatResult:
     #: miss or an endpoint that does not report one -- see
     #: `cached_prompt_tokens`.
     cached_tokens: int = 0
+    #: True when the primary deployment for this tier was rate limited and the
+    #: call was finished on the tier's second deployment. Recorded rather than
+    #: merely logged so a reader of a slow run can tell "the good model was
+    #: busy" from "the good model was wrong", which are different problems with
+    #: the same symptom.
+    alt_deployment: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -1638,6 +1693,19 @@ class ModelRouter:
         #: the setting that works. One wasted request per pair, once. See
         #: `_create`.
         self.rejected_efforts: set[tuple[str, str]] = set()
+        #: `deployment name -> the azure client that actually serves it`, built
+        #: once per process from a live `/deployments` listing per account.
+        #:
+        #: This exists because "azure" is not one account here. The shared
+        #: `AZURE_OPENAI_ENDPOINT` carries the GPT deployments and a second
+        #: Foundry resource (`AZURE_OPENAI_ENDPOINT_REASON`) carries Grok, and
+        #: the Builder's model dropdown lists *both* — see
+        #: `_azure_list_all_deployments`. A bot pinned to a deployment that
+        #: only exists on the second account has to be sent there or the
+        #: request 404s `DeploymentNotFound`, which is exactly what happened in
+        #: production to a bot pinned to `grok-4.3`.
+        self._azure_model_endpoints: dict[str, AsyncAzureOpenAI] = {}
+        self._azure_model_endpoints_built = False
 
     @property
     def supports_tools(self) -> bool:
@@ -1880,6 +1948,12 @@ class ModelRouter:
                         # resolved `(endpoint, api_version)`, not on `tier`),
                         # so checking every tier uniformly costs nothing.
                         return self._azure_client(tier_typed)
+                # Anything already placed by a live listing. This method is
+                # sync, so it cannot start one — `_azure_client_for_model` is
+                # the path that can, and it is what both model call paths use.
+                known = self._azure_model_endpoints.get(model)
+                if known is not None:
+                    return known
             return self._azure_client(None)
         if provider == "anthropic":
             return self._anthropic_client(None)
@@ -1888,6 +1962,68 @@ class ModelRouter:
         detail = f"provider {provider!r} has no client implementation yet"
         self._note_auth(f"{provider}::bot-override", "mock", detail)
         return None
+
+    async def _azure_client_for_model(self, model: str) -> AsyncAzureOpenAI | None:
+        """The azure account that actually serves `model`.
+
+        Three steps, cheapest first:
+
+        1. **The configured deployments.** Every tier's own deployment name,
+           plus the `reason` tier's alternate, matched against `model` with no
+           network call at all. This covers every bot pinned to a model the
+           router itself routes to, which is the ordinary case.
+        2. **A live listing.** Anything else the Builder offered came from
+           `/deployments` on one of the accounts, so ask them — once per
+           process — and remember which one answered. Best effort: a listing
+           that fails must not fail the turn, because step 3 is what the
+           behaviour was before this existed.
+        3. **The shared account**, as before.
+
+        Step 2 is the fix for a real production failure. `_client_for` used to
+        stop after step 1 and fall through to the shared account, so a bot
+        pinned to `grok-4.3` — a deployment that exists, on the Foundry
+        account, and which the dropdown listed — had every turn die with
+        `404 DeploymentNotFound` from an account that has never carried it.
+        """
+        for tier in ("nano", "mini", "reason", "embed"):
+            tier_typed = cast("Tier", tier)
+            if self._deployment(tier_typed) == model:
+                # A tier whose endpoint is not overridden resolves to the same
+                # cached client as the shared-account fallback below
+                # (`_azure_client` caches on the resolved
+                # `(endpoint, api_version)`, not on `tier`), so checking every
+                # tier uniformly costs nothing.
+                return self._azure_client(tier_typed)
+        # The alternate reason deployment is not a tier, so the loop above
+        # cannot see it — and it lives on the overridden endpoint, which is
+        # precisely the case that 404s when it is missed.
+        if model and model == (self.settings.azure_deployment_reason_alt or "").strip():
+            return self._azure_client(cast("Tier", "reason"))
+
+        known = self._azure_model_endpoints.get(model)
+        if known is not None:
+            return known
+        if not self._azure_model_endpoints_built:
+            try:
+                await self._azure_list_all_deployments()
+            except Exception as exc:  # noqa: BLE001 - never fail a turn over a listing
+                logger.warning(
+                    "could not list azure deployments to place model %s: %s", model, exc
+                )
+                # Marked built either way: one failed listing per process, not
+                # one per turn. A restart retries.
+                self._azure_model_endpoints_built = True
+            known = self._azure_model_endpoints.get(model)
+            if known is not None:
+                return known
+
+        logger.warning(
+            "bot pinned to azure model %s, which no configured account reports as a "
+            "deployment - sending it to the shared account, where it will 404 unless "
+            "it was deployed after this listing",
+            model,
+        )
+        return self._azure_client(None)
 
     def provider_available(self, provider: Provider) -> bool:
         """Whether `provider` can actually be reached right now — a live
@@ -2000,7 +2136,19 @@ class ModelRouter:
                 cast_to=object,
                 options={"params": {"api-version": "2023-03-15-preview"}},
             ))
-            models.update(row["id"] for row in (body.get("data") or []) if row.get("id"))
+            for row in body.get("data") or []:
+                name = row.get("id")
+                if not name:
+                    continue
+                models.add(name)
+                # Which account answered for this name — the half of this
+                # listing that used to be thrown away, and the reason a bot
+                # could be pinned to a model the chat path could not then
+                # find. First writer wins: a name deployed on both accounts
+                # is the same model either way, and the shared account is
+                # queried first.
+                self._azure_model_endpoints.setdefault(name, client)
+        self._azure_model_endpoints_built = True
         return sorted(models)
 
     def client(self, tier: Tier | None = None) -> ProviderClient | None:
@@ -2345,7 +2493,14 @@ class ModelRouter:
         override = self._bot_override(bot)
         if override is not None:
             provider, model_override = override
-            client = self._client_for(provider, model_override)
+            # `azure` is resolved per *model*, not per provider: there is more
+            # than one azure account here and only one of them has any given
+            # deployment. See `_azure_client_for_model`.
+            client = (
+                await self._azure_client_for_model(model_override)
+                if provider == "azure"
+                else self._client_for(provider, model_override)
+            )
             if model_override not in MODEL_PRICES:
                 # cost_ledger falls back to the task's ordinary tier price -
                 # accurate for the models in MODEL_PRICES, a guess otherwise.
@@ -2364,8 +2519,98 @@ class ModelRouter:
             return result
 
         kwargs = self._request_kwargs(tier, messages, tools, tool_choice, reasoning_effort, model_override)
-        resp = await self._create(client, kwargs)
+        try:
+            resp = await self._create(client, kwargs)
+        except RateLimitError:
+            # ---- the throttle that looked like a hang ----------------------
+            #
+            # Measured on this deployment, 2026-09-03:
+            #
+            #   grok-4-1-fast-reasoning   GlobalStandard   capacity 50
+            #
+            # which is 50,000 tokens a minute, and `route_task` sends every
+            # agent-loop step (`deep_plan`) to that one deployment. The
+            # measured mean agent-loop request is ~9,800 prompt tokens
+            # (`tests/services/test_agent_context_budget.py`), so the reason
+            # tier supports about five calls a minute and a single run makes
+            # dozens. `_retrying` then gives each call three attempts with
+            # backoff capped at 8s and re-raises, which killed the turn.
+            #
+            # The user-visible result was the reported "I messaged and nothing
+            # happened": the turn died mid-loop, the run went `failed`, and no
+            # assistant message was ever written because one is only written
+            # when a turn *finishes*.
+            #
+            # A throttled deployment is not a broken one, and the fallback tier
+            # is a different resource with its own quota - `mini` is
+            # gpt-5.4-mini on the Azure OpenAI account, `reason` is Grok on the
+            # Foundry one. Finishing the step on `mini` is worse than finishing
+            # it on Grok and enormously better than not finishing it, so the
+            # loop keeps its momentum and the person gets an answer.
+            #
+            # Only from `reason`, and only once: `mini` has no lower tier worth
+            # dropping to, and a fallback that itself fell back would be a
+            # retry loop wearing a different hat.
+            # First hop: the same tier's *other* deployment, if there is one.
+            # Quota is allocated per model, so a second xAI model is a second
+            # 50,000 tokens a minute of genuine reasoning capacity - strictly
+            # better than dropping to `mini`, and the only lever available
+            # without a quota request, since the primary deployment already
+            # holds its model's entire regional allowance.
+            alt = (self.settings.azure_deployment_reason_alt or "").strip()
+            if tier == "reason" and alt and override is None and alt != model_override:
+                logger.warning(
+                    "reason deployment is rate limited; trying the second one (%s)", alt
+                )
+                try:
+                    kwargs = self._request_kwargs(
+                        tier, messages, tools, tool_choice, reasoning_effort, alt
+                    )
+                    resp = await self._create(client, kwargs)
+                    model_override = alt
+                    return self._finish_chat(
+                        resp, tier, messages, model_override, alt_used=True
+                    )
+                except RateLimitError:
+                    # Both reasoning deployments are saturated. Fall through to
+                    # the tier drop rather than raising: a slower answer beats
+                    # a dead turn, which is what this whole path is for.
+                    logger.warning("both reason deployments are rate limited; dropping a tier")
 
+            fallback = _throttle_fallback(tier, override is not None)
+            if fallback is None:
+                raise
+            fallback_client = self.client(fallback)
+            if fallback_client is None:
+                raise
+            logger.warning(
+                "tier %r is rate limited; finishing this call on %r instead", tier, fallback
+            )
+            tier = fallback
+            client = fallback_client
+            kwargs = self._request_kwargs(
+                fallback, messages, tools, tool_choice, reasoning_effort, model_override
+            )
+            resp = await self._create(client, kwargs)
+
+        return self._finish_chat(resp, tier, messages, model_override)
+
+    def _finish_chat(
+        self,
+        resp: Any,
+        tier: Tier,
+        messages: list[dict[str, Any]],
+        model_override: str | None,
+        *,
+        alt_used: bool = False,
+    ) -> ChatResult:
+        """Turn one completion into a `ChatResult`. Shared by every hop.
+
+        A method rather than inline code because there are three ways to reach
+        it now - the ordinary call, the second reason deployment, and the tier
+        fallback - and a result assembled two subtly different ways is how
+        `cost_ledger` starts disagreeing with itself.
+        """
         choice = resp.choices[0].message
         content = choice.content or ""
         calls = parse_tool_calls(choice)
@@ -2391,6 +2636,7 @@ class ModelRouter:
                 cached_tokens=cached_prompt_tokens(usage),
             )
         result.tool_calls = calls
+        result.alt_deployment = alt_used
         self.last_result = result
         return result
 
@@ -2416,7 +2662,11 @@ class ModelRouter:
         override = self._bot_override(bot)
         if override is not None:
             provider, model_override = override
-            client = self._client_for(provider, model_override)
+            client = (
+                await self._azure_client_for_model(model_override)
+                if provider == "azure"
+                else self._client_for(provider, model_override)
+            )
             if model_override not in MODEL_PRICES:
                 _warn_tier_pricing_may_not_match_provider(tier, f"{provider} (bot override)")
         else:
@@ -2480,16 +2730,60 @@ class ModelRouter:
         )
 
     async def record_cost(self, db: AsyncSession, bot_id, result: ChatResult) -> None:
-        db.add(
-            CostLedger(
+        """Write one ledger row. Never raise — this is bookkeeping, not the work.
+
+        The production failure that made this defensive, 2026-09-02: a turn had
+        already logged two work items when this insert hit a connection Postgres
+        had terminated for being idle in a transaction past 60 seconds, and the
+        `InterfaceError` propagated out of the turn and killed it. The bot's
+        actual work was done and reported nowhere.
+        `orchestrator._release_db` removes the cause; this makes the cost of it
+        recurring proportionate.
+
+        One retry, after a rollback, because that is the shape of the failure
+        that matters: a dead connection is invalidated by the rollback and the
+        pool hands out a fresh, pre-pinged one, so the second attempt normally
+        lands and the ledger stays complete. If it does not, the row is lost and
+        said to be lost — a bot's daily budget reading slightly low is a smaller
+        problem than a turn that threw away work it had really done.
+        """
+
+        def _row() -> CostLedger:
+            return CostLedger(
                 bot_id=bot_id,
                 tier=result.tier,
                 input_tokens=result.input_tokens,
                 output_tokens=result.output_tokens,
                 cost_usd=result.cost_usd,
             )
-        )
-        await db.commit()
+
+        try:
+            db.add(_row())
+            await db.commit()
+            return
+        except SQLAlchemyError:
+            logger.warning(
+                "cost ledger write failed for bot %s; retrying on a fresh connection",
+                bot_id,
+                exc_info=True,
+            )
+        try:
+            await db.rollback()
+            db.add(_row())
+            await db.commit()
+        except SQLAlchemyError:
+            logger.error(
+                "cost not recorded for bot %s: %s tier, %s in / %s out, $%s. The turn "
+                "continues; today's spend for this bot reads low by that amount.",
+                bot_id,
+                result.tier,
+                result.input_tokens,
+                result.output_tokens,
+                result.cost_usd,
+                exc_info=True,
+            )
+            with contextlib.suppress(SQLAlchemyError):
+                await db.rollback()
 
     async def spent_today_usd(self, db: AsyncSession, bot_id) -> Decimal:
         from datetime import datetime, timezone

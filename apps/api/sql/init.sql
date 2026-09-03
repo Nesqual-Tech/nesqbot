@@ -203,6 +203,22 @@ ALTER TABLE runs         ADD COLUMN IF NOT EXISTS finished_at TIMESTAMPTZ;
 ALTER TABLE bots         ADD COLUMN IF NOT EXISTS model_provider TEXT;
 ALTER TABLE bots         ADD COLUMN IF NOT EXISTS model_name TEXT;
 
+-- Persona. A bot had a name, a one-line role and a prompt, and nothing else -
+-- so every draft it wrote was unsigned, addressed from nowhere, and in the same
+-- voice as every other bot. These four are identity, not behaviour:
+--
+--   email           the address a draft is *from*. Identity only until a mail
+--                   connector is bound - there is no inbox behind it.
+--   voice           how this one writes. Two sentences, not a style guide.
+--   signature       how they sign off.
+--   desktop_habits  which applications they reach for on their own machine.
+--
+-- All nullable: a bot with none of them behaves exactly as it did before.
+ALTER TABLE bots         ADD COLUMN IF NOT EXISTS email TEXT;
+ALTER TABLE bots         ADD COLUMN IF NOT EXISTS voice TEXT;
+ALTER TABLE bots         ADD COLUMN IF NOT EXISTS signature TEXT;
+ALTER TABLE bots         ADD COLUMN IF NOT EXISTS desktop_habits TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_user_devices_user ON user_devices(user_id);
 CREATE INDEX IF NOT EXISTS idx_memories_bot_user ON memories(bot_id, user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_runs_thread ON runs(thread_id, created_at DESC);
@@ -371,7 +387,7 @@ CREATE INDEX IF NOT EXISTS idx_action_log_reversible ON action_log(bot_id, rever
 -- A lead is the motivating case, not the mechanism, so this is one general
 -- `work_items` table with a free-text `type` rather than a `leads` table plus a
 -- `tickets` table plus an `invoices` table, each with its own copy of the
--- transfer ledger. The ledger is the differentiator (docs/competitive-analysis.md
+-- transfer ledger. The ledger is the differentiator (docs/architecture.md
 -- records the competitor's audit view as "coming"), and a differentiator wants
 -- exactly one place to be queried from.
 --
@@ -439,6 +455,51 @@ ALTER TABLE work_items ADD COLUMN IF NOT EXISTS resolution TEXT;
 ALTER TABLE work_items ADD COLUMN IF NOT EXISTS transferred_at TIMESTAMPTZ;
 ALTER TABLE work_items ADD COLUMN IF NOT EXISTS last_event_at TIMESTAMPTZ;
 ALTER TABLE work_items ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ;
+
+-- Assigned work starts working.
+--
+-- A work item used to be a record and nothing more: the bot named as its owner
+-- was never told, so a chief of staff that decomposed a goal into items and
+-- assigned them had, in fact, started nobody. `dispatched_at` is what makes an
+-- assignment an instruction — NULL means "this item has an owner who has not
+-- been woken about it yet", and the dispatcher in `services/work_dispatch.py`
+-- claims those rows, wakes the owner, and stamps it. Nulled again on every
+-- transfer, because a new owner has not been woken either.
+ALTER TABLE work_items ADD COLUMN IF NOT EXISTS dispatched_at TIMESTAMPTZ;
+ALTER TABLE work_items ADD COLUMN IF NOT EXISTS dispatch_run_id UUID;
+
+-- The query the dispatcher runs: owned, open, not yet woken, oldest first.
+-- Partial, so it stays the size of the backlog rather than of the table.
+-- (No apostrophes in here: the statement splitter counts quotes to find
+-- string literals, and a contraction in a comment reads as an unbalanced one.)
+CREATE INDEX IF NOT EXISTS idx_work_items_pending_dispatch
+  ON work_items (created_at)
+  WHERE dispatched_at IS NULL AND owner_bot_id IS NOT NULL AND status = 'open';
+
+-- One-time: do not fire on history.
+--
+-- The dispatcher reads "owned, open, dispatched_at IS NULL" as a queue, and
+-- every row that existed before the column did matches it. On the deploy that
+-- added this, that was nine items a chief of staff had filed over several days
+-- and never assigned to anybody -- so the first pass started three runs nobody
+-- had asked for that afternoon, which is exactly the kind of surprise a
+-- migration must not spring.
+--
+-- Bounded by a literal timestamp rather than by a flag, so it is one-time by
+-- construction: the predicate can never match a row created after this shipped,
+-- and it therefore cannot swallow work that is legitimately queued when a later
+-- deploy runs this file again.
+-- Wrapped in DO, which is the idiom this file already uses for a migration
+-- (see the clock_timestamp() block at the end) and what the idempotency guard
+-- in test_schema_splitter.py accepts: every statement here runs on every boot,
+-- so a bare UPDATE would have to be read carefully to see that it is safe.
+DO $$
+BEGIN
+  UPDATE work_items
+     SET dispatched_at = created_at
+   WHERE dispatched_at IS NULL
+     AND created_at < TIMESTAMPTZ '2026-09-03 17:00:00+00';
+END $$;
 ALTER TABLE work_item_transfers ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'api';
 ALTER TABLE work_item_transfers ADD COLUMN IF NOT EXISTS actor_bot_id UUID;
 

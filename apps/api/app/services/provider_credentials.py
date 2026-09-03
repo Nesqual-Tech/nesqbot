@@ -16,6 +16,11 @@ inventing a second secret nobody self-hosting this will ever set.
 Resolved values never enter a log line, an API response, or an audit event —
 same rule `secrets.py` follows for Key Vault-backed ones. Callers of
 `get_override` get the plaintext in-process only.
+
+Because that storage decision is already made and already deployed, it is also
+the fallback for connector credentials typed into the app when Key Vault
+refuses the write — see `set_app_secret` at the bottom of this module and
+`secrets.store_connector_secret`. One Fernet key, one table, one decision.
 """
 
 from __future__ import annotations
@@ -100,6 +105,12 @@ async def _reload(db: AsyncSession) -> None:
     result = await db.execute(select(ProviderCredential))
     fresh: dict[str, _Override] = {}
     for row in result.scalars().all():
+        # The table also holds app-encrypted secrets that are not provider keys
+        # (see `set_app_secret`). They are read on demand with a session in
+        # hand and nothing ever asks `get_override` for one, so keeping their
+        # plaintext in a process-lifetime dict would be storage with no reader.
+        if row.provider not in KNOWN_PROVIDERS:
+            continue
         value = decrypt(row.api_key_encrypted)
         if value is None:
             continue
@@ -182,3 +193,82 @@ async def delete_credential(db: AsyncSession, *, provider: str) -> None:
     await db.execute(delete(ProviderCredential).where(ProviderCredential.provider == provider))
     await db.commit()
     _overrides.pop(provider, None)
+
+
+# ---------------------------------------------------------------------------
+# App-encrypted secrets that are not provider keys
+# ---------------------------------------------------------------------------
+
+#: Namespace for rows in `provider_credentials` that are *not* a model
+#: provider's key. `provider` is the primary key and a free-text column, so a
+#: prefixed key ("app-secret:connector/{bot}/{connector}") cannot collide with
+#: "openai" and friends, and `KNOWN_PROVIDERS` — which is what
+#: `GET /bots/providers/credentials` iterates and what `_reload` now filters on
+#: — never sees these rows.
+#:
+#: Sharing the table is deliberate, and it is the smaller of two evils. The
+#: alternative was a second table with a second Fernet key derived a second
+#: way, which is exactly what this module's header argues against; and the one
+#: thing that must not happen — a raw secret in a column that was designed to
+#: hold a reference — is what `bot_connectors.secret_ref` would have become.
+#: `api_key_encrypted` was designed for precisely this: a Fernet token,
+#: readable only with `JWT_SECRET`. `app/models.py`'s docstring still describes
+#: the table as provider-only; it is not this change's to edit.
+APP_SECRET_PREFIX = "app-secret:"
+
+
+def _app_row_key(key: str) -> str:
+    return f"{APP_SECRET_PREFIX}{key}"
+
+
+async def set_app_secret(
+    db: AsyncSession,
+    *,
+    key: str,
+    value: str,
+    user_id: uuid.UUID | None = None,
+) -> None:
+    """Store `value` encrypted at rest under an opaque `key` (upsert).
+
+    Deliberately *not* cached in `_overrides`: unlike a provider key, whose
+    reader (`model_router`) is synchronous and cannot open a session, every
+    reader of these has a session already (`secrets.resolve_connector_secrets`
+    does). Staleness across replicas is then only the resolver's own cache.
+    """
+    encrypted = encrypt(value)
+    row_key = _app_row_key(key)
+    stmt = insert(ProviderCredential).values(
+        provider=row_key,
+        api_key_encrypted=encrypted,
+        base_url=None,
+        updated_by_user_id=user_id,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[ProviderCredential.provider],
+        set_={
+            "api_key_encrypted": encrypted,
+            "updated_by_user_id": user_id,
+            "updated_at": stmt.excluded.updated_at,
+        },
+    )
+    await db.execute(stmt)
+    await db.commit()
+
+
+async def get_app_secret(db: AsyncSession, *, key: str) -> str | None:
+    """The decrypted value, or None when absent or encrypted under an old
+    `JWT_SECRET` — `decrypt` already treats that as "no credential"."""
+    result = await db.execute(
+        select(ProviderCredential).where(ProviderCredential.provider == _app_row_key(key))
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        return None
+    return decrypt(row.api_key_encrypted)
+
+
+async def delete_app_secret(db: AsyncSession, *, key: str) -> None:
+    await db.execute(
+        delete(ProviderCredential).where(ProviderCredential.provider == _app_row_key(key))
+    )
+    await db.commit()

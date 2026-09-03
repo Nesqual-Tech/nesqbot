@@ -121,3 +121,104 @@ async def test_it_says_which_state_the_run_was_in(db, user_a, bot_a, make_thread
     event = next(e for e in rows.scalars().all() if e.detail.get("run_id") == str(run.id))
     assert event.detail["from_status"] == "queued"
     assert event.actor_user_id is None, "nobody decided this; it must not name a person"
+
+
+# ---------------------------------------------------------------------------
+# Telling the person, not just the database
+# ---------------------------------------------------------------------------
+#
+# Measured on the live database while the owner reported "I messaged and nothing
+# happened at all":
+#
+#     MESSAGES  2026-09-02T18:14:07  user  'Maya, you are the COO of Nesqual…'
+#     RUNS      2026-09-02T18:14:07  running     <- no reply, ever
+#               2026-09-02T15:43:24  running     <- stuck ~3h
+#
+# Both true statements about the product: an assistant message is only written
+# when a turn *finishes*, so a turn killed by a deploy or stalled mid-step
+# leaves the transcript holding the person's own message and nothing else. The
+# run row said `running`, the reaper would eventually say `interrupted`, and the
+# screen said nothing either way.
+
+
+async def test_a_reclaimed_run_leaves_a_sentence_in_its_thread(db, make_user, make_bot, make_thread):
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select
+
+    from app.models import Message, Run
+    from app.services.reaper import reap_orphaned_runs
+
+    user = await make_user(email="stalled@nesqualtech.test")
+    bot = await make_bot(user, name="Chief of Staff")
+    thread = await make_thread(user, [bot])
+    stale = datetime.now(timezone.utc) - timedelta(hours=3)
+
+    run = Run(thread_id=thread.id, bot_id=bot.id, status="running")
+    db.add(run)
+    await db.commit()
+    await db.refresh(run)
+    # Backdate the heartbeat: only age decides, which is what makes this safe
+    # with several replicas.
+    run.updated_at = stale
+    await db.commit()
+
+    claimed = await reap_orphaned_runs(db)
+
+    assert str(run.id) in claimed
+    posted = (
+        (await db.execute(select(Message).where(Message.thread_id == thread.id))).scalars().all()
+    )
+    assert len(posted) == 1, "the thread was left with no explanation"
+    note = posted[0]
+    assert note.role == "assistant"
+    assert note.bot_id == bot.id
+    assert "stopped mid-task" in note.content
+    assert "nothing more is coming" in note.content
+    assert "Send the message again" in note.content
+    assert note.meta["interrupted_run_id"] == str(run.id)
+
+
+async def test_a_run_with_no_thread_is_still_reclaimed(db, make_user, make_bot):
+    """A routine or an inbound handler has no transcript to apologise in."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.models import Run
+    from app.services.reaper import reap_orphaned_runs
+
+    user = await make_user(email="routine@nesqualtech.test")
+    bot = await make_bot(user, name="Ops")
+    run = Run(thread_id=None, bot_id=bot.id, status="running")
+    db.add(run)
+    await db.commit()
+    await db.refresh(run)
+    run.updated_at = datetime.now(timezone.utc) - timedelta(hours=3)
+    await db.commit()
+
+    assert str(run.id) in await reap_orphaned_runs(db)
+
+
+async def test_a_live_run_is_neither_reaped_nor_apologised_for(db, make_user, make_bot, make_thread):
+    """The asymmetry the reaper's own docstring argues for, asserted.
+
+    Reaping late costs a stale row; reaping early kills work somebody is
+    waiting on - and now it would also post a note claiming a live turn is
+    dead, which is worse than the stale row by some distance.
+    """
+    from sqlalchemy import select
+
+    from app.models import Message, Run
+    from app.services.reaper import reap_orphaned_runs
+
+    user = await make_user(email="live@nesqualtech.test")
+    bot = await make_bot(user, name="Sales")
+    thread = await make_thread(user, [bot])
+    run = Run(thread_id=thread.id, bot_id=bot.id, status="running")
+    db.add(run)
+    await db.commit()
+
+    assert await reap_orphaned_runs(db) == []
+    assert (
+        (await db.execute(select(Message).where(Message.thread_id == thread.id))).scalars().all()
+        == []
+    )

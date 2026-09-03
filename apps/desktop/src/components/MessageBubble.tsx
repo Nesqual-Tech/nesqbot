@@ -1,6 +1,7 @@
 import { memo, useState, type CSSProperties } from "react"
 import { botColors, logoInk } from "@nesqbot/ui"
 import { clockTime, cx, initials } from "../lib/format"
+import { BotAvatar } from "./BotAvatar"
 import { Markdown } from "./Markdown"
 import type { Bot, Message } from "../types"
 
@@ -73,9 +74,18 @@ export const MessageBubble = memo(function MessageBubble({ message, bot, streami
     >
       {role !== "user" ? (
         <header className="bubble__header">
-          <span className="avatar avatar--xs" style={{ "--avatar-bg": accent } as CSSProperties} aria-hidden="true">
-            {initials(bot?.name ?? (role === "tool" ? "Tool" : "Bot"))}
-          </span>
+          {/*
+            The bot's silhouette, the same one the rail and the header draw.
+            A tool message has no bot, so it keeps a tinted disc — a shape
+            would claim an identity that message does not have.
+          */}
+          {bot ? (
+            <BotAvatar bot={bot} size={20} />
+          ) : (
+            <span className="avatar avatar--xs" style={{ "--avatar-bg": accent } as CSSProperties} aria-hidden="true">
+              {initials(role === "tool" ? "Tool" : "Bot")}
+            </span>
+          )}
           <span className="bubble__author">{bot?.name ?? (role === "tool" ? "Tool output" : "Assistant")}</span>
           {message.created_at ? <time className="bubble__time">{clockTime(message.created_at)}</time> : null}
         </header>
@@ -148,13 +158,7 @@ export function HandoffRail({ from, to, ledgerKey }: HandoffRailProps) {
       <span className="handoff__caption">handed over</span>
 
       <span className="handoff__party">
-        <span
-          className="avatar avatar--xs"
-          style={{ "--avatar-bg": botColors[from.slug] || logoInk } as CSSProperties}
-          aria-hidden="true"
-        >
-          {initials(from.name)}
-        </span>
+        <BotAvatar bot={from} size={18} />
         <span className="handoff__name">{from.name}</span>
       </span>
 
@@ -163,13 +167,7 @@ export function HandoffRail({ from, to, ledgerKey }: HandoffRailProps) {
       </span>
 
       <span className="handoff__party">
-        <span
-          className="avatar avatar--xs"
-          style={{ "--avatar-bg": botColors[to.slug] || logoInk } as CSSProperties}
-          aria-hidden="true"
-        >
-          {initials(to.name)}
-        </span>
+        <BotAvatar bot={to} size={18} />
         <span className="handoff__name">{to.name}</span>
       </span>
 

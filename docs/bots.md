@@ -20,6 +20,12 @@ slug: chief_of_staff # required — lower_snake_case, unique, immutable
 role: Orchestrator # optional — one-line job description, shown in the UI
 desktop_profile: icewm # optional — xfce (default) | icewm
 daily_budget_usd: 5 # optional — soft cap, defaults to 5
+email: chief.of.staff@nesqualtech.com # optional — identity, not an inbox
+voice: | # optional — how this one writes
+  Short and decisive. Names who owns what, and by when.
+signature: "— Chief of Staff, Nesqual Tech" # optional — how they sign off
+desktop_habits: | # optional — which applications they reach for
+  Browser and a terminal. Keeps one notes file open as the handoff ledger.
 system_prompt: | # required — the bot's standing instructions
   You are the Chief of Staff for Nesqual Tech on Nesq Bot.
   Route work to Sales, Lead Generator, Ops, or Support.
@@ -35,6 +41,10 @@ system_prompt: | # required — the bot's standing instructions
 | `role`             | no       | Defaults to `""`                                                                                |
 | `desktop_profile`  | no       | `xfce` (full desktop) or `icewm` (lighter, for bots that rarely need a GUI). Defaults to `xfce` |
 | `daily_budget_usd` | no       | Soft cap. Defaults to `5`                                                                       |
+| `email`            | no       | The From line on a draft. **Identity, not a mailbox** — nothing arrives here without an inbound source, and sending still waits for a human |
+| `voice`            | no       | How this bot writes. Two sentences, not a style guide                                            |
+| `signature`        | no       | How it signs off                                                                                 |
+| `desktop_habits`   | no       | Which applications it reaches for on its own machine                                             |
 
 Seeding rules — the surprising ones are worth internalising:
 
@@ -45,7 +55,12 @@ Seeding rules — the surprising ones are worth internalising:
 - Seeding is create-only for a *new* slug, but a system bot (`is_system`) that
   already exists is **reconciled**, not skipped: its `name`/`role`/
   `system_prompt`/`desktop_profile` are overwritten from the current YAML
-  every time seeding runs. A custom bot is never touched — reconciliation only
+  every time seeding runs. The persona four — `email`, `voice`, `signature`,
+  `desktop_habits` — are the exception: they are seeded once, for a bot that
+  has none, and never written over again. The app promises exactly that ("the
+  standing prompt is locked. Voice, email, signature and budget are yours to
+  tune"), so re-applying the YAML on every boot would quietly undo somebody's
+  edit and look like the save had failed. A custom bot is never touched — reconciliation only
   applies to `is_system` rows. Seeding runs on boot and on
   `POST /api/bots/system/reseed` (no restart needed for either a new bot or an
   edited prompt). `daily_budget_usd` is the one field seeding never overwrites

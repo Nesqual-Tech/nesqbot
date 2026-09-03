@@ -1,15 +1,17 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, type CSSProperties } from "react"
-import { botColors, logoInk } from "@nesqbot/ui"
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useMessages } from "../hooks/useMessages"
 import { useThreadEvents } from "../hooks/useThreadEvents"
-import { useThreads } from "../hooks/useThreads"
-import { initials, truncate } from "../lib/format"
+import type { ThreadsApi } from "../hooks/useThreads"
+import { cx, truncate } from "../lib/format"
 import { isTakeoverRequested, requestFromEvent } from "../lib/takeover"
 import { useSelection, useToast } from "../state/AppState"
 import { useTakeover } from "../state/takeover"
 import { AgentActivity } from "./AgentActivity"
+import { BotAvatar, BotAvatarStack } from "./BotAvatar"
+import { BotPersonaCard } from "./BotPersonaCard"
 import { Composer } from "./Composer"
 import { EmptyState, ErrorState } from "./EmptyState"
+import { Icon } from "./Icon"
 import { HandoffRail, MessageBubble } from "./MessageBubble"
 import { SkeletonList } from "./Skeleton"
 import type { Bot, Message } from "../types"
@@ -18,21 +20,85 @@ export interface ChatPaneProps {
   bots: Bot[]
   botsLoading: boolean
   botsError: unknown
+  /** Owned by the shell, because the conversation list draws from it too. */
+  threads: ThreadsApi
   onApprovalRaised: (approvalId: string, title: string) => void
   onTurnComplete?: () => void
+  desktopOpen: boolean
+  onToggleDesktop: () => void
+  /** Opens the settings sheet on the bot builder, for "Edit profile". */
+  onEditProfile: (botId: string) => void
 }
 
 function prefersReducedMotion(): boolean {
   return typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches
 }
 
-export function ChatPane({ bots, botsLoading, botsError, onApprovalRaised, onTurnComplete }: ChatPaneProps) {
+/**
+ * Three things worth asking this teammate, on an empty thread.
+ *
+ * Not decoration and not a tutorial: a blank composer next to a bot whose only
+ * description is "Outbound research and drafts" is a guessing game about
+ * register — do you type a keyword, or a sentence? Every one of these is
+ * phrased as an instruction with a real object in it, because that is the
+ * shape of prompt these bots answer well and the shape people write worst.
+ *
+ * Keyed by slug with a generic fallback, so a custom bot gets sensible ones
+ * rather than none.
+ */
+const SUGGESTIONS: Record<string, string[]> = {
+  chief_of_staff: [
+    "Give Lead Generator and Sales one job each for today and tell me who has what.",
+    "What is waiting on me right now, and what is waiting on a bot?",
+    "Break this down and hand it out: we need ten qualified CRM leads by Friday.",
+  ],
+  lead_generator: [
+    "Find ten companies hiring their first sales rep — name a person I can contact at each.",
+    "Who at these accounts owns the CRM decision? Give me a name and a source.",
+    "Draft an opener for the three best leads you found last time.",
+  ],
+  sales: [
+    "Which deals have gone quiet for more than a week?",
+    "Draft the follow-up for my last call and log what we agreed.",
+    "Tidy the CRM: what is missing a next step?",
+  ],
+  ops: [
+    "Triage the inbox and tell me only what needs me.",
+    "File this month's invoices and flag anything unpaid.",
+    "Run the onboarding checklist for the newest account.",
+  ],
+  support: [
+    "What is in the ticket queue, worst first?",
+    "Draft a reply to the oldest open ticket, quoting the KB article you used.",
+    "Which questions keep coming back that the KB does not answer?",
+  ],
+}
+
+const GENERIC_SUGGESTIONS = [
+  "What can you do for me today?",
+  "Take this and run with it:",
+  "What do you need from me to get started?",
+]
+
+export function ChatPane({
+  bots,
+  botsLoading,
+  botsError,
+  threads,
+  onApprovalRaised,
+  onTurnComplete,
+  desktopOpen,
+  onToggleDesktop,
+  onEditProfile,
+}: ChatPaneProps) {
   const toast = useToast()
   const takeover = useTakeover()
   const { activeBotId, activeThreadId, setActiveThreadId } = useSelection()
-  const threads = useThreads()
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const ensuringRef = useRef<string | null>(null)
+  const [personaOpen, setPersonaOpen] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [prefill, setPrefill] = useState<{ text: string; key: number } | null>(null)
 
   const activeBot = useMemo(() => bots.find((b) => b.id === activeBotId) ?? null, [bots, activeBotId])
   const botById = useMemo(() => {
@@ -74,11 +140,6 @@ export function ChatPane({ bots, botsLoading, botsError, onApprovalRaised, onTur
     enabled: Boolean(activeThreadId) && !messages.streaming,
     onEvent: messages.applyRemoteEvent,
   })
-
-  const threadsForBot = useMemo(
-    () => (activeBotId ? threads.threads.filter((t) => t.bot_ids?.includes(activeBotId)) : []),
-    [threads.threads, activeBotId],
-  )
 
   const activeThread = useMemo(
     () => threads.threads.find((t) => t.id === activeThreadId) ?? null,
@@ -122,6 +183,60 @@ export function ChatPane({ bots, botsLoading, botsError, onApprovalRaised, onTur
     [messages, toast],
   )
 
+  /*
+   * The roster is the feature, not a detail. `orchestrator._delegate_targets`
+   * is "everyone else in this room", so a thread with one bot means
+   * `delegate_to_bot` is never advertised and a chief of staff asked to hand
+   * work over holds no tool that can. This app created every thread with one
+   * bot and offered no way to add another, which is why no hand-off in the
+   * shipped product ever reached a teammate.
+   */
+  const seatBot = useCallback(
+    async (botId: string) => {
+      if (!activeThreadId || !botId) return
+      try {
+        await threads.addBots(activeThreadId, [botId])
+      } catch (err) {
+        toast.error("Could not add that teammate", err instanceof Error ? err.message : undefined)
+      }
+    },
+    [activeThreadId, threads, toast],
+  )
+
+  const unseatBot = useCallback(
+    async (botId: string) => {
+      if (!activeThreadId) return
+      try {
+        await threads.removeBot(activeThreadId, botId)
+      } catch (err) {
+        // The API refuses to empty a roster (409 last_bot_in_thread) because a
+        // thread with no bots cannot answer. Say that rather than nothing.
+        toast.error("Could not remove that teammate", err instanceof Error ? err.message : undefined)
+      }
+    },
+    [activeThreadId, threads, toast],
+  )
+
+  const participants = useMemo(() => {
+    // The API returns the roster ordered by id, which is arbitrary to a reader.
+    // The bot whose window this is comes first - it is the one that answers -
+    // and the rest are alphabetical so the strip does not reshuffle when
+    // somebody is added.
+    const seated = (activeThread?.bot_ids ?? []).map((id) => botById[id]).filter(Boolean)
+    return seated.sort((a, b) => {
+      if (a.id === activeBotId) return -1
+      if (b.id === activeBotId) return 1
+      return a.name.localeCompare(b.name)
+    })
+  }, [activeThread?.bot_ids, botById, activeBotId])
+
+  const seatable = useMemo(
+    () => bots.filter((b) => !(activeThread?.bot_ids ?? []).includes(b.id)),
+    [bots, activeThread?.bot_ids],
+  )
+
+  const group = participants.length > 1
+
   const newThread = useCallback(async () => {
     if (!activeBot) return
     try {
@@ -140,9 +255,9 @@ export function ChatPane({ bots, botsLoading, botsError, onApprovalRaised, onTur
     try {
       await threads.deleteThread(activeThreadId)
       setActiveThreadId(null)
-      toast.success("Thread deleted")
+      toast.success("Conversation deleted")
     } catch (err) {
-      toast.error("Could not delete thread", err instanceof Error ? err.message : undefined)
+      toast.error("Could not delete conversation", err instanceof Error ? err.message : undefined)
     }
   }, [activeThreadId, threads, setActiveThreadId, toast])
 
@@ -163,12 +278,6 @@ export function ChatPane({ bots, botsLoading, botsError, onApprovalRaised, onTur
   if (!activeBot) {
     return (
       <div className="chat">
-        <div className="chat__header">
-          <div className="chat__identity">
-            <h2 className="chat__title">Chat</h2>
-            <div className="chat__subtitle">No teammate selected</div>
-          </div>
-        </div>
         {botsLoading ? (
           <div className="chat__messages">
             <SkeletonList rows={4} />
@@ -177,8 +286,8 @@ export function ChatPane({ bots, botsLoading, botsError, onApprovalRaised, onTur
           <EmptyState
             glyph="chat"
             watermark
-            title="Pick a teammate"
-            description="Choose someone from the left. Work keeps running in Azure even when this app is closed."
+            title="Pick a conversation"
+            description="Choose one on the left, or press + to start a new one. Work keeps running in Azure even when this app is closed."
           />
         )}
       </div>
@@ -197,67 +306,170 @@ export function ChatPane({ bots, botsLoading, botsError, onApprovalRaised, onTur
         }
       : null
 
+  const suggestions = SUGGESTIONS[activeBot.slug] ?? GENERIC_SUGGESTIONS
+  const empty =
+    !messages.initialising && !messages.error && messages.messages.length === 0 && !streamingMessage
+
   return (
     <div className="chat">
       <div className="chat__header">
-        <div className="chat__identity">
-          <h2 className="chat__title">
-            <span
-              className="avatar avatar--xs"
-              style={{ "--avatar-bg": botColors[activeBot.slug] || logoInk } as CSSProperties}
-              aria-hidden="true"
-            >
-              {initials(activeBot.name)}
+        {/*
+          The identity is the way into the profile, on the thing a person
+          already looks at to see who they are talking to. Its prompt, its
+          address, its connectors and its spend were all unreachable from this
+          app until `GET /bots/{id}/persona` existed.
+        */}
+        <button
+          type="button"
+          className="chat__identity"
+          onClick={() => setPersonaOpen(true)}
+          aria-haspopup="dialog"
+          title={group ? "Who is in this conversation?" : `Who is ${activeBot.name}?`}
+        >
+          {group ? (
+            <BotAvatarStack bots={participants} size={26} />
+          ) : (
+            <BotAvatar bot={activeBot} size={30} />
+          )}
+          <span className="chat__identity-text">
+            <span className="chat__title">{activeBot.name}</span>
+            <span className="chat__subtitle">
+              {group
+                ? participants.map((bot) => bot.name).join(" · ")
+                : activeBot.role || truncate(activeThread?.title ?? "", 40)}
+              {events.connected ? (
+                <span className="live-dot" title="Live thread subscription active">
+                  <span className="live-dot__pip" aria-hidden="true" /> live
+                </span>
+              ) : events.retrying ? (
+                <span className="live-dot live-dot--warn" title={events.error ?? "Reconnecting"}>
+                  <span className="live-dot__pip" aria-hidden="true" /> reconnecting
+                </span>
+              ) : null}
             </span>
-            {activeBot.name}
-          </h2>
-          <div className="chat__subtitle">
-            {activeThread ? truncate(activeThread.title, 48) : "Opening thread…"}
-            {events.connected ? (
-              <span className="live-dot" title="Live thread subscription active">
-                <span className="live-dot__pip" aria-hidden="true" /> live
-              </span>
-            ) : events.retrying ? (
-              <span className="live-dot live-dot--warn" title={events.error ?? "Reconnecting"}>
-                <span className="live-dot__pip" aria-hidden="true" /> reconnecting
-              </span>
-            ) : null}
-          </div>
-        </div>
+          </span>
+        </button>
 
         <div className="chat__header-actions">
-          {threadsForBot.length > 1 ? (
-            <>
-              <label className="sr-only" htmlFor="thread-picker">
-                Choose thread
-              </label>
-              <select
-                id="thread-picker"
-                className="select"
-                value={activeThreadId ?? ""}
-                onChange={(event) => setActiveThreadId(event.target.value || null)}
-              >
-                {threadsForBot.map((thread) => (
-                  <option key={thread.id} value={thread.id}>
-                    {truncate(thread.title, 40)}
-                  </option>
-                ))}
-              </select>
-            </>
-          ) : null}
-          <button type="button" className="btn btn--ghost btn--sm" onClick={() => void newThread()}>
-            New thread
+          <button
+            type="button"
+            className="chat__menu-button"
+            aria-expanded={menuOpen}
+            aria-label="Conversation menu"
+            onClick={() => setMenuOpen((open) => !open)}
+          >
+            <Icon name="more" size={16} />
           </button>
           <button
             type="button"
-            className="btn btn--ghost btn--sm"
-            onClick={() => void removeThread()}
-            disabled={!activeThreadId}
+            className={cx("btn btn--sm", desktopOpen ? "btn--primary" : "btn--ghost")}
+            onClick={onToggleDesktop}
+            aria-pressed={desktopOpen}
+            title="The teammate's own Linux desktop (Ctrl ⇧ D)"
           >
-            Delete
+            <Icon name="monitor" size={15} />
+            Computer
           </button>
         </div>
+
+        {menuOpen ? (
+          <div className="chat__menu" role="menu" onMouseLeave={() => setMenuOpen(false)}>
+            <div className="chat__menu-label">In this conversation</div>
+            <ul className="chat__menu-roster">
+              {participants.map((bot) => (
+                <li key={bot.id}>
+                  <BotAvatar bot={bot} size={18} />
+                  <span>{bot.name}</span>
+                  {participants.length > 1 ? (
+                    <button
+                      type="button"
+                      className="chat__menu-remove"
+                      onClick={() => void unseatBot(bot.id)}
+                      aria-label={`Remove ${bot.name} from this conversation`}
+                    >
+                      <Icon name="close" size={12} />
+                    </button>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+            {seatable.length > 0 ? (
+              <>
+                <label className="sr-only" htmlFor="chat-add-teammate">
+                  Add a teammate to this conversation
+                </label>
+                <select
+                  id="chat-add-teammate"
+                  className="select select--sm"
+                  value=""
+                  onChange={(event) => void seatBot(event.target.value)}
+                >
+                  <option value="">Add a teammate…</option>
+                  {seatable.map((bot) => (
+                    <option key={bot.id} value={bot.id}>
+                      {bot.name}
+                    </option>
+                  ))}
+                </select>
+                <p className="chat__menu-note">
+                  Anyone on your team can be handed work from here — the bot doing the handing
+                  seats them itself, and their reply lands in this conversation. Seat somebody
+                  now to have them read along from the start.
+                </p>
+              </>
+            ) : null}
+            <div className="chat__menu-divider" />
+            <button
+              type="button"
+              role="menuitem"
+              className="chat__menu-item"
+              onClick={() => {
+                setMenuOpen(false)
+                void newThread()
+              }}
+            >
+              New thread
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="chat__menu-item chat__menu-item--danger"
+              disabled={!activeThreadId}
+              onClick={() => {
+                setMenuOpen(false)
+                void removeThread()
+              }}
+            >
+              Delete conversation
+            </button>
+          </div>
+        ) : null}
       </div>
+
+      {personaOpen ? (
+        <div className="modal" role="dialog" aria-modal="true">
+          <button
+            type="button"
+            className="modal__backdrop"
+            aria-label="Close profile"
+            onClick={() => setPersonaOpen(false)}
+          />
+          <div className="modal__panel">
+            <BotPersonaCard
+              bot={activeBot}
+              onClose={() => setPersonaOpen(false)}
+              onOpenComputer={() => {
+                setPersonaOpen(false)
+                if (!desktopOpen) onToggleDesktop()
+              }}
+              onEditProfile={() => {
+                setPersonaOpen(false)
+                onEditProfile(activeBot.id)
+              }}
+            />
+          </div>
+        </div>
+      ) : null}
 
       <div className="chat__messages" ref={scrollRef} aria-busy={messages.loading}>
         {messages.initialising ? <SkeletonList rows={3} /> : null}
@@ -266,13 +478,33 @@ export function ChatPane({ bots, botsLoading, botsError, onApprovalRaised, onTur
           <ErrorState error={messages.error} title="Transcript unavailable" onRetry={() => void messages.refetch()} />
         ) : null}
 
-        {!messages.initialising && !messages.error && messages.messages.length === 0 && !streamingMessage ? (
-          <EmptyState
-            glyph="spark"
-            watermark
-            title={`Say hello to ${activeBot.name}`}
-            description={activeBot.role || "Ask for a status, a draft, or hand over a task."}
-          />
+        {empty ? (
+          <div className="chat__opening">
+            <EmptyState
+              glyph="spark"
+              watermark
+              title={group ? "Start the group" : `Message ${activeBot.name}`}
+              description={
+                group
+                  ? "Everybody seated here reads along from the start. Your teammates can be handed work whether or not they are in the room yet. Send, spend and delete still wait for you."
+                  : "Say what you need. Their standing job is in the profile if you want a reminder."
+              }
+            />
+            {!group ? (
+              <div className="chat__suggestions" aria-label="Suggested messages">
+                {suggestions.map((text) => (
+                  <button
+                    key={text}
+                    type="button"
+                    className="chat__suggestion"
+                    onClick={() => setPrefill({ text, key: Date.now() })}
+                  >
+                    {text}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
         ) : null}
 
         {messages.messages.map((message) => {
@@ -317,10 +549,16 @@ export function ChatPane({ bots, botsLoading, botsError, onApprovalRaised, onTur
       </div>
 
       <Composer
-        placeholder={`Message ${activeBot.name}…`}
+        placeholder={group ? "Message the group…" : `Message ${activeBot.name}…`}
         disabled={!activeThreadId}
         streaming={messages.streaming}
         focusKey={activeThreadId}
+        prefill={prefill}
+        hint={
+          group
+            ? "Enter to send. @ to mention a teammate — that chooses who answers."
+            : "Enter to send. Ctrl K for commands, @ to mention, Shift+Enter for a new line."
+        }
         onSend={send}
         onStop={messages.stop}
       />

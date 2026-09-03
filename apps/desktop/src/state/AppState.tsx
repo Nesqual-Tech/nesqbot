@@ -125,11 +125,18 @@ export function useToast(): ToastContextValue {
 
 /* --------------------------------------------------------------- selection */
 
-export type PanelTab = "chat" | "approvals" | "integrations" | "routines" | "usage" | "audit" | "knowledge" | "builder"
-
+/*
+ * No `tab` here any more.
+ *
+ * The shell used to keep a nine-value panel tab in this context and persist
+ * it, because the left rail *was* the navigation. It is a conversation list
+ * now and the other eight sections live in the settings sheet — which is
+ * transient by design: an app that reopens on the Audit panel because that is
+ * where you last were is an app that reopens on nothing you asked for. What is
+ * worth remembering across launches is which conversation you were in, and
+ * that is `activeThreadId`.
+ */
 interface SelectionContextValue {
-  tab: PanelTab
-  setTab: (tab: PanelTab) => void
   activeBotId: string | null
   setActiveBotId: (id: string | null) => void
   activeThreadId: string | null
@@ -144,7 +151,6 @@ const SelectionContext = createContext<SelectionContextValue | null>(null)
 const SELECTION_KEY = "nesq.selection"
 
 interface StoredSelection {
-  tab?: PanelTab
   activeBotId?: string | null
   activeThreadId?: string | null
 }
@@ -162,23 +168,20 @@ function readSelection(): StoredSelection {
 
 function SelectionProvider({ children }: { children: ReactNode }) {
   const stored = useRef<StoredSelection>(readSelection())
-  const [tab, setTab] = useState<PanelTab>(stored.current.tab ?? "chat")
   const [activeBotId, setActiveBotId] = useState<string | null>(stored.current.activeBotId ?? null)
   const [activeThreadId, setActiveThreadId] = useState<string | null>(stored.current.activeThreadId ?? null)
   const [focusApprovalId, setFocusApprovalId] = useState<string | null>(null)
 
   useEffect(() => {
     try {
-      localStorage.setItem(SELECTION_KEY, JSON.stringify({ tab, activeBotId, activeThreadId }))
+      localStorage.setItem(SELECTION_KEY, JSON.stringify({ activeBotId, activeThreadId }))
     } catch {
       /* ignore */
     }
-  }, [tab, activeBotId, activeThreadId])
+  }, [activeBotId, activeThreadId])
 
   const value = useMemo<SelectionContextValue>(
     () => ({
-      tab,
-      setTab,
       activeBotId,
       setActiveBotId,
       activeThreadId,
@@ -186,7 +189,7 @@ function SelectionProvider({ children }: { children: ReactNode }) {
       focusApprovalId,
       setFocusApprovalId,
     }),
-    [tab, activeBotId, activeThreadId, focusApprovalId],
+    [activeBotId, activeThreadId, focusApprovalId],
   )
 
   return <SelectionContext.Provider value={value}>{children}</SelectionContext.Provider>

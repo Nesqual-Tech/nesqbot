@@ -54,7 +54,10 @@ moving a row between the customer's own bots reach nothing outside, are undone
 by the same tools, and are all recorded. The argument is set out in full in
 `services/work_items.py`'s module docstring and this module does not reopen it.
 
-No waking the receiving bot on a transfer either — see `TOOL_TRANSFER_WORK_ITEM`.
+A transfer *does* wake the receiving bot, which it did not used to: see
+`services/work_dispatch.py`. That is the difference between a chief of staff that
+decomposes a goal and one that files notes about a goal, and it is why the
+transfer boundary is the person's team rather than the thread roster.
 """
 
 from __future__ import annotations
@@ -69,6 +72,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AuditEvent, Bot, Thread, User, WorkItem, WorkItemKey, WorkItemTransfer
+from app.services import work_dispatch
 from app.services import work_items as work_items_service
 from app.services.work_items import WORK_ITEM_STATUSES
 
@@ -1046,14 +1050,23 @@ async def _transfer(
     targets: list[Bot],
     run_id: uuid.UUID | None,
 ) -> WorkItemToolResult:
-    """Move ownership to another bot on this thread, through the one ledger path.
+    """Move ownership to another bot, through the one ledger path — and start them.
 
-    Thread membership is the boundary, which is narrower than `POST
-    /work-items/{id}/transfer` (any bot the caller can see) and narrower on
-    purpose. A model can only name a bot it has been told about, and the only
-    roster it is ever told is this thread's; a handover to a bot that is not
-    here would also be a handover to an owner that will never be woken about it.
-    Same boundary as `_delegate_targets`, for the same reason it has one.
+    Two things changed here at once, and the second is why the first is safe.
+
+    The old docstring justified a thread-membership boundary partly like this:
+    "a handover to a bot that is not here would also be a handover to an owner
+    that will never be woken about it." That was true and it was the whole
+    problem. An owner *is* woken now — `services.work_dispatch` claims items
+    whose owner has not been told and runs them — so a transfer is an
+    instruction rather than a filing, and the reason to refuse one for a
+    teammate who happens not to be seated goes away with it.
+
+    So the boundary is the person's own team, the same list
+    `orchestrator._delegate_targets` builds and for the same reason: the model
+    picks from a roster it was handed, so a slug it invents cannot reach another
+    tenant's bot. The dispatcher seats the new owner on the item's thread when
+    it wakes them, so the work still appears where the person is looking.
     """
     work_item_id = _work_item_id(arguments)
     slug = _text(arguments, "to_slug", 120).lower()
@@ -1072,7 +1085,7 @@ async def _transfer(
         return WorkItemToolResult(
             False,
             "no_slug",
-            f"Nothing was handed over: you did not say who to. On this thread: {available}.",
+            f"Nothing was handed over: you did not say who to. Your teammates: {available}.",
             "I tried to hand a record over without saying who to.",
         )
     if not reason:
@@ -1094,17 +1107,15 @@ async def _transfer(
 
     target = next((b for b in targets if b.slug == slug), None)
     if target is None:
-        # The negative control this lane owes: a bot that is not on this
-        # thread — including one belonging to somebody else entirely — is not
-        # distinguishable here from one that does not exist, and neither of
-        # them gets the row.
+        # The negative control this lane owes: a bot belonging to somebody else
+        # entirely is not distinguishable here from one that does not exist, and
+        # neither of them gets the row.
         return WorkItemToolResult(
             False,
             "unknown_target",
-            f"There is no bot called '{slug}' on this thread, so nothing was handed over. "
-            f"On this thread: {available}. A bot cannot add another bot to a person's "
-            "thread.",
-            f"I wanted to hand this to '{slug}', who is not on this thread. Here with me: "
+            f"There is no bot called '{slug}' on this person's team, so nothing was handed "
+            f"over. Your teammates: {available}.",
+            f"I wanted to hand this to '{slug}', who is not on the team. Available: "
             f"{available}.",
         )
 
@@ -1148,14 +1159,18 @@ async def _transfer(
             f"**{item.title}** was already with {target.slug}.",
             (str(item.id),),
         )
+    # An assignment nobody is told about is the bug this whole lane had. The
+    # dispatcher picks the row up within seconds and runs the new owner on it.
+    work_dispatch.mark_for_dispatch(item, assigned_by=bot.slug)
     await db.commit()
     await db.refresh(item)
     return WorkItemToolResult(
         True,
         "transferred",
-        f"{target.slug} now owns {item.id} (\"{item.title}\") and the handover is on the "
-        f"record with your reason. They have not been told and nothing has started - call "
-        f"delegate_to_bot if it needs doing now.",
+        f"{target.slug} now owns {item.id} (\"{item.title}\"), the handover is on the "
+        f"record with your reason, and {target.slug} is being started on it now — it will "
+        "work the item in its own run and report back on this thread. You do not need to "
+        "call delegate_to_bot as well unless you need their answer inside this turn.",
         f"I handed **{item.title}** to {target.slug}: {reason}",
         (str(item.id),),
     )

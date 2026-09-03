@@ -46,7 +46,11 @@ NESQBOT_DEPLOY_APPS=false az deployment group create \
 # Push images to the ACR the template just created
 az acr login -n "$(az deployment group show -g rg-nesqbot-dev -n main \
   --query properties.outputs.acrName.value -o tsv)"
-docker build -t "$ACR/nesqbot/api:v0.1.0"    apps/api
+# The api build context is the repo root, not apps/api: the image bakes in
+# bots/*.yaml so the system-bot prompts ship with the code. A container with no
+# /bots seeds the fallback skeletons from seed.py and, because seeding
+# reconciles is_system bots on every boot, overwrites the real prompts.
+docker build -t "$ACR/nesqbot/api:v0.1.0"    -f apps/api/Dockerfile .
 docker build -t "$ACR/nesqbot/worker:v0.1.0" apps/worker
 docker push "$ACR/nesqbot/api:v0.1.0"
 docker push "$ACR/nesqbot/worker:v0.1.0"

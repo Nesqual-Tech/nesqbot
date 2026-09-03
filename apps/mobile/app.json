@@ -16,6 +16,9 @@
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true
         }
+      },
+      "config": {
+        "usesNonExemptEncryption": false
       }
     },
     "android": {
@@ -42,6 +45,12 @@
         "scope": "",
         "redirectUri": "nesqbot://auth"
       }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/4543566f-0375-4291-8aac-92e2c3a294dd"
     }
   }
 }

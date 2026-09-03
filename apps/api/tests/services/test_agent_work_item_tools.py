@@ -48,7 +48,6 @@ from app.services.orchestrator import (
     _STEP_PHRASES,
     BROWSER_ACTIONS,
     DESKTOP_ACTIONS,
-    TOOL_DELEGATE_TO_BOT,
     TOOL_TASK_COMPLETE,
     agent_tool_names,
     agent_tools,
@@ -383,6 +382,7 @@ async def test_handing_it_to_sales_is_one_call_and_a_ledger_row(
         user_a,
         thread,
         "log star dental",
+        mention_bot_ids=[agent_bot.id],
     )
     item = (await _items(db, user_a))[0]
 
@@ -406,11 +406,17 @@ async def test_handing_it_to_sales_is_one_call_and_a_ledger_row(
             acts("", call(TOOL_TASK_COMPLETE, summary="Ana replied; Sales has it.")),
         ]
     )
-    await turn(orchestrator, db, user_a, thread, "ana replied")
+    await turn(orchestrator, db, user_a, thread, "ana replied", mention_bot_ids=[agent_bot.id])
 
     await db.refresh(item)
     assert item.owner_bot_id == sales.id
-    assert item.status == "working"
+    # `working` was set by the update call above and the transfer put it back to
+    # `open`: a new owner has not started yet, and `open` with an owner is
+    # exactly what `services.work_dispatch` claims. The old expectation here —
+    # that a transfer left the status alone — was the same assumption as "a
+    # transfer wakes nobody".
+    assert item.status == "open"
+    assert item.dispatched_at is None, "the new owner is not owed a run"
     assert item.transferred_at is not None
     # Merged, not replaced: the eight fields the first call wrote are still
     # there, and the two new ones sit alongside them.
@@ -429,20 +435,28 @@ async def test_handing_it_to_sales_is_one_call_and_a_ledger_row(
     assert "asked for a price" in handover.reason
 
 
-async def test_a_transfer_does_not_start_the_other_bot(
+async def test_a_transfer_queues_the_other_bot_without_running_it_inline(
     agent_with, db, user_a, make_thread, agent_bot, make_bot
 ):
-    """The design call this lane was asked to defend, asserted rather than argued.
+    """A transfer starts the new owner — out of band, not inside this turn.
 
-    A transfer is a durable change of owner, most useful at three in the morning
-    with nobody waiting. A delegation is synchronous and capped — three hops,
-    six per chain, thirty minutes — because a person is on the other end of the
-    request. Fusing them would mean a bot out of hops could no longer hand a
-    lead over at all, and would smuggle a run start past the one place this
-    system decides whether a run may begin.
+    The original version of this test asserted that a transfer started nobody
+    at all, and the argument for that was half right. The half that still holds
+    is asserted here: a transfer must not run the receiving bot *inline*. A
+    delegation is synchronous and capped — three hops, six per chain, thirty
+    minutes — because a person is waiting on the request; fusing the two would
+    mean a bot out of hops could no longer hand a lead over, and would smuggle
+    a run start into a tool that is not the place where this system decides a
+    run may begin.
 
-    So: ownership moves, no second run exists, and the model is *told* that in
-    the tool result rather than being left to assume either way.
+    The half that was wrong is the conclusion. "Ownership moves and nothing
+    starts" is what produced a chief of staff which decomposed a month-long
+    goal into assigned items, reported that it had routed the work, and started
+    nobody — reported by the owner as the product being in a worse state than
+    it had been in months. So the transfer marks the row and
+    `services.work_dispatch` runs the new owner seconds later, through
+    `Orchestrator.handle_user_message`: the same single door a person's message
+    and an inbound email both go through, so nothing is smuggled past it.
     """
     sales = await make_bot(user_a, name="Sales", slug=_slug("sales"), daily_budget_usd=500.0)
     thread = await make_thread(user_a, [agent_bot, sales])
@@ -457,6 +471,7 @@ async def test_a_transfer_does_not_start_the_other_bot(
         user_a,
         thread,
         "log it",
+        mention_bot_ids=[agent_bot.id],
     )
     item = (await _items(db, user_a))[0]
 
@@ -474,16 +489,24 @@ async def test_a_transfer_does_not_start_the_other_bot(
             acts("", call(TOOL_TASK_COMPLETE, summary="Sales has it.")),
         ]
     )
-    await turn(orchestrator, db, user_a, thread, "hand it over")
+    await turn(orchestrator, db, user_a, thread, "hand it over", mention_bot_ids=[agent_bot.id])
 
     runs = (
         await db.execute(select(Run).where(Run.bot_id == sales.id))
     ).scalars().all()
-    assert runs == [], "a transfer started a run for the receiving bot"
+    assert runs == [], "a transfer ran the receiving bot inside the caller's turn"
+
+    # What it did instead: left the row owed a run, which is the dispatcher's
+    # queue. One indexed predicate, asserted here so a change to either half
+    # cannot silently stop matching the other.
+    await db.refresh(item)
+    assert item.owner_bot_id == sales.id
+    assert item.status == "open"
+    assert item.dispatched_at is None
 
     reply = next(t for t in _tool_replies(orchestrator.router) if "now owns" in t)
-    assert "have not been told" in reply
-    assert TOOL_DELEGATE_TO_BOT in reply, "the model is not told how to actually wake them"
+    assert "being started on it now" in reply
+    assert "report back on this thread" in reply
 
 
 async def test_the_briefs_pipeline_stages_are_refused_as_statuses(
@@ -605,6 +628,7 @@ async def test_handing_the_same_record_over_twice_records_one_handover(
         user_a,
         thread,
         "log acme",
+        mention_bot_ids=[agent_bot.id],
     )
     item = (await _items(db, user_a))[0]
 
@@ -615,7 +639,7 @@ async def test_handing_the_same_record_over_twice_records_one_handover(
             acts("", call(TOOL_TASK_COMPLETE, summary="Done.")),
         ]
     )
-    await turn(orchestrator, db, user_a, thread, "hand it over")
+    await turn(orchestrator, db, user_a, thread, "hand it over", mention_bot_ids=[agent_bot.id])
 
     ledger = await _ledger(db, item.id)
     assert len(ledger) == 2, "create + one handover, not two handovers"
@@ -646,6 +670,7 @@ async def test_the_ledger_outlives_the_record_an_agent_created(
         user_a,
         thread,
         "log acme",
+        mention_bot_ids=[agent_bot.id],
     )
     item = (await _items(db, user_a))[0]
     await turn(
@@ -662,6 +687,7 @@ async def test_the_ledger_outlives_the_record_an_agent_created(
         user_a,
         thread,
         "hand it over",
+        mention_bot_ids=[agent_bot.id],
     )
 
     item_id = item.id
@@ -731,15 +757,19 @@ async def test_another_persons_record_is_not_found_rather_than_forbidden(
     assert await _items(db, user_a) == []
 
 
-async def test_a_transfer_to_a_bot_that_is_not_in_the_room_is_refused(
+async def test_a_transfer_can_only_reach_this_persons_own_bots(
     agent_with, db, user_a, user_b, make_thread, make_bot, agent_bot
 ):
     """Two bots the model cannot hand to, one answer.
 
     `off_thread` belongs to the same human and is simply not on this thread;
-    `theirs` belongs to somebody else entirely. Both are refused with the same
-    sentence and the same roster, so the refusal cannot be read as a probe for
-    which bot ids exist — and neither of them gets the row.
+    `theirs` belongs to somebody else entirely, and that is the one that is
+    still refused. `off_thread` is this person's own bot and is now a legitimate
+    target: an assignment wakes its owner (`services.work_dispatch`), so
+    "they are not in this room" stopped being a reason to refuse the row.
+
+    The boundary that matters — and the only one a model could try to probe —
+    is visibility, and it is unchanged.
     """
     off_thread = await make_bot(user_a, name="Elsewhere", slug=_slug("elsewhere"), daily_budget_usd=500.0)
     theirs = await make_bot(user_b, name="Theirs", slug=_slug("theirs"))
@@ -764,26 +794,47 @@ async def test_a_transfer_to_a_bot_that_is_not_in_the_room_is_refused(
         [
             acts(
                 "",
-                call(TOOL_TRANSFER_WORK_ITEM, id=str(item.id), to_slug=off_thread.slug, reason="go"),
                 call(TOOL_TRANSFER_WORK_ITEM, id=str(item.id), to_slug=theirs.slug, reason="go"),
             ),
             acts("", call(TOOL_TASK_COMPLETE, summary="Could not hand it over.")),
         ]
     )
-    await turn(orchestrator, db, user_a, thread, "hand it to elsewhere")
+    await turn(orchestrator, db, user_a, thread, "hand it to somebody else's bot")
 
     replies = _tool_replies(orchestrator.router)
-    assert len(replies) == 2
-    for slug, reply in zip((off_thread.slug, theirs.slug), replies, strict=True):
-        assert f"There is no bot called '{slug}' on this thread" in reply
-        assert "nothing was handed over" in reply
-        assert f"On this thread: {on_thread.slug}" in reply
+    assert len(replies) == 1
+    assert f"There is no bot called '{theirs.slug}' on this person's team" in replies[0]
+    assert "nothing was handed over" in replies[0]
+    # The roster it offers instead is this person's own team and no part of
+    # anybody else's — the refusal must not become a directory of bot slugs.
+    offered = replies[0].split("Your teammates: ", 1)[1]
+    assert theirs.slug not in offered
 
     await db.refresh(item)
     assert item.owner_bot_id == agent_bot.id
     assert item.transferred_at is None
     assert len(await _ledger(db, item.id)) == 1, "a refused transfer wrote a ledger row"
-    assert off_thread.id != item.owner_bot_id and theirs.id != item.owner_bot_id
+
+    # And the same call for this person's *own* bot, which is not on the
+    # thread, is now accepted: that is the change.
+    accepted = agent_with(
+        [
+            acts(
+                "",
+                call(
+                    TOOL_TRANSFER_WORK_ITEM,
+                    id=str(item.id),
+                    to_slug=off_thread.slug,
+                    reason="theirs to own",
+                ),
+            ),
+            acts("", call(TOOL_TASK_COMPLETE, summary="Handed it over.")),
+        ]
+    )
+    await turn(accepted, db, user_a, thread, "hand it to elsewhere")
+    await db.refresh(item)
+    assert item.owner_bot_id == off_thread.id
+    assert item.dispatched_at is None, "an assignment left nobody owed a run"
 
 
 async def test_a_value_lookup_cannot_reach_across_tenants(db, user_a, user_b, make_bot):
@@ -851,7 +902,7 @@ async def test_a_closed_record_is_not_handed_over(
             acts("", call(TOOL_TASK_COMPLETE, summary="It is closed.")),
         ]
     )
-    await turn(orchestrator, db, user_a, thread, "hand it over")
+    await turn(orchestrator, db, user_a, thread, "hand it over", mention_bot_ids=[agent_bot.id])
 
     assert "is closed" in _tool_replies(orchestrator.router)[0]
     await db.refresh(item)
@@ -878,6 +929,7 @@ async def test_ownership_cannot_be_moved_through_the_update_tool(
         user_a,
         thread,
         "log acme",
+        mention_bot_ids=[agent_bot.id],
     )
     item = (await _items(db, user_a))[0]
 
@@ -980,7 +1032,7 @@ async def test_the_reply_the_person_reads_never_names_a_tool(
         ]
     )
 
-    _frames, done = await turn(orchestrator, db, user_a, thread, "log star dental")
+    _frames, done = await turn(orchestrator, db, user_a, thread, "log star dental", mention_bot_ids=[agent_bot.id])
 
     reply = str(done.get("message") or "")
     assert "Star Dental" in reply

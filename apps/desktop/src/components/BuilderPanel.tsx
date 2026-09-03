@@ -242,7 +242,7 @@ const PROVIDER_LABEL: Record<ModelProvider, string> = {
  * reads. `refetch` lets `ProviderCredentialsSection` make a saved key show up
  * in the dropdown immediately, instead of waiting for the next mount.
  */
-function useAvailableProviders(): [ModelProvider[], () => void] {
+export function useAvailableProviders(): [ModelProvider[], () => void] {
   const [providers, setProviders] = useState<ModelProvider[]>([])
   const [reloadKey, setReloadKey] = useState(0)
   useEffect(() => {
@@ -317,7 +317,7 @@ const PROVIDER_ORDER: ModelProvider[] = ["azure", "openai", "anthropic", "google
  * discovers "the dropdown only has one option," the same reasoning
  * `MemoriesSection` gives for living here instead of its own tab.
  */
-function ProviderCredentialsSection({ onSaved }: { onSaved: () => void }) {
+export function ProviderCredentialsSection({ onSaved }: { onSaved: () => void }) {
   const toast = useToast()
   const [rows, setRows] = useState<ProviderCredentialOut[] | null>(null)
   const [error, setError] = useState<unknown>(null)
@@ -486,6 +486,95 @@ function ProviderCredentialsSection({ onSaved }: { onSaved: () => void }) {
   )
 }
 
+
+/* ------------------------------------------------------------------ *
+ * Persona
+ * ------------------------------------------------------------------ */
+
+export interface PersonaDraft {
+  email: string
+  voice: string
+  signature: string
+  desktop_habits: string
+}
+
+/**
+ * Who the teammate is, as opposed to what they do.
+ *
+ * The system prompt is the standing job. These four are identity, and until
+ * now the app had nowhere to put any of them — reported as *"the bots have
+ * personas, with emails and so on but on the desktop app, i can't see that"*.
+ * The consequence was not cosmetic: five teammates drafting in one anonymous
+ * voice, none of them signing anything, and no address a draft could claim to
+ * be from.
+ *
+ * The mail note is doing real work. An address on a bot reads as an inbox, and
+ * it is not one: mail only arrives through an inbound source, and sending is a
+ * `send`-class action that waits for a human regardless. Better said here than
+ * discovered when somebody asks a bot to check its email.
+ */
+function PersonaFields({
+  value,
+  onChange,
+}: {
+  value: PersonaDraft
+  onChange: (next: PersonaDraft) => void
+}) {
+  return (
+    <>
+      <div className="form-grid">
+        <label className="field">
+          <span className="field__label">Email</span>
+          <input
+            className="input"
+            value={value.email}
+            spellCheck={false}
+            placeholder="maya@yourcompany.com"
+            onChange={(event) => onChange({ ...value, email: event.target.value })}
+          />
+          <span className="field__hint">
+            Identity, not an inbox. Drafts and signatures use it; mail only arrives if you bind a
+            mail connector and an inbound source, and sending still waits for you.
+          </span>
+        </label>
+        <label className="field">
+          <span className="field__label">Signature</span>
+          <input
+            className="input"
+            value={value.signature}
+            placeholder="— Maya"
+            onChange={(event) => onChange({ ...value, signature: event.target.value })}
+          />
+        </label>
+      </div>
+      <label className="field">
+        <span className="field__label">Voice</span>
+        <textarea
+          className="input"
+          rows={2}
+          value={value.voice}
+          placeholder="Short sentences. Names the number, then the reason."
+          onChange={(event) => onChange({ ...value, voice: event.target.value })}
+        />
+        <span className="field__hint">How this one writes. Two sentences, not a style guide.</span>
+      </label>
+      <label className="field">
+        <span className="field__label">Desktop habits</span>
+        <textarea
+          className="input"
+          rows={2}
+          value={value.desktop_habits}
+          placeholder="Browser and a spreadsheet. Saves the source link with every row."
+          onChange={(event) => onChange({ ...value, desktop_habits: event.target.value })}
+        />
+        <span className="field__hint">
+          Which applications they reach for on their own machine, and in what order.
+        </span>
+      </label>
+    </>
+  )
+}
+
 export interface BuilderPanelProps {
   bots: BotsApi
   activeBotId: string | null
@@ -505,6 +594,13 @@ const EMPTY_DRAFT = {
   system_prompt: "",
   desktop_profile: "xfce" as DesktopProfile,
   daily_budget_usd: "5",
+  // Persona — who the teammate is, as opposed to what they do. Four fields
+  // that existed nowhere in this app until now, so every bot wrote in the
+  // same anonymous register and signed nothing.
+  email: "",
+  voice: "",
+  signature: "",
+  desktop_habits: "",
 }
 
 /* ------------------------------------------------------------------ *
@@ -655,6 +751,10 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
     daily_budget_usd: "",
     model_provider: "" as ModelProvider | "",
     model_name: "",
+    email: "",
+    voice: "",
+    signature: "",
+    desktop_habits: "",
   })
   const [saving, setSaving] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -673,6 +773,10 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
       daily_budget_usd: String(selected.daily_budget_usd ?? ""),
       model_provider: selected.model_provider ?? "",
       model_name: selected.model_name ?? "",
+      email: selected.email ?? "",
+      voice: selected.voice ?? "",
+      signature: selected.signature ?? "",
+      desktop_habits: selected.desktop_habits ?? "",
     })
   }, [
     selected?.id,
@@ -682,6 +786,10 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
     selected?.daily_budget_usd,
     selected?.model_provider,
     selected?.model_name,
+    selected?.email,
+    selected?.voice,
+    selected?.signature,
+    selected?.desktop_habits,
   ])
 
   /*
@@ -712,6 +820,10 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
         system_prompt: draft.system_prompt.trim(),
         desktop_profile: draft.desktop_profile,
         daily_budget_usd: Number.isFinite(draftBudget) && draftBudget > 0 ? draftBudget : undefined,
+        email: draft.email.trim() || null,
+        voice: draft.voice.trim() || null,
+        signature: draft.signature.trim() || null,
+        desktop_habits: draft.desktop_habits.trim() || null,
       })
       toast.success("Teammate created", `${bot.name} is on the team.`)
       setDraft(EMPTY_DRAFT)
@@ -741,6 +853,12 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
         daily_budget_usd: Number.isFinite(budget) && budget >= 0 ? budget : undefined,
         model_provider: edit.model_provider || null,
         model_name: edit.model_provider ? edit.model_name.trim() : null,
+        // Sent even when empty, unlike name/role above: emptying the field is
+        // how somebody removes an address, and the API reads "" as a clear.
+        email: edit.email.trim(),
+        voice: edit.voice.trim(),
+        signature: edit.signature.trim(),
+        desktop_habits: edit.desktop_habits.trim(),
       })
       toast.success("Teammate updated", edit.name)
     } catch (err) {
@@ -877,6 +995,12 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
                   screen is a boundary around it.
                 </span>
               </label>
+
+              <PersonaFields
+                value={draft}
+                onChange={(next) => setDraft({ ...draft, ...next })}
+              />
+
               <div className="row-actions">
                 <button
                   type="button"
@@ -925,7 +1049,8 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
               <div className="card">
                 {selected.is_system ? (
                   <div className="notice" role="note">
-                    System bot — name, role and budget are editable; the prompt and slug are locked.
+                    System bot — the standing prompt is locked. Voice, email, signature and budget are
+                    yours to tune.
                   </div>
                 ) : null}
                 <div className="form-grid">
@@ -1040,7 +1165,7 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
                 </div>
                 <ProviderCredentialsSection onSaved={refetchAvailableProviders} />
                 <label className="field">
-                  <span className="field__label">System prompt</span>
+                  <span className="field__label">Standing job</span>
                   <textarea
                     className="input"
                     rows={6}
@@ -1064,6 +1189,12 @@ export function BuilderPanel({ bots, activeBotId, onSelectBot }: BuilderPanelPro
                     </span>
                   ) : null}
                 </label>
+
+                {/*
+                  Editable on a system bot, unlike the prompt above it — that is
+                  the whole promise the notice at the top of this card makes.
+                */}
+                <PersonaFields value={edit} onChange={(next) => setEdit({ ...edit, ...next })} />
                 <div className="row-actions">
                   <button type="button" className="btn btn--primary btn--sm" onClick={() => void save()} disabled={saving}>
                     {saving ? <Spinner inline label="Saving" /> : "Save changes"}

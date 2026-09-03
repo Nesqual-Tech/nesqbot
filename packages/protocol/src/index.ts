@@ -93,7 +93,6 @@ import type {
   ResumeRunResponse,
   RunEvalSuiteRequest,
   SendMessageRequest,
-  SetProviderCredentialRequest,
   TeachRoutineRequest,
   TokenResponse,
   UpdateBotRequest,

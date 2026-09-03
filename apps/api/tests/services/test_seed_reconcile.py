@@ -87,3 +87,91 @@ async def test_an_operator_tuned_budget_survives_reconcile(db):
     db.expunge_all()
 
     assert int((await _lead_generator(db)).daily_budget_usd) == 42
+
+
+# ---------------------------------------------------------------------------
+# The other half of the same bug: reconcile from *what*
+# ---------------------------------------------------------------------------
+#
+# Reconciling on every boot is only an improvement if `load_bot_specs` can find
+# the YAML. In production it could not, and that turned the fix above into a
+# second, worse version of the same failure — every restart overwrote all five
+# real prompts with the fallback skeletons.
+#
+# Measured on the image that was running as `nesqbot-api--0000044`:
+#
+#     $ docker run --rm --entrypoint sh \
+#         nesqacrprodCHANGE_ME.azurecr.io/nesqbot/api:v0.12.10 -c 'ls -d /bots'
+#     ls: cannot access '/bots': No such file or directory
+#
+# `BOTS_DIR=/bots` was set on the Container App, only `/mnt/bot-homes` was
+# mounted, and the Dockerfile copied `app` and `sql` and nothing else. Local
+# development never noticed because `docker-compose.yml` bind-mounts
+# `./bots:/bots:ro`, which is exactly the kind of difference that only shows up
+# as "the bots feel stupid in production".
+#
+# Three files have to agree for this to work, so the test reads all three. It is
+# a source-level check rather than a container build for the reason the sidecar
+# route tests are: a build is minutes and a CI runner, and the property worth
+# defending is the agreement, not the bytes.
+
+
+def _repo_root():
+    from pathlib import Path
+
+    return Path(__file__).resolve().parents[3].parent
+
+
+def _text(*parts: str) -> str:
+    path = _repo_root().joinpath(*parts)
+    if not path.exists():  # pragma: no cover - infra/ is absent in the api-only lane
+        import pytest
+
+        pytest.skip(f"{'/'.join(parts)} is not on disk in this lane")
+    return path.read_text(encoding="utf-8")
+
+
+def test_the_api_image_carries_the_bot_prompts():
+    """The Dockerfile must COPY the YAML the seeder reads."""
+    dockerfile = _text("apps", "api", "Dockerfile")
+    assert "COPY bots /bots" in dockerfile, (
+        "the api image must bake in bots/: a container with no /bots seeds the "
+        "DEFAULT_BOTS skeletons and reconcile then overwrites the real prompts"
+    )
+
+
+def test_the_baked_path_is_the_path_every_environment_asks_for():
+    """`BOTS_DIR` in Bicep, the compose mount and the COPY target are one path."""
+    assert "'/bots'" in _text("infra", "azure", "main.bicep")
+    assert "BOTS_DIR: /bots" in _text("docker-compose.yml")
+    assert "COPY bots /bots" in _text("apps", "api", "Dockerfile")
+
+
+def test_the_api_build_context_is_the_repo_root_everywhere_it_is_declared():
+    """`bots/` is outside `apps/api`, so the context has to be the root.
+
+    Both build declarations are checked because a mismatch is silent: compose
+    would keep building an image with the prompts while CI shipped one without,
+    and the difference would only be visible in production behaviour.
+    """
+    compose = _text("docker-compose.yml")
+    assert "dockerfile: apps/api/Dockerfile" in compose
+    assert "context: ./apps/api" not in compose
+
+    workflow = _text(".github", "workflows", "docker.yml")
+    assert "context: apps/api\n" not in workflow
+
+
+def test_the_fallback_prompts_say_they_are_fallbacks():
+    """The skeletons are a diagnostic, not a product. Keep them self-announcing.
+
+    This is what made the production bug findable at all: a bot whose prompt
+    says "bots/chief_of_staff.yaml was not found" names its own cause. A
+    plausible-looking default would have been indistinguishable from a bad
+    prompt somebody wrote on purpose.
+    """
+    from app.services.seed import DEFAULT_BOTS
+
+    for spec in DEFAULT_BOTS:
+        assert "fallback prompt" in spec["system_prompt"], spec["slug"]
+        assert f"bots/{spec['slug']}.yaml was not found" in spec["system_prompt"]

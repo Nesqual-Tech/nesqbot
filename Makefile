@@ -322,6 +322,13 @@ azure-preflight: ## One-time subscription prerequisites for the Azure stack
 	az provider register -n Microsoft.OperationalInsights --wait
 	@echo "providers registered"
 
+.PHONY: harness harness-down
+harness: ## Clickable throwaway stack (api + postgres + desktop dev server)
+	bash scripts/harness.sh up
+
+harness-down: ## Delete everything `make harness` created
+	bash scripts/harness.sh down
+
 .PHONY: health
 health: ## Curl every local health endpoint
 	@echo "== api"

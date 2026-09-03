@@ -38,14 +38,15 @@ EXCLUDED = {
     "/docs/oauth2-redirect",
 }
 
-#: Routes this lane serves that `docs/API.md` has not been written for yet.
+#: Routes served that `docs/API.md` has not been written for yet.
 #:
-#: `docs/API.md` is owned by a different lane, so a route can land here one
-#: commit before its documentation does. This list is the seam, and it is
-#: deliberately an explicit enumeration rather than a prefix or a wildcard: a
+#: Deliberately an explicit enumeration rather than a prefix or a wildcard: a
 #: route must be named here by hand, and the guard below fails the moment a
 #: named route *is* documented, so the list cannot rot into a permanent
-#: exemption. It must be empty in a released build.
+#: exemption. Empty is the released state, and it is empty now —
+#: `POST /bots/{bot_id}/connectors/{connector_id}/secret` sat here for exactly
+#: as long as it took to write its row, which is the whole intended lifetime of
+#: an entry in this set.
 PENDING_DOCS: set[tuple[str, str]] = set()
 
 _PARAM_RE = re.compile(r"\{[^}]*\}")

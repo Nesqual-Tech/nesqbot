@@ -94,6 +94,16 @@ class Bot(Base):
     #: tiering entirely - see ModelRouter.chat(bot=...).
     model_provider: Mapped[str | None] = mapped_column(Text, nullable=True)
     model_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Persona — identity, not behaviour. `system_prompt` says what this bot
+    #: does; these say who is doing it, and the orchestrator folds them into
+    #: the system prompt so drafts come out addressed and signed instead of
+    #: anonymous. `email` is identity only: it is the From line on a draft,
+    #: not a mailbox — mail arrives through an inbound source, and sending
+    #: still needs a bound mail connector.
+    email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    voice: Mapped[str | None] = mapped_column(Text, nullable=True)
+    signature: Mapped[str | None] = mapped_column(Text, nullable=True)
+    desktop_habits: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.clock_timestamp())
 
 
@@ -359,7 +369,7 @@ class WorkItem(Base):
     exception and an onboarding checklist all need the same three facts — an
     owning bot, the human it belongs to, and a recorded history of who was
     holding it when. Per-use-case tables would each need their own copy of the
-    transfer ledger, and the ledger is the whole point: `docs/competitive-analysis.md`
+    transfer ledger, and the ledger is the whole point: `docs/architecture.md`
     records that the competitor's audit view is "coming". One table means one
     queryable answer to "who handed this to whom, and why".
 
@@ -409,6 +419,15 @@ class WorkItem(Base):
     # the *outside world* acted, which is what "the lead answered" means.
     last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: When the owning bot was last *woken* about this item, and on which run.
+    #:
+    #: This is what turns an assignment into an instruction. NULL with an owner
+    #: set and `status = 'open'` means "somebody owns this and has not been told
+    #: yet", which is the queue `services.work_dispatch` drains — see the note
+    #: on `dispatch_pending`. A transfer nulls it again, because a new owner has
+    #: not been told either.
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    dispatch_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
 
 class WorkItemKey(Base):
