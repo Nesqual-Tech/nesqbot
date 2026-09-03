@@ -52,7 +52,7 @@ jobs:
             dockerfile: infra/bot-desktop/Dockerfile
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Decide whether to push
         id: decide
