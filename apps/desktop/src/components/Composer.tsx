@@ -1,4 +1,12 @@
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react"
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
+import {
+  applyMention,
+  matchCandidates,
+  mentionQuery,
+  mentionedBotIds,
+  type MentionCandidate,
+} from "../lib/mentions"
+import { BotAvatar } from "./BotAvatar"
 import { Icon } from "./Icon"
 import { Spinner } from "./Spinner"
 
@@ -15,7 +23,13 @@ export interface ComposerProps {
    * sending. The `key` is what makes picking the same suggestion twice work.
    */
   prefill?: { text: string; key: number } | null
-  onSend: (text: string) => Promise<{ ok: boolean; error?: string }>
+  /**
+   * Everyone this person can address, best first. The hint has always promised
+   * `@`; this is what makes it true. Empty disables the picker but not the
+   * parsing — see `lib/mentions`.
+   */
+  mentionCandidates?: MentionCandidate[]
+  onSend: (text: string, mentionBotIds: string[]) => Promise<{ ok: boolean; error?: string }>
   onStop: () => void
   hint?: string
 }
@@ -28,12 +42,18 @@ export function Composer({
   placeholder,
   focusKey,
   prefill,
+  mentionCandidates = [],
   onSend,
   onStop,
   hint,
 }: ComposerProps) {
   const [draft, setDraft] = useState("")
   const [sending, setSending] = useState(false)
+  const [caret, setCaret] = useState(0)
+  // Dismissing is per-mention, not global: closing the list on `@sal` must not
+  // keep it shut for the next `@` in the same message.
+  const [dismissedAt, setDismissedAt] = useState<number | null>(null)
+  const [highlight, setHighlight] = useState(0)
   const ref = useRef<HTMLTextAreaElement | null>(null)
 
   // Auto-grow without a layout dependency.
@@ -59,13 +79,47 @@ export function Composer({
     requestAnimationFrame(() => node.setSelectionRange(node.value.length, node.value.length))
   }, [prefill])
 
+  const query = useMemo(() => mentionQuery(draft, caret), [draft, caret])
+  const suggestions = useMemo(
+    () => (query && mentionCandidates.length ? matchCandidates(query.query, mentionCandidates) : []),
+    [query, mentionCandidates],
+  )
+  const menuOpen = suggestions.length > 0 && query !== null && dismissedAt !== query.start
+
+  useEffect(() => {
+    setHighlight(0)
+  }, [query?.start, query?.query])
+
+  const setText = (text: string, nextCaret: number) => {
+    setDraft(text)
+    setCaret(nextCaret)
+    const node = ref.current
+    if (!node) return
+    // The value has not rendered yet, so the caret has to be placed after it has.
+    requestAnimationFrame(() => {
+      node.focus()
+      node.setSelectionRange(nextCaret, nextCaret)
+    })
+  }
+
+  const choose = (bot: MentionCandidate) => {
+    if (!query) return
+    const next = applyMention(draft, query, caret, bot)
+    setText(next.text, next.caret)
+    // A completed mention is still, textually, a mention being typed — the
+    // caret sits right after "@Sales " and the query is "Sales ". Without this
+    // the list reopens on top of the name that was just chosen. Marked done
+    // rather than closed globally, so the next `@` still opens one.
+    setDismissedAt(query.start)
+  }
+
   const submit = async () => {
     const text = draft.trim()
     if (!text || disabled || sending) return
     setDraft("")
     setSending(true)
     try {
-      const result = await onSend(text)
+      const result = await onSend(text, mentionedBotIds(text, mentionCandidates))
       if (!result.ok) setDraft(text) // give the user their words back
     } finally {
       setSending(false)
@@ -74,6 +128,30 @@ export function Composer({
   }
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    // The picker owns these keys while it is open, and only while it is open:
+    // Enter still sends, and Escape still stops a stream, the moment it closes.
+    if (menuOpen) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault()
+        setHighlight((i) => (i + 1) % suggestions.length)
+        return
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault()
+        setHighlight((i) => (i - 1 + suggestions.length) % suggestions.length)
+        return
+      }
+      if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault()
+        choose(suggestions[highlight] ?? suggestions[0])
+        return
+      }
+      if (event.key === "Escape") {
+        event.preventDefault()
+        setDismissedAt(query?.start ?? null)
+        return
+      }
+    }
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault()
       void submit()
@@ -84,6 +162,8 @@ export function Composer({
     }
   }
 
+  const syncCaret = (node: HTMLTextAreaElement) => setCaret(node.selectionStart ?? node.value.length)
+
   return (
     <form
       className="composer"
@@ -92,6 +172,31 @@ export function Composer({
         void submit()
       }}
     >
+      {menuOpen ? (
+        <ul className="composer__mentions" role="listbox" aria-label="Mention a teammate">
+          {suggestions.map((bot, index) => (
+            <li key={bot.id}>
+              <button
+                type="button"
+                role="option"
+                aria-selected={index === highlight}
+                className={`composer__mention${index === highlight ? " is-active" : ""}`}
+                // `onMouseDown` rather than `onClick`: the click would blur the
+                // textarea first, and the caret we are inserting at goes with it.
+                onMouseDown={(event) => {
+                  event.preventDefault()
+                  choose(bot)
+                }}
+                onMouseEnter={() => setHighlight(index)}
+              >
+                <BotAvatar bot={bot} size={20} />
+                <span className="composer__mention-name">{bot.name}</span>
+                <span className="composer__mention-slug">@{bot.slug}</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <label className="sr-only" htmlFor="composer-input">
         Message your teammate
       </label>
@@ -104,7 +209,14 @@ export function Composer({
         placeholder={placeholder}
         disabled={disabled}
         aria-describedby="composer-hint"
-        onChange={(event) => setDraft(event.target.value)}
+        aria-expanded={menuOpen}
+        aria-autocomplete="list"
+        onChange={(event) => {
+          setDraft(event.target.value)
+          syncCaret(event.target)
+        }}
+        onKeyUp={(event) => syncCaret(event.currentTarget)}
+        onClick={(event) => syncCaret(event.currentTarget)}
         onKeyDown={onKeyDown}
       />
       <div className="composer__actions">

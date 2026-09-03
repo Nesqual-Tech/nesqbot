@@ -1,6 +1,6 @@
 {
   "name": "@nesqbot/desktop",
-  "version": "0.11.1",
+  "version": "0.11.3",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,9 +9,10 @@
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "check:markdown": "node scripts/check-markdown.mjs",
-    "lint": "node scripts/check-versions.mjs && tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters",
+    "lint": "node scripts/check-versions.mjs && node scripts/check-mentions.mjs && tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters",
     "tauri": "tauri",
-    "check:versions": "node scripts/check-versions.mjs"
+    "check:versions": "node scripts/check-versions.mjs",
+    "check:mentions": "node scripts/check-mentions.mjs"
   },
   "dependencies": {
     "@nesqbot/protocol": "*",

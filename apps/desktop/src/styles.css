@@ -1388,12 +1388,64 @@ legend,
 /* -------------------------------------------------------------- composer */
 
 .composer {
+  position: relative;
   display: grid;
   grid-template-columns: 1fr auto;
   gap: var(--space-sm);
   padding: var(--space-lg) var(--space-xl) var(--space-lg);
   border-top: 1px solid var(--border);
   background: var(--surface);
+}
+
+/*
+ * The `@` picker. Taken out of the grid and floated above the composer rather
+ * than given a row: it appears and disappears on a keystroke, and a row would
+ * shove the textarea — and the whole transcript above it — down and back up
+ * while somebody is mid-word.
+ */
+.composer__mentions {
+  position: absolute;
+  bottom: calc(100% - var(--space-sm));
+  left: var(--space-xl);
+  right: var(--space-xl);
+  z-index: 5;
+  max-height: 260px;
+  overflow-y: auto;
+  margin: 0;
+  padding: var(--space-xs);
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-raised, var(--surface));
+  box-shadow: var(--shadow-lg, 0 12px 32px rgb(0 0 0 / 28%));
+}
+
+.composer__mention {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  padding: var(--space-sm) var(--space-md);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.composer__mention.is-active {
+  background: var(--accent-wash);
+}
+
+.composer__mention-name {
+  font-weight: 600;
+}
+
+.composer__mention-slug {
+  margin-left: auto;
+  font-size: var(--text-caption-size);
+  color: var(--text-dim);
 }
 
 .composer__input {

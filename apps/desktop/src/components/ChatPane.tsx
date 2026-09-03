@@ -174,8 +174,8 @@ export function ChatPane({
   }, [messages.messages.length, messages.streamText, messages.activity.length, messages.turn?.status])
 
   const send = useCallback(
-    async (text: string) => {
-      const outcome = await messages.send(text)
+    async (text: string, mentionBotIds: string[]) => {
+      const outcome = await messages.send(text, mentionBotIds.length ? mentionBotIds : undefined)
       if (!outcome.ok && outcome.error) toast.error("Message not delivered", outcome.error)
       if (outcome.fellBack) toast.warning("Streaming unavailable", "Sent the turn without live tokens.")
       return outcome
@@ -236,6 +236,21 @@ export function ChatPane({
   )
 
   const group = participants.length > 1
+
+  /*
+   * Who `@` offers, seated first.
+   *
+   * Not limited to the roster. Mentioning somebody who is not in the room is
+   * how they get into it — `orchestrator._seat_mentioned_bots` reads the text
+   * and seats them — so restricting the picker to `participants` would hide
+   * the one thing the feature is for and leave "add a teammate" as the only
+   * door. Seated names come first because they are the likelier target and
+   * because the order should not change under you as people join.
+   */
+  const mentionCandidates = useMemo(
+    () => [...participants, ...bots.filter((b) => !participants.some((p) => p.id === b.id))],
+    [participants, bots],
+  )
 
   const newThread = useCallback(async () => {
     if (!activeBot) return
@@ -554,10 +569,11 @@ export function ChatPane({
         streaming={messages.streaming}
         focusKey={activeThreadId}
         prefill={prefill}
+        mentionCandidates={mentionCandidates}
         hint={
           group
             ? "Enter to send. @ to mention a teammate — that chooses who answers."
-            : "Enter to send. Ctrl K for commands, @ to mention, Shift+Enter for a new line."
+            : "Enter to send. Ctrl K for commands, @ to bring in a teammate, Shift+Enter for a new line."
         }
         onSend={send}
         onStop={messages.stop}

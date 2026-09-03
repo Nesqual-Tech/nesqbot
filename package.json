@@ -1,7 +1,7 @@
 {
   "name": "nesqbot",
   "private": true,
-  "version": "0.11.1",
+  "version": "0.11.3",
   "description": "Nesq Bot — internal always-on agent team (Nesqual Tech)",
   "license": "SEE LICENSE IN LICENSE",
   "workspaces": [
