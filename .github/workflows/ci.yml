@@ -225,7 +225,7 @@ jobs:
         run: npm run build --prefix apps/desktop
 
       - name: Upload desktop bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: desktop-dist
           path: apps/desktop/dist
