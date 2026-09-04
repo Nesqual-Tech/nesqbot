@@ -42,7 +42,7 @@
   },
   "devDependencies": {
     "prettier": "^3.5.3",
-    "typescript": "^5.8.2"
+    "typescript": "^7.0.2"
   },
   "//prettier": [
     "House style, matching the code that was already here: no semicolons,",

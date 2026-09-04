@@ -31,6 +31,6 @@
     "@nesqbot/protocol": "*"
   },
   "devDependencies": {
-    "typescript": "^5.8.2"
+    "typescript": "^7.0.2"
   }
 }
