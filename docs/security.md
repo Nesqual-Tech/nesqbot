@@ -150,10 +150,15 @@ system bots that is everyone — see the gaps below.
 Honest list, as of this commit. None of these are hypothetical; they are all
 things you can verify in the code.
 
-**No roles or RBAC.** Every authenticated user is equal. There is no admin, no
-read-only viewer, and no approver role. Anyone who can log in can register a
-connector, create a bot, and change a budget. A design sketch for closing this
-follows the gaps list, below — it is a proposal, not something implemented.
+**Roles are two, and enforcement is opt-in by existence.** `users.role` is
+`admin` or `member`; `app.auth.require_admin` gates the shared connector
+catalog, edits and budgets on system bots, reseeding, and `/users`. A fresh
+install with nobody in `ADMIN_EMAILS` behaves exactly as before roles existed
+— every member may do all of the above — until the first admin appears, which
+is what keeps first-run simple. Set `RBAC_ENFORCE=1` to refuse members
+regardless. There is no read-only viewer role, and no `bot_approvers` grant
+yet (see the sketch below): a shared system bot's approvals are still decidable
+by anyone who can see the bot.
 
 **Secret resolution and vendor calls are implemented but unexercised against
 real infrastructure.** `app/services/secrets.py` resolves `kv://vault/name`,
@@ -180,15 +185,25 @@ control; keep it tight and treat an empty allowlist as the default.
 in `main.py` means an empty `CORS_ORIGINS` allows every origin. Always set it
 explicitly in production.
 
-**No rate limiting and no request quotas.** The only spend control is the
-per-bot daily budget, which is a _soft_ cap checked before a turn — it does not
-kill work in flight and it does not limit request volume.
+**Rate limiting is per replica and off by default.** `RATE_LIMIT_PER_MINUTE`
+puts a token bucket per bearer token (or client address) in front of every
+route; over the limit is 429 `rate_limited` with `Retry-After`. It is an
+in-process guard against a runaway client, not a billing meter: N replicas
+allow N times the figure. Set it in production. The per-bot daily budget
+remains a _soft_ cap checked before a turn — it does not kill work in flight.
 
-**Session tokens have no refresh flow.** `POST /auth/logout` revokes the
-presented token immediately (`jti` recorded in `revoked_tokens`, checked on
-every request, pruned at boot once expired) — there is no logout-everywhere
-across a user's other sessions, and a token cannot be renewed short of signing
-in again, so a 14-day expiry is the only alternative to a fresh login.
+**Session tokens rotate but there is no logout-everywhere.** `POST /auth/logout`
+revokes the presented token immediately (`jti` recorded in `revoked_tokens`,
+checked on every request, pruned at boot once expired) and `POST /auth/refresh`
+mints a fresh 14-day token while revoking the old one in the same transaction.
+What is still missing is revoking a user's *other* sessions in one call.
+
+**Attachments are stored inline and unscanned.** A message's files live as
+base64 in `messages.meta` and are served back only to the thread's owner, with
+`nosniff` and an inline disposition. Only images and UTF-8 text are accepted
+(`app/services/attachments.py`), so nothing executable is ever stored — but
+nothing is virus-scanned either, and a text attachment reaches the model verbatim,
+which makes it one more prompt-injection surface alongside inbound mail.
 
 **No encryption beyond the platform's.** Message content, memories and KB
 articles are stored in plain columns, protected only by Postgres and disk
@@ -204,26 +219,31 @@ neither currently blocks a merge. There is no static application security
 scan. (The API itself has 1800+ passing tests — see `STATUS.md` — this gap is
 about scanning, not about test coverage.)
 
-## A design sketch for roles
+## Roles: what is built, and the sketch for the rest
 
-Not implemented. Approval and object *ownership* is enforced today (see
-Tenancy and ownership, above) — what is missing is *authorization by role*
-layered on top of it, for the handful of actions ownership alone cannot gate:
-who may register a connector or MCP server, create a system bot, change a
-daily budget, or approve on behalf of a shared system bot rather than only
-their own.
+Approval and object *ownership* is enforced (see Tenancy and ownership, above)
+and, since desktop 0.12.0, so is *authorization by role* for the handful of actions
+ownership alone cannot gate. Built:
 
-A minimal shape that fits the existing schema without a migration framework:
+- **`users.role`** (`TEXT NOT NULL DEFAULT 'member'`), values `admin` and
+  `member`. Same `ADD COLUMN IF NOT EXISTS` pattern as everything else in
+  `sql/init.sql`. `ADMIN_EMAILS` grants `admin` at sign-in (never demotes);
+  `PATCH /users/{id}` lets an admin promote or demote, refusing to demote the
+  last admin (409 `last_admin`). Every change is an audit row.
+- **`require_admin`** in `app/auth.py`, composed onto `POST`/`DELETE
+  /integrations/connectors`, `POST /bots/system/reseed`, `/users`, and — from
+  inside the handler, because the same route is owner-gated for custom bots —
+  `PATCH /bots/{id}` and `PATCH /bots/{id}/budget` when the bot `is_system`.
+  Enforcement is on once an admin exists, or when `RBAC_ENFORCE=1`; the
+  development bypass user counts as an admin.
+- **403 `role_required`, not 404.** The 404 rule is about not leaking that an
+  *object* exists; a collection-level action exists for everyone, and hiding it
+  would read as an outage rather than a refusal.
 
-- **A `role` column on `users`** (`TEXT NOT NULL DEFAULT 'member'`), values
-  `admin`, `member`, `viewer`. Same `IF NOT EXISTS` / `ADD COLUMN IF NOT
-  EXISTS` idempotent pattern `sql/init.sql` already uses everywhere else.
-- **A small `require_role(*roles)` FastAPI dependency** next to
-  `get_current_user`, composed onto the handful of routes that need it —
-  connector/MCP registration, system-bot creation, budget changes — the same
-  way `get_visible_bot`/`get_visible_approval` compose onto the ownership
-  checks now. Most routes would not change at all: ownership already gates
-  them correctly.
+Still a sketch:
+
+- **A `viewer` role**, read-only. Every route that writes would need the gate,
+  which is most of them; not worth doing until somebody asks for it.
 - **An `approver` grant, separate from role**, for the system-bot approval
   problem specifically: today `get_visible_approval` falls back to *bot*
   visibility only when an approval has no knowable owner (a routine step
@@ -246,12 +266,12 @@ anything that already works.
 
 In rough priority order:
 
-1. Implement roles (see the design sketch above) and gate connector/MCP
-   registration, system-bot creation, and budget changes behind `admin`.
+1. Put at least one address in `ADMIN_EMAILS` (that is what switches role
+   enforcement on) and set `RATE_LIMIT_PER_MINUTE`.
 2. Exercise secret resolution end to end: bind one connector to a real Key Vault secret against a deployed managed identity, and confirm the value never lands in a log, response, or audit row.
 3. Add a `bot_approvers` grant so a shared system bot's approvals are decidable by a named set of people, not everyone who can see the bot.
 4. Set `CORS_ORIGINS` explicitly and fail startup if it is empty in production.
-5. Move `JWT_SECRET` to Key Vault, shorten the session to hours, add a refresh endpoint.
-6. Add rate limiting at the ingress.
+5. Move `JWT_SECRET` to Key Vault and shorten the session to hours now that clients can refresh.
+6. Add rate limiting at the ingress as well — the in-process bucket is per replica.
 7. Gate `mutate` on connectors that touch customer-visible records.
 8. Triage the existing `pip-audit`/`npm audit` findings and drop `continue-on-error` once clean.

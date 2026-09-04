@@ -1,7 +1,7 @@
 import { useCallback } from "react"
 import * as api from "../api/endpoints"
 import { useAsyncResource } from "./useAsync"
-import type { Bot, CreateThreadInput, Thread } from "../types"
+import type { Bot, CreateThreadInput, Thread, UpdateThreadInput } from "../types"
 
 export interface ThreadsApi {
   threads: Thread[]
@@ -11,6 +11,8 @@ export interface ThreadsApi {
   refetch: () => Promise<void>
   createThread: (input: CreateThreadInput) => Promise<Thread>
   deleteThread: (threadId: string) => Promise<void>
+  /** Rename and/or pin. Pinned threads float to the top of the list. */
+  updateThread: (threadId: string, patch: UpdateThreadInput) => Promise<Thread>
   /** Existing 1:1 thread for the bot, or a freshly created one. */
   ensureThreadForBot: (bot: Bot) => Promise<Thread>
   /** Seat more bots on a thread — what turns a 1:1 into a group. */
@@ -36,6 +38,23 @@ export function useThreads(): ThreadsApi {
     async (threadId: string) => {
       await api.deleteThread(threadId)
       setData((prev) => prev.filter((t) => t.id !== threadId))
+    },
+    [setData],
+  )
+
+  const updateThread = useCallback(
+    async (threadId: string, patch: UpdateThreadInput) => {
+      const thread = await api.updateThread(threadId, patch)
+      // Re-sort locally the way `GET /threads` does — pinned first, then by
+      // `updated_at` — so a pin takes effect without a refetch.
+      setData((prev) =>
+        prev
+          .map((t) => (t.id === thread.id ? thread : t))
+          .sort(
+            (a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || b.updated_at.localeCompare(a.updated_at),
+          ),
+      )
+      return thread
     },
     [setData],
   )
@@ -93,6 +112,7 @@ export function useThreads(): ThreadsApi {
     refetch: resource.refetch,
     createThread,
     deleteThread,
+    updateThread,
     ensureThreadForBot,
     addBots,
     removeBot,

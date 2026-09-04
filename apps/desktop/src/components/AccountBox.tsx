@@ -53,6 +53,11 @@ export function AccountBox() {
         <span className="account__name" title={user.email}>
           <Icon name="user" size={13} />
           {user.display_name || user.email}
+          {user.role === "admin" ? (
+            <span className="account__role" title="Admin: may edit shared bots and the connector catalog">
+              admin
+            </span>
+          ) : null}
         </span>
         <button type="button" className="btn btn--ghost btn--sm" onClick={onSignOut}>
           Sign out

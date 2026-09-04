@@ -25,6 +25,26 @@ class Settings(BaseSettings):
     # "accept anything".
     worker_api_token: str = ""
     cors_origins: str = "http://localhost:1420,http://localhost:8081"
+    # Roles. Comma-separated addresses that are granted `admin` the moment
+    # they sign in (dev login or Entra); everyone else is a `member`. Another
+    # admin can promote people through `PATCH /users/{id}` afterwards.
+    #
+    # Enforcement switches on by itself once at least one admin exists — a
+    # fresh install with nobody in `ADMIN_EMAILS` behaves exactly as before
+    # (every signed-in person may register connectors and edit shared bots),
+    # which is what keeps first-run and the test-suite honest. `RBAC_ENFORCE=1`
+    # forces enforcement even with no admin on record, i.e. locks the admin
+    # surfaces to nobody until an admin is granted. See `app.auth.require_admin`.
+    admin_emails: str = ""
+    rbac_enforce: bool = False
+    # Per-caller request ceiling (`app.middleware.RateLimitMiddleware`),
+    # keyed on the bearer token, or the client address when there is none.
+    # 0 disables it. A burst of `rate_limit_burst` (defaults to the
+    # per-minute figure) is allowed before the steady rate applies, so a
+    # client opening the app — bots, threads, approvals, health in one go —
+    # is never the thing that gets throttled.
+    rate_limit_per_minute: int = 0
+    rate_limit_burst: int = 0
     # Level for the application's own loggers. See `configure_logging`: below
     # WARNING these records do not reach the container log at all.
     log_level: str = "INFO"
@@ -131,7 +151,7 @@ class Settings(BaseSettings):
     #
     # The account, as it actually is, so nobody has to re-measure it:
     #
-    #   endpoint   https://nesqbot-xai-CHANGE_ME.cognitiveservices.azure.com/
+    #   endpoint   https://your-ai-services.cognitiveservices.azure.com/
     #   kind       AIServices (an xAI model cannot deploy to an OpenAI-kind one)
     #   region     swedencentral, GlobalStandard
     #   rate limit 50,000 tokens AND 50 requests per 60 seconds, read off
@@ -467,6 +487,10 @@ class Settings(BaseSettings):
     @property
     def is_development(self) -> bool:
         return self.nesq_env.strip().lower() == "development"
+
+    @property
+    def admin_email_list(self) -> list[str]:
+        return [e.strip().lower() for e in self.admin_emails.split(",") if e.strip()]
 
 
 def configure_logging(settings: Settings) -> None:

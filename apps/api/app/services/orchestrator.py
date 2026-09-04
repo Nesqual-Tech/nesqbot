@@ -69,6 +69,7 @@ from app.models import (
     WorkItem,
 )
 from app.services import agent_work_items, events, rag, simulation
+from app.services import attachments as attachment_svc
 from app.services import browser as browser_ops
 from app.services.agent_work_items import (
     TOOL_CREATE_WORK_ITEM,
@@ -2695,6 +2696,7 @@ class Orchestrator:
         thread: Thread,
         content: str,
         mention_bot_ids: list[uuid.UUID] | None = None,
+        attachments: list[dict] | None = None,
     ) -> dict:
         """Non-streaming turn. Response shape is unchanged from v0.1."""
         out: dict = {}
@@ -2704,6 +2706,7 @@ class Orchestrator:
             thread=thread,
             content=content,
             mention_bot_ids=mention_bot_ids,
+            attachments=attachments,
             stream=False,
             out=out,
         ):
@@ -2718,6 +2721,7 @@ class Orchestrator:
         thread: Thread,
         content: str,
         mention_bot_ids: list[uuid.UUID] | None = None,
+        attachments: list[dict] | None = None,
     ) -> AsyncIterator[tuple[str, dict]]:
         """Streaming turn — yields `(event_name, data)` for SSE.
 
@@ -2731,6 +2735,7 @@ class Orchestrator:
             thread=thread,
             content=content,
             mention_bot_ids=mention_bot_ids,
+            attachments=attachments,
             stream=True,
             out=out,
         ):
@@ -2760,6 +2765,7 @@ class Orchestrator:
         mention_bot_ids: list[uuid.UUID] | None,
         stream: bool,
         out: dict,
+        attachments: list[dict] | None = None,
     ) -> AsyncIterator[tuple[str, dict]]:
         run: Run | None = None
         # Read the id once, up front. Every ORM attribute access can raise once
@@ -2775,6 +2781,9 @@ class Orchestrator:
                 user_id=user.id,
                 role="user",
                 content=content,
+                # Already validated by the router (`attachments.validate_attachments`);
+                # stored with the bytes, served to clients without them.
+                meta={"attachments": attachments} if attachments else {},
             )
             db.add(user_msg)
             thread.updated_at = datetime.now(timezone.utc)
@@ -2963,11 +2972,27 @@ class Orchestrator:
                 )
 
             messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
-            for m in history[-20:]:
+            # Images ride along only on the most recent user messages that
+            # carry any; older ones degrade to a placeholder so a screenshot
+            # from ten turns ago does not cost 1.1k tokens on every turn since.
+            recent = history[-20:]
+            with_images = [
+                m.id
+                for m in recent
+                if m.role == "user"
+                and any(
+                    isinstance(a, dict) and str(a.get("media_type", "")) in attachment_svc.IMAGE_TYPES
+                    for a in ((m.meta or {}).get("attachments") or [])
+                )
+            ][-attachment_svc.HISTORY_IMAGE_MESSAGES :]
+            for m in recent:
+                stored = (m.meta or {}).get("attachments") if m.role == "user" else None
                 messages.append(
                     {
                         "role": m.role if m.role in ("user", "assistant") else "user",
-                        "content": m.content,
+                        "content": attachment_svc.model_content(
+                            m.content, stored, include_images=m.id in with_images
+                        ),
                     }
                 )
             if notes:

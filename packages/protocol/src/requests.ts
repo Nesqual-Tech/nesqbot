@@ -163,9 +163,33 @@ export interface CreateThreadRequest {
   initial_message?: string
 }
 
+/**
+ * A file sent with a message. `data` is base64 without a data-URL prefix.
+ * Images (png/jpeg/webp/gif, ≤ 4 MB) reach the model as vision input; text
+ * files (txt/md/csv/tsv/json/log, ≤ 256 KB, UTF-8) are inlined into the
+ * prompt. At most four per message. See `docs/API.md`.
+ */
+export interface AttachmentUpload {
+  name: string
+  media_type: string
+  data: string
+}
+
 export interface SendMessageRequest {
   content: string
   mention_bot_ids?: string[]
+  attachments?: AttachmentUpload[]
+}
+
+/** `PATCH /threads/{thread_id}` — at least one of the two. */
+export interface UpdateThreadRequest {
+  title?: string
+  pinned?: boolean
+}
+
+/** `PATCH /users/{user_id}` — admin only. */
+export interface UpdateUserRoleRequest {
+  role: "admin" | "member"
 }
 
 /**

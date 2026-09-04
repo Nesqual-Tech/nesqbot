@@ -21,15 +21,16 @@
  * people starts one with several — which is the entire mechanism by which work
  * gets handed over, and it used to be unreachable from this app.
  */
-import { useMemo, useRef, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import { productName } from "@nesqbot/ui"
+import { searchMessages } from "../api/endpoints"
 import { conversationTime, cx, truncate } from "../lib/format"
 import { AccountBox } from "./AccountBox"
 import { BotAvatar, BotAvatarStack } from "./BotAvatar"
 import { NesqualLockup } from "./Brand"
 import { Icon } from "./Icon"
 import { Spinner } from "./Spinner"
-import type { Bot, Thread } from "../types"
+import type { Bot, MessageSearchHit, Thread } from "../types"
 
 export interface ConversationListProps {
   threads: Thread[]
@@ -69,6 +70,34 @@ export function ConversationList({
   const [picker, setPicker] = useState<"none" | "bot" | "group">("none")
   const [groupPick, setGroupPick] = useState<string[]>([])
   const searchRef = useRef<HTMLInputElement | null>(null)
+  /*
+   * The server's answer to the same query: matches *inside* messages, across
+   * every conversation. Title matching above is instant and local; this one
+   * is debounced and only asked for two or more characters, and it lands
+   * below the title matches so the list never jumps while you type.
+   */
+  const [hits, setHits] = useState<MessageSearchHit[]>([])
+  const [searching, setSearching] = useState(false)
+  useEffect(() => {
+    const needle = query.trim()
+    if (needle.length < 2) {
+      setHits([])
+      setSearching(false)
+      return
+    }
+    const controller = new AbortController()
+    const timer = setTimeout(() => {
+      setSearching(true)
+      searchMessages(needle, 20, controller.signal)
+        .then((found) => setHits(found))
+        .catch(() => setHits([]))
+        .finally(() => setSearching(false))
+    }, 250)
+    return () => {
+      clearTimeout(timer)
+      controller.abort()
+    }
+  }, [query])
 
   const botById = useMemo(() => {
     const map: Record<string, Bot> = {}
@@ -85,9 +114,7 @@ export function ConversationList({
       })
       .filter(({ thread, seated }) => {
         if (!needle) return true
-        const haystack = [thread.title, ...seated.map((bot) => `${bot.name} ${bot.role}`)]
-          .join(" ")
-          .toLowerCase()
+        const haystack = [thread.title, ...seated.map((bot) => `${bot.name} ${bot.role}`)].join(" ").toLowerCase()
         return haystack.includes(needle)
       })
   }, [threads, botById, query])
@@ -178,17 +205,12 @@ export function ConversationList({
             conversation from the start rather than only a brief.
           */}
           <p className="rail__picker-note">
-            Pick everybody who should read along from the start. You do not need a group to get
-            work handed over — a bot can reach anyone on your team and brings them in when it
-            does.
+            Pick everybody who should read along from the start. You do not need a group to get work handed over — a bot
+            can reach anyone on your team and brings them in when it does.
           </p>
           {bots.map((bot) => (
             <label key={bot.id} className="rail__picker-row rail__picker-row--check">
-              <input
-                type="checkbox"
-                checked={groupPick.includes(bot.id)}
-                onChange={() => toggleGroupPick(bot.id)}
-              />
+              <input type="checkbox" checked={groupPick.includes(bot.id)} onChange={() => toggleGroupPick(bot.id)} />
               <BotAvatar bot={bot} size={22} />
               <span className="rail__picker-name">{bot.name}</span>
             </label>
@@ -215,11 +237,9 @@ export function ConversationList({
       <div className="rail__list" role="list" aria-label="Conversations">
         {loading && rows.length === 0 ? <Spinner label="Loading conversations" /> : null}
 
-        {!loading && rows.length === 0 ? (
+        {!loading && rows.length === 0 && hits.length === 0 && !searching ? (
           <p className="rail__empty">
-            {query
-              ? "Nothing matches that."
-              : "No conversations yet. Press + and pick a teammate."}
+            {query ? "Nothing matches that." : "No conversations yet. Press + and pick a teammate."}
           </p>
         ) : null}
 
@@ -242,7 +262,14 @@ export function ConversationList({
                 <span className="convo__avatar convo__avatar--none" aria-hidden="true" />
               )}
               <span className="convo__body">
-                <span className="convo__title">{truncate(thread.title || "Untitled", 28)}</span>
+                <span className="convo__title">
+                  {thread.pinned ? (
+                    <span className="convo__pin" aria-label="Pinned" title="Pinned">
+                      <Icon name="pin" size={10} />
+                    </span>
+                  ) : null}
+                  {truncate(thread.title || "Untitled", 28)}
+                </span>
                 {/*
                   A group's title is already the roster, so repeating the names
                   underneath it says nothing — the count does, and it is the
@@ -250,9 +277,7 @@ export function ConversationList({
                   members once the title has been truncated.
                 */}
                 <span className="convo__subtitle">
-                  {group
-                    ? `Group · ${seated.length} teammates`
-                    : (primary?.role ?? "No teammate seated")}
+                  {group ? `Group · ${seated.length} teammates` : (primary?.role ?? "No teammate seated")}
                 </span>
               </span>
               <span className="convo__stamp">{conversationTime(thread.updated_at)}</span>
@@ -264,6 +289,40 @@ export function ConversationList({
           <p className="rail__empty rail__empty--error">
             Conversations could not be loaded. The API may be unreachable.
           </p>
+        ) : null}
+
+        {query.trim().length >= 2 ? (
+          <div className="rail__hits" aria-label="Messages that match">
+            <div className="rail__hits-label">
+              In messages
+              {searching ? <Spinner size="sm" label="Searching" inline /> : null}
+            </div>
+            {!searching && hits.length === 0 ? <p className="rail__empty">No message says that.</p> : null}
+            {hits.map((hit) => {
+              const thread = threads.find((t) => t.id === hit.thread_id)
+              const speaker = hit.bot_id ? botById[hit.bot_id]?.name : "You"
+              return (
+                <button
+                  key={hit.message_id}
+                  type="button"
+                  className="hit"
+                  onClick={() => {
+                    if (thread) onSelectThread(thread)
+                  }}
+                  disabled={!thread}
+                  title={thread ? `Open ${hit.thread_title}` : "This conversation is no longer listed"}
+                >
+                  <span className="hit__meta">
+                    <span className="hit__thread">{truncate(hit.thread_title || "Untitled", 26)}</span>
+                    <span className="hit__stamp">{conversationTime(hit.created_at)}</span>
+                  </span>
+                  <span className="hit__snippet">
+                    <span className="hit__speaker">{speaker ?? "Teammate"}:</span> {hit.snippet}
+                  </span>
+                </button>
+              )
+            })}
+          </div>
         ) : null}
       </div>
 

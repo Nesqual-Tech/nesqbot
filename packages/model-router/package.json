@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Tier table, routing rules and cost estimation mirrored from the Python model router",
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "UNLICENSED",
   "type": "module",
   "sideEffects": false,
   "//": [

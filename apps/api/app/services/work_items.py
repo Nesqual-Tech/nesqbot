@@ -9,7 +9,7 @@ a reply arrives on a channel the current owner does not work. If the transfer
 lived in ``routers/work_items.py`` the second and third callers would each write
 their own version, and the third would forget the ledger row — which is the one
 part that cannot be forgotten, because the ledger *is* the product claim (see
-``docs/architecture.md``: the competitor's audit view is still "coming").
+``docs/competitive-analysis.md``: the competitor's audit view is still "coming").
 
 So there is exactly one function that changes ``work_items.owner_bot_id``, and
 it cannot do so without writing ``work_item_transfers``.

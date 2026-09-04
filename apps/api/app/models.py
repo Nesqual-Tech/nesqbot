@@ -31,6 +31,8 @@ class User(Base):
     email: Mapped[str] = mapped_column(Text, unique=True)
     display_name: Mapped[str] = mapped_column(Text)
     entra_oid: Mapped[str | None] = mapped_column(Text, unique=True, nullable=True)
+    #: `admin` or `member`. See `app.auth.require_role` and docs/security.md.
+    role: Mapped[str] = mapped_column(Text, default="member", server_default="member")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.clock_timestamp())
 
 
@@ -112,6 +114,7 @@ class Thread(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     title: Mapped[str] = mapped_column(Text)
     owner_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
+    pinned: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.clock_timestamp())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.clock_timestamp(), onupdate=func.clock_timestamp())
 
@@ -369,7 +372,7 @@ class WorkItem(Base):
     exception and an onboarding checklist all need the same three facts — an
     owning bot, the human it belongs to, and a recorded history of who was
     holding it when. Per-use-case tables would each need their own copy of the
-    transfer ledger, and the ledger is the whole point: `docs/architecture.md`
+    transfer ledger, and the ledger is the whole point: `docs/competitive-analysis.md`
     records that the competitor's audit view is "coming". One table means one
     queryable answer to "who handed this to whom, and why".
 

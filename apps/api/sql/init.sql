@@ -387,7 +387,7 @@ CREATE INDEX IF NOT EXISTS idx_action_log_reversible ON action_log(bot_id, rever
 -- A lead is the motivating case, not the mechanism, so this is one general
 -- `work_items` table with a free-text `type` rather than a `leads` table plus a
 -- `tickets` table plus an `invoices` table, each with its own copy of the
--- transfer ledger. The ledger is the differentiator (docs/architecture.md
+-- transfer ledger. The ledger is the differentiator (docs/competitive-analysis.md
 -- records the competitor's audit view as "coming"), and a differentiator wants
 -- exactly one place to be queried from.
 --
@@ -766,3 +766,21 @@ BEGIN
     );
   END LOOP;
 END $$;
+
+-- ---------------------------------------------------------------------------
+-- Roles. `member` is what every existing row becomes; `admin` is granted by
+-- `ADMIN_EMAILS` at sign-in or by another admin through `PATCH /users/{id}`.
+-- Enforcement lives in `app.auth.require_role`; see docs/security.md.
+-- ---------------------------------------------------------------------------
+ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'member';
+
+-- Pinned conversations sort above the rest in every client. A preference, not
+-- state the bots read — the orchestrator never looks at it.
+ALTER TABLE threads ADD COLUMN IF NOT EXISTS pinned BOOLEAN NOT NULL DEFAULT false;
+
+-- Full-text search across the transcripts a person owns (`GET /threads/search`).
+-- A trigram index is what makes `ILIKE '%needle%'` usable past a few thousand
+-- messages; without the extension the query still runs, just sequentially.
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+CREATE INDEX IF NOT EXISTS idx_messages_content_trgm ON messages USING gin (content gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_messages_thread_created ON messages(thread_id, created_at);

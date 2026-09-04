@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import uuid
 
+import pytest
 import pytest_asyncio
 from sqlalchemy import event, func, select
 
@@ -456,3 +457,216 @@ async def test_another_users_thread_is_not_reachable(authed, db, user_b, make_bo
     )
 
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------- rename / pin
+
+
+async def test_rename_a_thread(authed, make_thread, user_a, bot_a):
+    thread = await make_thread(user_a, [bot_a], title="old")
+    response = await authed.patch(f"/api/threads/{thread.id}", json={"title": "  new name  "})
+    assert response.status_code == 200
+    assert response.json()["title"] == "new name"
+    assert response.json()["pinned"] is False
+
+
+async def test_renaming_does_not_bump_updated_at(authed, make_thread, user_a, bot_a):
+    thread = await make_thread(user_a, [bot_a], title="old")
+    before = (await authed.get("/api/threads")).json()[0]["updated_at"]
+    after = (await authed.patch(f"/api/threads/{thread.id}", json={"title": "renamed"})).json()["updated_at"]
+    assert after == before
+
+
+async def test_pinned_threads_sort_first(authed, make_thread, user_a, bot_a):
+    older = await make_thread(user_a, [bot_a], title="older")
+    await make_thread(user_a, [bot_a], title="newer")
+    assert [t["title"] for t in (await authed.get("/api/threads")).json()] == ["newer", "older"]
+    pinned = await authed.patch(f"/api/threads/{older.id}", json={"pinned": True})
+    assert pinned.json()["pinned"] is True
+    assert [t["title"] for t in (await authed.get("/api/threads")).json()] == ["older", "newer"]
+    unpinned = await authed.patch(f"/api/threads/{older.id}", json={"pinned": False})
+    assert unpinned.json()["pinned"] is False
+
+
+async def test_patch_needs_something_to_change(authed, make_thread, user_a, bot_a):
+    thread = await make_thread(user_a, [bot_a])
+    assert (await authed.patch(f"/api/threads/{thread.id}", json={})).status_code == 422
+    assert (await authed.patch(f"/api/threads/{thread.id}", json={"title": "   "})).status_code == 422
+
+
+async def test_patch_is_owner_only(other, make_thread, user_a, bot_a):
+    thread = await make_thread(user_a, [bot_a])
+    response = await other.patch(f"/api/threads/{thread.id}", json={"title": "mine now"})
+    assert response.status_code == 404
+
+
+async def test_patch_writes_an_audit_row(authed, make_thread, user_a, bot_a, db):
+    thread = await make_thread(user_a, [bot_a])
+    await authed.patch(f"/api/threads/{thread.id}", json={"title": "logged", "pinned": True})
+    rows = (await db.execute(select(AuditEvent).where(AuditEvent.event_type == "thread_updated"))).scalars().all()
+    assert rows and rows[-1].detail["title"] == "logged" and rows[-1].detail["pinned"] is True
+
+
+# ----------------------------------------------------------------- search
+
+
+async def _say(db, thread, role, content, bot=None):
+    row = Message(thread_id=thread.id, role=role, content=content, bot_id=getattr(bot, "id", None))
+    db.add(row)
+    await db.commit()
+    return row
+
+
+async def test_search_finds_messages_across_own_threads_only(authed, make_thread, user_a, user_b, bot_a, db):
+    mine = await make_thread(user_a, [bot_a], title="Q3 planning")
+    theirs = await make_thread(user_b, [bot_a], title="Their thread")
+    await _say(db, mine, "user", "Remember the Contoso renewal is due in October")
+    await _say(db, mine, "assistant", "Noted: Contoso renewal, October.", bot_a)
+    await _say(db, theirs, "user", "Contoso must never show up for user A")
+    response = await authed.get("/api/threads/search", params={"q": "contoso"})
+    assert response.status_code == 200
+    hits = response.json()
+    assert len(hits) == 2
+    assert {h["thread_id"] for h in hits} == {str(mine.id)}
+    assert all(h["thread_title"] == "Q3 planning" for h in hits)
+    assert hits[0]["role"] == "assistant" and hits[0]["bot_id"] == str(bot_a.id)  # newest first
+    assert "Contoso" in hits[0]["snippet"]
+
+
+async def test_search_snippet_is_a_window_not_the_whole_message(authed, make_thread, user_a, bot_a, db):
+    thread = await make_thread(user_a, [bot_a])
+    await _say(db, thread, "user", ("filler " * 200) + "NEEDLE" + (" more" * 200))
+    hit = (await authed.get("/api/threads/search", params={"q": "needle"})).json()[0]
+    assert "NEEDLE" in hit["snippet"]
+    assert len(hit["snippet"]) < 400
+    assert hit["snippet"].startswith("…") and hit["snippet"].endswith("…")
+
+
+async def test_search_escapes_like_metacharacters(authed, make_thread, user_a, bot_a, db):
+    thread = await make_thread(user_a, [bot_a])
+    await _say(db, thread, "user", "discount is 50% off")
+    await _say(db, thread, "user", "discount is 50 percent off")
+    hits = (await authed.get("/api/threads/search", params={"q": "50%"})).json()
+    assert [h["snippet"] for h in hits] == ["discount is 50% off"]
+
+
+async def test_search_skips_tool_output_and_validates_q(authed, make_thread, user_a, bot_a, db):
+    thread = await make_thread(user_a, [bot_a])
+    await _say(db, thread, "tool", '{"payload": "secretword"}')
+    assert (await authed.get("/api/threads/search", params={"q": "secretword"})).json() == []
+    assert (await authed.get("/api/threads/search", params={"q": "x"})).status_code == 422
+    assert (await authed.get("/api/threads/search", params={"q": "xx", "limit": 0})).status_code == 422
+
+
+# ------------------------------------------------------------ attachments
+
+PNG_1X1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+
+
+async def test_a_message_with_attachments_is_stored_and_listed_without_bytes(
+    authed, make_thread, user_a, bot_a, db
+):
+    import base64
+
+    thread = await make_thread(user_a, [bot_a])
+    csv = base64.b64encode(b"name,amount\nacme,12\n").decode()
+    response = await authed.post(
+        f"/api/threads/{thread.id}/messages",
+        json={
+            "content": "What is in these?",
+            "attachments": [
+                {"name": "pixel.png", "media_type": "image/png", "data": PNG_1X1},
+                {"name": "sheet.csv", "media_type": "text/csv", "data": csv},
+            ],
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    listed = (await authed.get(f"/api/threads/{thread.id}/messages")).json()
+    user_msg = next(m for m in listed if m["role"] == "user")
+    assert user_msg["meta"]["attachments"] == [
+        {"name": "pixel.png", "media_type": "image/png", "size": 70},
+        {"name": "sheet.csv", "media_type": "text/csv", "size": 20},
+    ]
+    assert "data" not in str(user_msg["meta"])
+
+    stored = await db.get(Message, uuid.UUID(user_msg["id"]))
+    assert stored.meta["attachments"][0]["data"] == PNG_1X1
+
+    message_id = user_msg["id"]
+    png = await authed.get(f"/api/threads/{thread.id}/messages/{message_id}/attachments/0")
+    assert png.status_code == 200
+    assert png.headers["content-type"].startswith("image/png")
+    assert png.content == base64.b64decode(PNG_1X1)
+    assert 'filename="pixel.png"' in png.headers["content-disposition"]
+
+    sheet = await authed.get(f"/api/threads/{thread.id}/messages/{message_id}/attachments/1")
+    assert sheet.content == b"name,amount\nacme,12\n"
+
+    missing = await authed.get(f"/api/threads/{thread.id}/messages/{message_id}/attachments/2")
+    assert missing.status_code == 404
+    assert missing.json()["code"] == "attachment_not_found"
+
+
+async def test_attachment_bytes_are_owner_only(authed, other, make_thread, user_a, bot_a):
+    thread = await make_thread(user_a, [bot_a])
+    sent = await authed.post(
+        f"/api/threads/{thread.id}/messages",
+        json={"content": "look", "attachments": [{"name": "p.png", "media_type": "image/png", "data": PNG_1X1}]},
+    )
+    assert sent.status_code == 200
+    listed = (await authed.get(f"/api/threads/{thread.id}/messages")).json()
+    message_id = next(m["id"] for m in listed if m["role"] == "user")
+    assert (await other.get(f"/api/threads/{thread.id}/messages/{message_id}/attachments/0")).status_code == 404
+
+
+@pytest.mark.parametrize(
+    "attachment, code",
+    [
+        ({"name": "a.exe", "media_type": "application/octet-stream", "data": PNG_1X1}, "attachment_type_unsupported"),
+        ({"name": "a.png", "media_type": "image/png", "data": "not base64!!"}, "attachment_invalid"),
+        ({"name": "a.png", "media_type": "image/png", "data": "QUJD" * (1400 * 1024)}, "attachment_too_large"),
+    ],
+)
+async def test_bad_attachments_are_400_with_a_code(authed, make_thread, user_a, bot_a, attachment, code):
+    thread = await make_thread(user_a, [bot_a])
+    response = await authed.post(
+        f"/api/threads/{thread.id}/messages", json={"content": "x", "attachments": [attachment]}
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == code
+
+
+async def test_too_many_attachments_is_400(authed, make_thread, user_a, bot_a):
+    thread = await make_thread(user_a, [bot_a])
+    five = [{"name": f"{i}.png", "media_type": "image/png", "data": PNG_1X1} for i in range(5)]
+    response = await authed.post(f"/api/threads/{thread.id}/messages", json={"content": "x", "attachments": five})
+    assert response.status_code == 400
+    assert response.json()["code"] == "too_many_attachments"
+
+
+async def test_the_stream_endpoint_rejects_bad_attachments_before_streaming(authed, make_thread, user_a, bot_a):
+    thread = await make_thread(user_a, [bot_a])
+    response = await authed.post(
+        f"/api/threads/{thread.id}/messages/stream",
+        json={"content": "x", "attachments": [{"name": "a.zip", "media_type": "application/zip", "data": PNG_1X1}]},
+    )
+    assert response.status_code == 400
+    assert response.json()["code"] == "attachment_type_unsupported"
+
+
+async def test_message_meta_reaches_the_client(authed, make_thread, user_a, bot_a, db):
+    """`meta` was missing from `MessageOut` for a long time — handovers were
+    written to it and rendered by nobody."""
+    thread = await make_thread(user_a, [bot_a])
+    row = Message(
+        thread_id=thread.id,
+        role="assistant",
+        content="Handing over",
+        bot_id=bot_a.id,
+        meta={"handoff_to": "abc", "ledger_key": "k1"},
+    )
+    db.add(row)
+    await db.commit()
+    listed = (await authed.get(f"/api/threads/{thread.id}/messages")).json()
+    assert listed[-1]["meta"] == {"handoff_to": "abc", "ledger_key": "k1"}

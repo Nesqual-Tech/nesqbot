@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, Header, status
 from jose import JWTError, jwt
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import (
     ALGORITHM,
+    ROLE_ADMIN,
     create_access_token,
+    decode_session_token,
     get_current_user,
     get_or_create_dev_user,
+    require_admin,
     revoke_token,
     upsert_entra_user,
     verify_entra_access_token,
@@ -22,9 +26,9 @@ from app.auth import (
 from app.config import get_settings
 from app.db import get_db
 from app.errors import AppError
-from app.models import User
+from app.models import AuditEvent, User
 from app.routers.deps import require_model
-from app.schemas import DeviceRegisterIn, EntraLoginIn, OkOut, TokenOut, UserOut
+from app.schemas import DeviceRegisterIn, EntraLoginIn, OkOut, TokenOut, UpdateUserRoleIn, UserOut
 
 logger = logging.getLogger("nesqbot.auth")
 
@@ -103,9 +107,91 @@ async def logout(
     return OkOut(ok=True, detail="revoked" if revoked else "nothing_to_revoke")
 
 
+@router.post("/auth/refresh", response_model=TokenOut)
+async def refresh(
+    authorization: str | None = Header(default=None),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> TokenOut:
+    """Trade a valid session token for a fresh one.
+
+    The presented token is revoked in the same transaction the new one is
+    minted in, so there is never a moment with two live tokens for one
+    session — a client that refreshes on a schedule keeps exactly one, and a
+    token copied out of a device dies fourteen days after it was minted no
+    matter how often the real client refreshes.
+
+    Only a token this API minted can be refreshed. The dev bypass and the
+    worker's service token both authenticate `get_current_user` but carry no
+    session to renew; they get 400 `not_refreshable` rather than a token that
+    would silently change what identity the caller is using.
+    """
+    token = (authorization or "").removeprefix("Bearer ").strip()
+    payload = decode_session_token(token) if token else None
+    if payload is None or str(payload.get("sub") or "") != str(user.id):
+        raise AppError(400, "not_refreshable", "Only a session token can be refreshed")
+    fresh = create_access_token(str(user.id), user.email)
+    await revoke_token(db, payload)
+    return TokenOut(access_token=fresh, user=UserOut.model_validate(user))
+
+
 @router.get("/me", response_model=UserOut)
 async def me(user: User = Depends(get_current_user)) -> User:
     return user
+
+
+# ---------------------------------------------------------------------------
+# Users (admin)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/users", response_model=list[UserOut])
+async def list_users(
+    db: AsyncSession = Depends(get_db),
+    _admin: User = Depends(require_admin),
+) -> list[User]:
+    """Everyone who has ever signed in, oldest first. Admin only."""
+    result = await db.execute(select(User).order_by(User.created_at, User.email))
+    return list(result.scalars().all())
+
+
+@router.patch("/users/{user_id}", response_model=UserOut)
+async def update_user_role(
+    user_id: uuid.UUID,
+    body: UpdateUserRoleIn,
+    db: AsyncSession = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> User:
+    """Grant or remove the admin role. Admin only.
+
+    An admin may not demote themself while they are the only admin: with
+    enforcement switched on by the existence of an admin, that would lock
+    every admin-only route to nobody. Anyone else may be demoted, including
+    another admin — the last-admin rule is about the *count*, not the caller.
+    """
+    target = await db.get(User, user_id)
+    if target is None:
+        raise AppError(404, "user_not_found", "User not found")
+    if target.role == body.role:
+        return target
+    if target.role == ROLE_ADMIN and body.role != ROLE_ADMIN:
+        remaining = await db.execute(
+            select(func.count()).select_from(User).where(User.role == ROLE_ADMIN, User.id != target.id)
+        )
+        if int(remaining.scalar_one() or 0) == 0:
+            raise AppError(409, "last_admin", "At least one admin must remain")
+    previous = target.role
+    target.role = body.role
+    db.add(
+        AuditEvent(
+            actor_user_id=admin.id,
+            event_type="user_role_changed",
+            detail={"user_id": str(target.id), "from": previous, "to": body.role},
+        )
+    )
+    await db.commit()
+    await db.refresh(target)
+    return target
 
 
 @router.post("/me/devices", status_code=status.HTTP_201_CREATED)

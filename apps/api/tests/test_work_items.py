@@ -5,7 +5,7 @@ Three things this module is really checking, in order of how much they matter:
 1. **A handover is always recorded.** Every path that changes
    ``work_items.owner_bot_id`` writes a ``work_item_transfers`` row, and no path
    that does not write one can change it. That ledger is the product claim (see
-   ``docs/architecture.md``), so a hole in it is not a cosmetic bug.
+   ``docs/competitive-analysis.md``), so a hole in it is not a cosmetic bug.
 2. **Owner scoping refuses another user, with 404 and not 403.** Same rule as
    the rest of the API — a 403 confirms the id exists.
 3. **The schema migration is genuinely re-runnable.** ``sql/init.sql`` executes

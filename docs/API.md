@@ -12,7 +12,10 @@ All list endpoints are scoped to the calling user where an owner column exists.
 | POST | `/auth/dev-login` | dev only (403 when `NESQ_ENV=production`) |
 | POST | `/auth/entra` | body `{id_token}` → validate Entra JWT via JWKS, upsert user by `oid`, return `TokenOut` |
 | POST | `/auth/logout` | revoke the bearer token presented on this call; `{ok, detail: revoked\|nothing_to_revoke}` |
-| GET | `/me` | current user |
+| POST | `/auth/refresh` | trade the presented session token for a fresh 14-day one; the old `jti` is revoked in the same transaction, so a session only ever has one live token. `TokenOut`. 400 `not_refreshable` when the caller authenticated some other way (dev bypass, the worker's service token) |
+| GET | `/me` | current user — `UserOut {id, email, display_name, role}`; `role` is `admin` or `member` |
+| GET | `/users` | **admin** — everyone who has signed in, oldest first |
+| PATCH | `/users/{user_id}` | **admin** — `{role: admin\|member}`; 409 `last_admin` when it would leave no admin at all; writes `user_role_changed` to the audit log |
 | POST | `/me/devices` | register a push token: `{token, platform: ios\|android\|web}` → upsert on `(user_id, token)`, returns `{ok, device_id}`. Used by the mobile app for approval notifications |
 | DELETE | `/me/devices/{token}` | unregister |
 
@@ -87,14 +90,17 @@ Four invariants hold whatever the mechanism looks like:
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| GET | `/threads` | own threads |
+| GET | `/threads` | own threads — pinned first, then most recently spoken in. `ThreadOut {id, title, bot_ids, pinned, created_at, updated_at}` |
 | POST | `/threads` | create |
+| PATCH | `/threads/{thread_id}` | rename and/or pin: `{title?, pinned?}`, at least one, title non-blank. Does **not** bump `updated_at` — that column means "last spoken in" and renaming an old conversation must not float it to the top. Writes `thread_updated` to the audit log |
+| GET | `/threads/search` | `?q=<2..200 chars>&limit=<1..100, default 30>` — case-insensitive substring search across every message in the caller's own threads (tool output excluded), newest first. `[MessageSearchHit {thread_id, thread_title, message_id, role, bot_id, snippet, created_at}]`; `snippet` is a window around the first match, never the whole body. Backed by a trigram index on `messages.content` |
 | POST | `/threads/{thread_id}/bots` | seat more bots on an existing thread — additive and idempotent. The roster is what makes delegation possible: a bot can only hand work to somebody in the room |
 | DELETE | `/threads/{thread_id}/bots/{bot_id}` | unseat one bot; 409 `last_bot_in_thread` if it is the only one, since a thread with no bots cannot answer |
 | DELETE | `/threads/{thread_id}` | cascade |
-| GET | `/threads/{thread_id}/messages` | ordered |
-| POST | `/threads/{thread_id}/messages` | non-streaming turn (existing response shape, unchanged) |
-| POST | `/threads/{thread_id}/messages/stream` | SSE `text/event-stream`. Events: `token` `{delta}`, `handoff` `{bot_id,bot_name,from_bot_id?,from_bot_name?,run_id?,chain?,delegated?}` (the last five appear only when one bot handed work to another through the `delegate_to_bot` control tool; `chain` is the delegation path, e.g. `person → lead_generator → sales`), `tool` `{connector,action,ok}`, `approval` `{approval_id,title,phase?,run_id?}` (`phase` is either `approved` or `rejected`, and `run_id` names the run being continued; both appear only on a decision that resumes a parked run), `desktop` `{bot_id,phase,…}`, `done` `{message_id,bot_id,tier,cost_usd}`, `error` `{detail}` |
+| GET | `/threads/{thread_id}/messages` | ordered. `MessageOut` carries `meta` — the orchestrator's annotations (`handoff_to`, `ledger_key`, …) and `attachments: [{name, media_type, size}]` **without the bytes** |
+| GET | `/threads/{thread_id}/messages/{message_id}/attachments/{index}` | the bytes of one attachment, `Content-Type` = its media type, `Content-Disposition: inline; filename=…`, `X-Content-Type-Options: nosniff`. 404 `message_not_found` / `attachment_not_found`; owner only, like the thread |
+| POST | `/threads/{thread_id}/messages` | non-streaming turn (existing response shape, unchanged). Body `{content, mention_bot_ids?, attachments?: [{name, media_type, data}]}` — `data` is base64 (a data-URL prefix is tolerated). Images (`image/png`, `image/jpeg`, `image/webp`, `image/gif`, ≤ 4 MB) reach the model as vision input; text files (`text/plain`, `text/markdown`, `text/csv`, `text/tab-separated-values`, `application/json`, `text/x-log`, ≤ 256 KB, UTF-8) are inlined into the prompt under a heading naming the file. At most 4 per message. Anything else is 400 `attachment_type_unsupported`; also 400 `attachment_too_large`, `attachment_invalid`, `too_many_attachments`. Only the two most recent image-bearing user messages keep their pixels when history is replayed to the model; older ones become `[image attached: name]` |
+| POST | `/threads/{thread_id}/messages/stream` | Same body as the non-streaming turn, attachments included — a bad attachment is a plain 400 before any event is sent. SSE `text/event-stream`. Events: `token` `{delta}`, `handoff` `{bot_id,bot_name,from_bot_id?,from_bot_name?,run_id?,chain?,delegated?}` (the last five appear only when one bot handed work to another through the `delegate_to_bot` control tool; `chain` is the delegation path, e.g. `person → lead_generator → sales`), `tool` `{connector,action,ok}`, `approval` `{approval_id,title,phase?,run_id?}` (`phase` is either `approved` or `rejected`, and `run_id` names the run being continued; both appear only on a decision that resumes a parked run), `desktop` `{bot_id,phase,…}`, `done` `{message_id,bot_id,tier,cost_usd}`, `error` `{detail}` |
 | GET | `/threads/{thread_id}/events` | SSE subscription to thread events pushed by worker/routines. Carries `turn_started` `{thread_id,bot_id,bot_name}`, `handoff`, `tool`, `approval`, `desktop`, `done`, `error`. Deliberately does NOT carry `token` — the streaming requester gets deltas on its own response; passive viewers get a typing indicator from `turn_started` and the finished text from `done` |
 
 ### The `desktop` event
@@ -322,7 +328,7 @@ noVNC files. Close codes: `4401` unauthorised, `4404` no desktop, `4409` ticket 
 
 A work item is an owned, transferable unit of work — the object a bot hands to another bot. It is
 generalised with a `type` (`lead`, `ticket`, `invoice`, …) rather than modelled as a `leads` table:
-the transfer ledger is the differentiator (`docs/architecture.md`), and a differentiator
+the transfer ledger is the differentiator (`docs/competitive-analysis.md`), and a differentiator
 wants one place to be queried from. Owner-scoped to the human via `work_items.owner_user_id`, which
 never changes; only `owner_bot_id` moves. Not-yours is 404, never 403.
 
@@ -429,7 +435,7 @@ with no resolvable human gets no run at all and is recorded `unroutable`, never 
 ## Rehearsal and reversibility
 
 Answers the two gaps that make agent products unfit for customer-facing work: you cannot
-rehearse an action, and you cannot take it back. See `docs/architecture.md`.
+rehearse an action, and you cannot take it back. See `docs/competitive-analysis.md`.
 
 A dry run performs **no** side effects. Every outbound effect in the service layer passes
 through one chokepoint, `services.simulation.perform`, which either records the intent or
@@ -535,6 +541,24 @@ async def start_routine_now(routine, user_id: str | None = None) -> dict   # {wo
 ```
 
 `user_id` is the human who *triggered this run*, which differs from the routine's owner whenever someone runs a colleague's routine — and that is the case where attribution matters most, since the resulting approval should be decidable by whoever pressed the button. It wins over the owner-derived value; absent, `routine_argument` falls back to `routine.owner_user_id`. Returns `{}` on failure, not a truthy error dict, so the caller's inline fallback triggers correctly. `sync_routine_schedule` takes no override — a cron-fired schedule has no triggering human by definition.
+
+## Roles and limits
+
+Two roles: `admin` and `member`. Ownership still decides almost everything (see security.md); the role
+gate is only on what ownership cannot cover — the shared connector catalog (`POST`/`DELETE
+/integrations/connectors/…`), the shared system bots (`PATCH /bots/{id}` and `/budget` on a bot with
+`is_system`), `POST /bots/system/reseed`, and `/users`. A refused call is **403 `role_required`** — not
+404, because a collection-level action exists for everyone and hiding it would only read as an outage.
+
+Enforcement switches on by itself the moment one admin exists (`ADMIN_EMAILS`, or a promotion through
+`PATCH /users/{id}`); before that a deployment is in its bootstrap state and every member may do all of
+the above, exactly as before roles existed. `RBAC_ENFORCE=1` forces enforcement regardless. In
+`NESQ_ENV=development` the `X-Nesq-Dev` user counts as an admin.
+
+`RATE_LIMIT_PER_MINUTE` (0 = off, the default) puts a token bucket in front of every route, keyed on the
+bearer token or, failing that, the client address, with a burst of `RATE_LIMIT_BURST` (defaults to the
+per-minute figure). Over the limit: **429 `rate_limited`** with `Retry-After`; every response carries
+`X-RateLimit-Limit` and `X-RateLimit-Remaining`.
 
 ## Error shape
 

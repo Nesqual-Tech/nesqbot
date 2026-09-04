@@ -94,6 +94,8 @@ import type {
   RunEvalSuiteRequest,
   SendMessageRequest,
   TeachRoutineRequest,
+  UpdateThreadRequest,
+  UpdateUserRoleRequest,
   TokenResponse,
   UpdateBotRequest,
   UpdateBudgetRequest,
@@ -205,6 +207,9 @@ export type RoutineRun = Run
 export type CreateBotInput = CreateCustomBotRequest
 export type UpdateBotInput = UpdateBotRequest
 export type CreateThreadInput = CreateThreadRequest
+export type UpdateThreadInput = UpdateThreadRequest
+export type UpdateThreadIn = UpdateThreadRequest
+export type UpdateUserRoleIn = UpdateUserRoleRequest
 export type SendMessageInput = SendMessageRequest
 export type ApprovalDecisionInput = ApprovalDecisionRequest
 export type RegisterConnectorInput = RegisterConnectorRequest

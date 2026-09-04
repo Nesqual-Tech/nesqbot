@@ -1,6 +1,7 @@
 import { memo, useState, type CSSProperties } from "react"
 import { botColors, logoInk } from "@nesqbot/ui"
 import { clockTime, cx, initials } from "../lib/format"
+import { MessageAttachments } from "./Attachments"
 import { BotAvatar } from "./BotAvatar"
 import { Markdown } from "./Markdown"
 import type { Bot, Message } from "../types"
@@ -91,6 +92,7 @@ export const MessageBubble = memo(function MessageBubble({ message, bot, streami
         </header>
       ) : null}
 
+      <MessageAttachments message={message} />
       <div className={cx("bubble__content", markdown && "bubble__content--md")}>
         {markdown ? <Markdown text={message.content} /> : message.content}
         {/*

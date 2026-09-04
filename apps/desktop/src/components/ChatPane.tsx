@@ -3,6 +3,7 @@ import { useMessages } from "../hooks/useMessages"
 import { useThreadEvents } from "../hooks/useThreadEvents"
 import type { ThreadsApi } from "../hooks/useThreads"
 import { cx, truncate } from "../lib/format"
+import type { StagedAttachment } from "../lib/attachments"
 import { isTakeoverRequested, requestFromEvent } from "../lib/takeover"
 import { useSelection, useToast } from "../state/AppState"
 import { useTakeover } from "../state/takeover"
@@ -98,6 +99,7 @@ export function ChatPane({
   const ensuringRef = useRef<string | null>(null)
   const [personaOpen, setPersonaOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  const [renaming, setRenaming] = useState<string | null>(null)
   const [prefill, setPrefill] = useState<{ text: string; key: number } | null>(null)
 
   const activeBot = useMemo(() => bots.find((b) => b.id === activeBotId) ?? null, [bots, activeBotId])
@@ -174,8 +176,14 @@ export function ChatPane({
   }, [messages.messages.length, messages.streamText, messages.activity.length, messages.turn?.status])
 
   const send = useCallback(
-    async (text: string, mentionBotIds: string[]) => {
-      const outcome = await messages.send(text, mentionBotIds.length ? mentionBotIds : undefined)
+    async (text: string, mentionBotIds: string[], attachments: StagedAttachment[]) => {
+      const outcome = await messages.send(
+        text,
+        mentionBotIds.length ? mentionBotIds : undefined,
+        attachments.length
+          ? attachments.map((a) => ({ upload: a.upload, size: a.size, previewUrl: a.previewUrl }))
+          : undefined,
+      )
       if (!outcome.ok && outcome.error) toast.error("Message not delivered", outcome.error)
       if (outcome.fellBack) toast.warning("Streaming unavailable", "Sent the turn without live tokens.")
       return outcome
@@ -265,6 +273,36 @@ export function ChatPane({
     }
   }, [activeBot, threads, setActiveThreadId, toast])
 
+  const commitRename = useCallback(async () => {
+    const title = (renaming ?? "").trim()
+    setRenaming(null)
+    if (!activeThreadId || !title || title === activeThread?.title) return
+    try {
+      await threads.updateThread(activeThreadId, { title })
+    } catch (err) {
+      toast.error("Could not rename", err instanceof Error ? err.message : undefined)
+    }
+  }, [renaming, activeThreadId, activeThread?.title, threads, toast])
+
+  const togglePinned = useCallback(async () => {
+    if (!activeThreadId) return
+    try {
+      const next = await threads.updateThread(activeThreadId, { pinned: !activeThread?.pinned })
+      toast.success(next.pinned ? "Pinned" : "Unpinned", next.pinned ? "It stays at the top of the list." : undefined)
+    } catch (err) {
+      toast.error("Could not update", err instanceof Error ? err.message : undefined)
+    }
+  }, [activeThreadId, activeThread?.pinned, threads, toast])
+
+  /** What the person last sent here — arrow-up in the composer recalls it. */
+  const lastSent = useMemo(() => {
+    for (let i = messages.messages.length - 1; i >= 0; i -= 1) {
+      const m = messages.messages[i]
+      if (m.role === "user" && m.content.trim()) return m.content
+    }
+    return null
+  }, [messages.messages])
+
   const removeThread = useCallback(async () => {
     if (!activeThreadId) return
     try {
@@ -322,8 +360,7 @@ export function ChatPane({
       : null
 
   const suggestions = SUGGESTIONS[activeBot.slug] ?? GENERIC_SUGGESTIONS
-  const empty =
-    !messages.initialising && !messages.error && messages.messages.length === 0 && !streamingMessage
+  const empty = !messages.initialising && !messages.error && messages.messages.length === 0 && !streamingMessage
 
   return (
     <div className="chat">
@@ -341,13 +378,16 @@ export function ChatPane({
           aria-haspopup="dialog"
           title={group ? "Who is in this conversation?" : `Who is ${activeBot.name}?`}
         >
-          {group ? (
-            <BotAvatarStack bots={participants} size={26} />
-          ) : (
-            <BotAvatar bot={activeBot} size={30} />
-          )}
+          {group ? <BotAvatarStack bots={participants} size={26} /> : <BotAvatar bot={activeBot} size={30} />}
           <span className="chat__identity-text">
-            <span className="chat__title">{activeBot.name}</span>
+            <span className="chat__title">
+              {activeBot.name}
+              {activeThread?.pinned ? (
+                <span className="chat__pin" title="Pinned">
+                  <Icon name="pin" size={11} />
+                </span>
+              ) : null}
+            </span>
             <span className="chat__subtitle">
               {group
                 ? participants.map((bot) => bot.name).join(" · ")
@@ -427,13 +467,36 @@ export function ChatPane({
                   ))}
                 </select>
                 <p className="chat__menu-note">
-                  Anyone on your team can be handed work from here — the bot doing the handing
-                  seats them itself, and their reply lands in this conversation. Seat somebody
-                  now to have them read along from the start.
+                  Anyone on your team can be handed work from here — the bot doing the handing seats them itself, and
+                  their reply lands in this conversation. Seat somebody now to have them read along from the start.
                 </p>
               </>
             ) : null}
             <div className="chat__menu-divider" />
+            <button
+              type="button"
+              role="menuitem"
+              className="chat__menu-item"
+              disabled={!activeThreadId}
+              onClick={() => {
+                setMenuOpen(false)
+                setRenaming(activeThread?.title ?? "")
+              }}
+            >
+              Rename conversation
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              className="chat__menu-item"
+              disabled={!activeThreadId}
+              onClick={() => {
+                setMenuOpen(false)
+                void togglePinned()
+              }}
+            >
+              {activeThread?.pinned ? "Unpin" : "Pin to top"}
+            </button>
             <button
               type="button"
               role="menuitem"
@@ -460,6 +523,43 @@ export function ChatPane({
           </div>
         ) : null}
       </div>
+
+      {renaming !== null ? (
+        <form
+          className="chat__rename"
+          onSubmit={(event) => {
+            event.preventDefault()
+            void commitRename()
+          }}
+        >
+          <label className="sr-only" htmlFor="chat-rename">
+            Conversation name
+          </label>
+          <input
+            id="chat-rename"
+            className="input"
+            autoFocus
+            maxLength={200}
+            value={renaming}
+            onChange={(event) => setRenaming(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") setRenaming(null)
+            }}
+            onBlur={() => void commitRename()}
+          />
+          <button type="submit" className="btn btn--primary btn--sm">
+            Save
+          </button>
+          <button
+            type="button"
+            className="btn btn--ghost btn--sm"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => setRenaming(null)}
+          >
+            Cancel
+          </button>
+        </form>
+      ) : null}
 
       {personaOpen ? (
         <div className="modal" role="dialog" aria-modal="true">
@@ -570,10 +670,11 @@ export function ChatPane({
         focusKey={activeThreadId}
         prefill={prefill}
         mentionCandidates={mentionCandidates}
+        lastSent={lastSent}
         hint={
           group
-            ? "Enter to send. @ to mention a teammate — that chooses who answers."
-            : "Enter to send. Ctrl K for commands, @ to bring in a teammate, Shift+Enter for a new line."
+            ? "Enter to send. @ to mention a teammate — that chooses who answers. Paste or drop a file to attach it."
+            : "Enter to send. Ctrl K for commands, @ to bring in a teammate, paste or drop a file to attach it."
         }
         onSend={send}
         onStop={messages.stop}

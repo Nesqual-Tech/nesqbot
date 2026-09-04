@@ -26,12 +26,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_db
+from app.errors import AppError
 from app.models import RevokedToken, User
 
 logger = logging.getLogger(__name__)
 
 ALGORITHM = "HS256"
 DEV_USER_EMAIL = "dev@nesqualtech.com"
+
+ROLE_ADMIN = "admin"
+ROLE_MEMBER = "member"
+ROLES = frozenset({ROLE_ADMIN, ROLE_MEMBER})
+
+#: Session lifetime. `POST /auth/refresh` mints a fresh one and revokes the
+#: presented token, so a client that refreshes stays signed in indefinitely
+#: while a stolen token still dies on schedule.
+ACCESS_TOKEN_LIFETIME = timedelta(days=14)
 JWKS_URL_TEMPLATE = "https://login.microsoftonline.com/{tenant}/discovery/v2.0/keys"
 
 #: The single body every Entra rejection returns. Which check failed is an
@@ -45,13 +55,29 @@ _jwks_lock = asyncio.Lock()
 
 def create_access_token(user_id: str, email: str) -> str:
     settings = get_settings()
+    now = datetime.now(timezone.utc)
     payload = {
         "sub": user_id,
         "email": email,
         "jti": str(uuid.uuid4()),
-        "exp": datetime.now(timezone.utc) + timedelta(days=14),
+        "iat": now,
+        "exp": now + ACCESS_TOKEN_LIFETIME,
     }
     return jwt.encode(payload, settings.jwt_secret, algorithm=ALGORITHM)
+
+
+def decode_session_token(token: str) -> dict[str, Any] | None:
+    """The claims of a session token this API minted, or None.
+
+    The worker's service token and anything Entra issued decode-fail here —
+    they are not HS256 under `JWT_SECRET` — which is the correct answer for
+    the two callers (`/auth/logout`, `/auth/refresh`): neither can be
+    revoked or renewed, so both report "nothing to do" rather than an error.
+    """
+    try:
+        return jwt.decode(token, get_settings().jwt_secret, algorithms=[ALGORITHM])
+    except JWTError:
+        return None
 
 
 async def revoke_token(db: AsyncSession, payload: dict[str, Any]) -> bool:
@@ -113,8 +139,12 @@ async def get_or_create_dev_user(db: AsyncSession) -> User:
     result = await db.execute(select(User).where(User.email == DEV_USER_EMAIL))
     user = result.scalar_one_or_none()
     if user:
+        if grant_configured_role(user):
+            await db.commit()
+            await db.refresh(user)
         return user
     user = User(email=DEV_USER_EMAIL, display_name="Nesqual Dev")
+    grant_configured_role(user)
     db.add(user)
     await db.commit()
     await db.refresh(user)
@@ -379,6 +409,9 @@ async def upsert_entra_user(db: AsyncSession, claims: dict) -> User:
             user.email = email
         user.display_name = display_name or user.display_name
 
+    # Every sign-in, not only the first: an address added to ADMIN_EMAILS
+    # after the account existed still has to take effect.
+    grant_configured_role(user)
     await db.commit()
     await db.refresh(user)
     return user
@@ -425,3 +458,66 @@ async def get_current_user(
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
     return user
+
+
+# ---------------------------------------------------------------- roles
+
+
+def grant_configured_role(user: User) -> bool:
+    """Promote `user` to admin when `ADMIN_EMAILS` names them. Never demotes:
+    an address removed from the list keeps the role it was given until an
+    admin changes it, so editing an env var cannot lock everyone out."""
+    if user.role != ROLE_ADMIN and user.email.lower() in get_settings().admin_email_list:
+        user.role = ROLE_ADMIN
+        return True
+    return False
+
+
+async def any_admin_exists(db: AsyncSession) -> bool:
+    result = await db.execute(select(User.id).where(User.role == ROLE_ADMIN).limit(1))
+    return result.scalar_one_or_none() is not None
+
+
+async def rbac_is_enforced(db: AsyncSession) -> bool:
+    """Whether admin-only routes actually refuse members right now.
+
+    True once an admin exists, or when `RBAC_ENFORCE` is set. Before that a
+    deployment is in its bootstrap state and behaves as it always did.
+    """
+    if get_settings().rbac_enforce:
+        return True
+    return await any_admin_exists(db)
+
+
+async def require_admin(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """Dependency for the handful of routes ownership alone cannot gate:
+    the shared connector catalog, the shared system bots, other people's
+    roles. See docs/security.md.
+
+    A 403 with `role_required`, not a 404: the object-visibility rule (an
+    invisible thing looks absent) is about not leaking that an object exists.
+    A collection-level action exists for everyone; hiding it would only turn
+    "you are not allowed to" into "this app is broken".
+
+    The development bypass user counts as an admin: `NESQ_ENV=development`
+    is already an all-access environment and a developer should not have to
+    configure `ADMIN_EMAILS` to edit a system bot on their own machine.
+    """
+    if user.role == ROLE_ADMIN:
+        return user
+    settings = get_settings()
+    if settings.is_development and user.email == DEV_USER_EMAIL:
+        return user
+    if not await rbac_is_enforced(db):
+        return user
+    raise AppError(403, "role_required", "This action needs the admin role")
+
+
+async def assert_admin_for(db: AsyncSession, user: User) -> None:
+    """`require_admin` for routes that decide inside the handler — e.g. a
+    PATCH that is owner-gated for custom bots and admin-gated for system
+    ones. Same rules, same error."""
+    await require_admin(user=user, db=db)

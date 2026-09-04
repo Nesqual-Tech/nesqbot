@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import get_current_user
+from app.auth import assert_admin_for, get_current_user, require_admin
 from app.db import get_db
 from app.errors import AppError
 from app.models import (
@@ -319,7 +319,7 @@ async def delete_provider_credential(
 @router.post("/bots/system/reseed", response_model=OkOut)
 async def reseed_system_bots(
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ) -> OkOut:
     """Re-run system-bot seeding without restarting the API.
 
@@ -449,6 +449,12 @@ async def update_bot(
     bot = await get_visible_bot(db, bot_id, user)
     changes = body.model_dump(exclude_unset=True)
 
+    # A system bot is everybody's. Its name, role, persona, model pin and
+    # budget are deployment-wide settings, so changing them is an admin
+    # action; a custom bot stays owner-gated exactly as before.
+    if bot.is_system and changes:
+        await assert_admin_for(db, user)
+
     if bot.is_system and ("system_prompt" in changes or "slug" in changes):
         raise AppError(
             403,
@@ -550,6 +556,8 @@ async def update_budget(
     user: User = Depends(get_current_user),
 ) -> BotOut:
     bot = await get_visible_bot(db, bot_id, user)
+    if bot.is_system:
+        await assert_admin_for(db, user)
     bot.daily_budget_usd = Decimal(str(body.daily_budget_usd))
     db.add(
         AuditEvent(

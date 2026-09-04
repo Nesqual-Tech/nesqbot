@@ -10,8 +10,8 @@ from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, Header, Request
-from sqlalchemy import delete, select
+from fastapi import APIRouter, Depends, Header, Query, Request, Response
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
 
@@ -35,11 +35,14 @@ from app.routers.deps import (
 from app.schemas import (
     CreateThreadIn,
     MessageOut,
+    MessageSearchHit,
     OkOut,
     SendMessageIn,
     ThreadBotsIn,
     ThreadOut,
+    UpdateThreadIn,
 )
+from app.services import attachments as attachment_svc
 
 logger = logging.getLogger("nesqbot.threads")
 
@@ -124,8 +127,12 @@ async def list_threads(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> list[ThreadOut]:
+    # Pinned first, then most recently spoken in. A pin is a preference and
+    # the sort is where it takes effect; nothing else reads the flag.
     result = await db.execute(
-        select(Thread).where(Thread.owner_user_id == user.id).order_by(Thread.updated_at.desc())
+        select(Thread)
+        .where(Thread.owner_user_id == user.id)
+        .order_by(Thread.pinned.desc(), Thread.updated_at.desc())
     )
     threads = list(result.scalars().all())
     rosters = await _bot_ids_by_thread(db, [t.id for t in threads])
@@ -134,6 +141,7 @@ async def list_threads(
             id=t.id,
             title=t.title,
             bot_ids=rosters.get(t.id, []),
+            pinned=t.pinned,
             created_at=t.created_at,
             updated_at=t.updated_at,
         )
@@ -193,8 +201,152 @@ async def create_thread(
         id=thread.id,
         title=thread.title,
         bot_ids=bot_ids,
+        pinned=thread.pinned,
         created_at=thread.created_at,
         updated_at=thread.updated_at,
+    )
+
+
+@router.patch("/threads/{thread_id}", response_model=ThreadOut)
+async def update_thread(
+    thread_id: uuid.UUID,
+    body: UpdateThreadIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> ThreadOut:
+    """Rename or pin a conversation.
+
+    Neither touches `updated_at` on purpose: that column means "last spoken
+    in" and drives the sidebar order. Renaming a thread you last used a month
+    ago must not float it to the top as if somebody had just replied.
+    """
+    thread = await get_owned_thread(db, thread_id, user)
+    changed: dict[str, Any] = {}
+    if body.title is not None and body.title.strip() != thread.title:
+        thread.title = body.title.strip()
+        changed["title"] = thread.title
+    if body.pinned is not None and body.pinned != thread.pinned:
+        thread.pinned = body.pinned
+        changed["pinned"] = thread.pinned
+    if changed:
+        # `onupdate=clock_timestamp()` fires on any UPDATE of this row unless
+        # the column is part of the SET list; writing the old value back
+        # explicitly is what keeps "last spoken in" honest.
+        kept = thread.updated_at
+        db.add(
+            AuditEvent(
+                actor_user_id=user.id,
+                event_type="thread_updated",
+                detail={"thread_id": str(thread.id), **changed},
+            )
+        )
+        await db.flush()
+        await db.execute(
+            update(Thread).where(Thread.id == thread.id).values(updated_at=kept)
+        )
+        await db.commit()
+        await db.refresh(thread)
+    return ThreadOut(
+        id=thread.id,
+        title=thread.title,
+        bot_ids=await _thread_bot_ids(db, thread.id),
+        pinned=thread.pinned,
+        created_at=thread.created_at,
+        updated_at=thread.updated_at,
+    )
+
+
+#: `GET /threads/search` never returns more than this many hits, whatever
+#: `limit` says. Search is for finding a conversation again, not for export.
+SEARCH_MAX_LIMIT = 100
+SEARCH_SNIPPET_RADIUS = 80
+
+
+def _snippet(content: str, needle: str, radius: int = SEARCH_SNIPPET_RADIUS) -> str:
+    """A window of `content` around the first case-insensitive `needle`."""
+    text = " ".join((content or "").split())
+    at = text.lower().find(needle.lower())
+    if at < 0:
+        return text[: radius * 2] + ("…" if len(text) > radius * 2 else "")
+    start = max(0, at - radius)
+    end = min(len(text), at + len(needle) + radius)
+    return ("…" if start > 0 else "") + text[start:end] + ("…" if end < len(text) else "")
+
+
+def _like_pattern(needle: str) -> str:
+    """`%needle%` with LIKE's own metacharacters escaped (backslash escape)."""
+    escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+@router.get("/threads/search", response_model=list[MessageSearchHit])
+async def search_messages(
+    q: str = Query(min_length=2, max_length=200),
+    limit: int = Query(default=30, ge=1, le=SEARCH_MAX_LIMIT),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> list[MessageSearchHit]:
+    """Find messages across every thread the caller owns.
+
+    Substring match, case-insensitive, newest first — backed by the trigram
+    index `sql/init.sql` creates on `messages.content`. Ownership is a join,
+    not a post-filter: a message in somebody else's thread is never read.
+    Tool output (`role = tool`) is excluded; nobody searches for a payload.
+    """
+    needle = q.strip()
+    rows = await db.execute(
+        select(Message, Thread.title)
+        .join(Thread, Thread.id == Message.thread_id)
+        .where(
+            Thread.owner_user_id == user.id,
+            Message.role != "tool",
+            Message.content.ilike(_like_pattern(needle), escape="\\"),
+        )
+        .order_by(Message.created_at.desc())
+        .limit(limit)
+    )
+    return [
+        MessageSearchHit(
+            thread_id=message.thread_id,
+            thread_title=title,
+            message_id=message.id,
+            role=message.role,
+            bot_id=message.bot_id,
+            snippet=_snippet(message.content, needle),
+            created_at=message.created_at,
+        )
+        for message, title in rows.all()
+    ]
+
+
+@router.get("/threads/{thread_id}/messages/{message_id}/attachments/{index}")
+async def get_attachment(
+    thread_id: uuid.UUID,
+    message_id: uuid.UUID,
+    index: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> Response:
+    """The bytes of one attachment. `GET /messages` lists them without data."""
+    await get_owned_thread(db, thread_id, user)
+    message = await db.get(Message, message_id)
+    if message is None or message.thread_id != thread_id:
+        raise AppError(404, "message_not_found", "Message not found")
+    found = attachment_svc.attachment_bytes(message.meta, index)
+    if found is None:
+        raise AppError(404, "attachment_not_found", "Attachment not found")
+    data, media_type, name = found
+    safe_name = "".join(ch if ch.isalnum() or ch in "._- " else "_" for ch in name)[:120] or "file"
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'inline; filename="{safe_name}"',
+            "Cache-Control": "private, max-age=3600",
+            # Everything here is an <img> or a download, never a page: no
+            # sniffing a text file into something that runs.
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
@@ -338,6 +490,7 @@ async def add_thread_bots(
         id=thread.id,
         title=thread.title,
         bot_ids=await _thread_bot_ids(db, thread.id),
+        pinned=thread.pinned,
         created_at=thread.created_at,
         updated_at=thread.updated_at,
     )
@@ -389,6 +542,7 @@ async def remove_thread_bot(
         id=thread.id,
         title=thread.title,
         bot_ids=await _thread_bot_ids(db, thread.id),
+        pinned=thread.pinned,
         created_at=thread.created_at,
         updated_at=thread.updated_at,
     )
@@ -469,12 +623,14 @@ async def send_message(
             logger.info("idempotent replay for key=%s thread=%s", idempotency_key, thread_id)
             return cached
 
+    attachments = attachment_svc.validate_attachments(body.attachments)
     result = await orchestrator.handle_user_message(
         db,
         user=user,
         thread=thread,
         content=body.content,
         mention_bot_ids=body.mention_bot_ids or None,
+        attachments=attachments or None,
     )
     if cache_key:
         _idempotency_put(cache_key, result)
@@ -517,6 +673,9 @@ async def stream_message(
     user_id = user.id
     content = body.content
     mentions = body.mention_bot_ids or None
+    # Rejected here, as a 400 the client can read, rather than inside the
+    # stream where the only voice left is an `error` frame.
+    attachments = attachment_svc.validate_attachments(body.attachments) or None
 
     async def producer() -> AsyncIterator[Any]:
         # FastAPI closes `yield` dependencies before the streaming body runs, so
@@ -533,6 +692,7 @@ async def stream_message(
                 thread=sthread,
                 content=content,
                 mention_bot_ids=mentions,
+                attachments=attachments,
             ):
                 yield chunk
 

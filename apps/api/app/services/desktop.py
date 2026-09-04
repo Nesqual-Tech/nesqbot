@@ -19,7 +19,7 @@ Five modes, one `DesktopManager` surface (`start` / `stop` / `suspend` / `resume
   human applies the template out of band. Superseded by ``k8s`` for anyone who wants the
   API to actually drive the cluster; kept for the manual/CI deployment it was built for.
 
-The per-bot boundary is the product claim (see docs/architecture.md), so neither
+The per-bot boundary is the product claim (see docs/competitive-analysis.md), so neither
 the ACI nor the k8s driver ever shares or reuses a container group/Pod between bots, and
 the ACI driver never asks Azure for a public IP.
 """
@@ -263,7 +263,7 @@ def aci_group_name(bot: Any) -> str:
     first 12 hex digits of the bot id so that two slugs which sanitise to the
     same label (``Sales Ops`` and ``sales-ops``) can never land on the same
     group. Reuse across bots is the one thing that would turn per-bot isolation
-    back into Grok Bot's shared machine.
+    back into a competing agent product's shared machine.
     """
     slug = _ACI_NAME_RUNS.sub("-", _ACI_NAME_ILLEGAL.sub("-", str(getattr(bot, "slug", "")).lower()))
     slug = slug.strip("-")[:32].strip("-")

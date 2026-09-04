@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 #: Mirrors `Provider` in `app/services/model_router.py`. Hand-synced rather
 #: than imported so this leaf module stays dependency-free of `app.services`;
@@ -36,9 +36,18 @@ class UserOut(BaseModel):
     id: UUID
     email: str
     display_name: str
+    #: `admin` or `member`. Absent on rows minted before roles existed is not
+    #: possible — the column defaults to `member` — so this is never optional.
+    role: str = "member"
 
     class Config:
         from_attributes = True
+
+
+class UpdateUserRoleIn(BaseModel):
+    """`PATCH /users/{user_id}` — admin only. See `app.auth.require_role`."""
+
+    role: Literal["admin", "member"]
 
 
 class BotOut(BaseModel):
@@ -195,6 +204,7 @@ class ThreadOut(BaseModel):
     id: UUID
     title: str
     bot_ids: list[UUID]
+    pinned: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -203,6 +213,35 @@ class CreateThreadIn(BaseModel):
     bot_ids: list[UUID]
     title: str | None = None
     initial_message: str | None = None
+
+
+class UpdateThreadIn(BaseModel):
+    """`PATCH /threads/{thread_id}`: rename, pin. Both optional, neither may
+    be sent as its "empty" value — a blank title is a thread nobody can find."""
+
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    pinned: bool | None = None
+
+    @model_validator(mode="after")
+    def _something_to_change(self) -> "UpdateThreadIn":
+        if self.title is None and self.pinned is None:
+            raise ValueError("nothing to update: send title and/or pinned")
+        if self.title is not None and not self.title.strip():
+            raise ValueError("title may not be blank")
+        return self
+
+
+class MessageSearchHit(BaseModel):
+    """One match from `GET /threads/search`. `snippet` is a window of the
+    message around the first match, never the whole body."""
+
+    thread_id: UUID
+    thread_title: str
+    message_id: UUID
+    role: str
+    bot_id: UUID | None
+    snippet: str
+    created_at: datetime
 
 
 class ThreadBotsIn(BaseModel):
@@ -225,15 +264,43 @@ class MessageOut(BaseModel):
     user_id: UUID | None
     role: str
     content: str
+    #: Orchestrator annotations: `handoff_to`, `ledger_key`, `tier`, and
+    #: `attachments` (name/media_type/size only — the bytes are served by
+    #: `GET /threads/{thread_id}/messages/{message_id}/attachments/{index}`).
+    #: This field was missing from the schema for a long time, which is why
+    #: every client rendered handovers as prose: the data was written and
+    #: then dropped at the door.
+    meta: dict[str, Any] = {}
     created_at: datetime
 
     class Config:
         from_attributes = True
 
+    @field_validator("meta", mode="before")
+    @classmethod
+    def _public_meta(cls, value: Any) -> dict[str, Any]:
+        # Local import: `app.services.attachments` is a leaf, but schemas must
+        # stay importable before services are.
+        from app.services.attachments import public_meta
+
+        return public_meta(value)
+
+
+class AttachmentIn(BaseModel):
+    """A file sent with a message. Images reach the model as vision input;
+    text-like files are inlined into the prompt. Limits and the accepted
+    media types live in `app.services.attachments`."""
+
+    name: str = Field(min_length=1, max_length=200)
+    media_type: str = Field(min_length=3, max_length=100)
+    #: Base64, no data-URL prefix.
+    data: str = Field(min_length=1)
+
 
 class SendMessageIn(BaseModel):
     content: str
     mention_bot_ids: list[UUID] = []
+    attachments: list[AttachmentIn] = []
 
 
 class DesktopOut(BaseModel):

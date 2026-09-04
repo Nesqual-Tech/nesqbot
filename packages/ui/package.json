@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Nesqual Tech design tokens and semantic colour roles for Nesq Bot",
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "UNLICENSED",
   "type": "module",
   "sideEffects": false,
   "//": [

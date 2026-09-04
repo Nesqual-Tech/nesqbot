@@ -955,7 +955,7 @@ resource postgresExtensions 'Microsoft.DBforPostgreSQL/flexibleServers/configura
     // ActivationFailed - the whole Temporal app never starts and every routine
     // silently falls back to inline execution. BTREE_GIST rides along because
     // later temporal schema versions reach for it too.
-    value: 'VECTOR,PGCRYPTO,PG_STAT_STATEMENTS,UUID-OSSP,BTREE_GIN,BTREE_GIST'
+    value: 'VECTOR,PGCRYPTO,PG_TRGM,PG_STAT_STATEMENTS,UUID-OSSP,BTREE_GIN,BTREE_GIST'
     source: 'user-override'
   }
 }

@@ -43,6 +43,9 @@ export type IconName =
   | "sliders"
   | "users"
   | "more"
+  | "pin"
+  | "paperclip"
+  | "file"
 
 /** Path data on a 24x24 grid. Stroked, never filled, so weight stays uniform. */
 const PATHS: Record<IconName, string> = {
@@ -92,10 +95,15 @@ const PATHS: Record<IconName, string> = {
   // circles on avatars.
   sliders: "M4 7h9m4 0h3M4 17h3m4 0h9M15 4v6M9 14v6",
   // Two people — "start a group", next to `plus`'s "start a conversation".
-  users: "M9 12a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm-6 8a6 6 0 0 1 12 0m2.5-14.6a3.5 3.5 0 0 1 0 6.7M17 20a6 6 0 0 0-1.6-4.1",
+  users:
+    "M9 12a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Zm-6 8a6 6 0 0 1 12 0m2.5-14.6a3.5 3.5 0 0 1 0 6.7M17 20a6 6 0 0 0-1.6-4.1",
   // The overflow menu. Three dots on the horizontal, because it opens
   // downwards from a header row.
   more: "M6 12h.01M12 12h.01M18 12h.01",
+  // A drawing pin: head, collar, needle. Straight lines, like the rest.
+  pin: "M9 3h6l-1 6 3 3H7l3-3-1-6Zm3 9v9",
+  paperclip: "M16 6 8.5 13.5a2.5 2.5 0 0 0 3.5 3.5L19 10a4.5 4.5 0 0 0-6.4-6.4L5 11.2a6.5 6.5 0 0 0 9.2 9.2L20 14.6",
+  file: "M6 3h8l5 5v13H6V3Zm8 0v5h5M9 13h6m-6 4h6",
 }
 
 export interface IconProps extends Omit<SVGProps<SVGSVGElement>, "name"> {

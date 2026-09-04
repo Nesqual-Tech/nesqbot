@@ -15,7 +15,7 @@ from app.auth import prune_expired_revocations
 from app.config import get_settings
 from app.db import SessionLocal, engine
 from app.errors import register_error_handlers
-from app.middleware import RequestContextMiddleware
+from app.middleware import RateLimitMiddleware, RequestContextMiddleware
 from app.routers import API_VERSION, OPENAPI_TAGS, router
 from app.services import work_dispatch
 from app.services.provider_credentials import load_overrides_from_db as load_provider_credential_overrides
@@ -257,6 +257,13 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
         expose_headers=["X-Request-Id", "X-Response-Time-Ms"],
+    )
+    # Outermost of the two so a throttled request still gets a request id
+    # (Starlette wraps in reverse order of registration). Inert at 0.
+    app.add_middleware(
+        RateLimitMiddleware,
+        per_minute=settings.rate_limit_per_minute,
+        burst=settings.rate_limit_burst or None,
     )
     app.add_middleware(RequestContextMiddleware)
 

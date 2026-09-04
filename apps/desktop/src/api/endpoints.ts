@@ -3,7 +3,7 @@
  * Nothing in here holds state — hooks compose these.
  */
 import { parseSseEvent, parseThreadEvent } from "@nesqbot/protocol"
-import { del, get, patch, post, request, type Query } from "./client"
+import { authHeaders, buildUrl, del, get, patch, post, request, ApiError, type Query } from "./client"
 import { openSse, type SseHandle } from "./sse"
 import { AWAITING_HUMAN } from "../lib/takeover"
 import type {
@@ -38,6 +38,7 @@ import type {
   McpToolsResult,
   Memory,
   Message,
+  MessageSearchHit,
   ParkedRun,
   PendingApprovalOut,
   ProviderCredentialOut,
@@ -64,6 +65,8 @@ import type {
   TokenOut,
   UpdateBotInput,
   UpdateMcpInput,
+  UpdateThreadInput,
+  UpdateUserRoleIn,
   UpdateRoutineInput,
   BotPersona,
   UsageRow,
@@ -96,6 +99,11 @@ export const entraLogin = (entraAccessToken: string) =>
     noAuthRetry: true,
   })
 export const getMe = (signal?: AbortSignal) => get<User>("/me", undefined, signal)
+/** `POST /auth/refresh` — a fresh session token; the presented one is revoked. */
+export const refreshSession = () => post<TokenOut>("/auth/refresh")
+/* ------------------------------------------------------------------ users */
+export const listUsers = (signal?: AbortSignal) => get<User[]>("/users", undefined, signal)
+export const updateUserRole = (userId: string, input: UpdateUserRoleIn) => patch<User>(`/users/${userId}`, input)
 
 /* -------------------------------------------------------------------- bots */
 
@@ -126,6 +134,38 @@ export const getBotPersona = (botId: string, signal?: AbortSignal) =>
 export const listThreads = (signal?: AbortSignal) => get<Thread[]>("/threads", undefined, signal)
 export const createThread = (input: CreateThreadInput) => post<Thread>("/threads", input)
 export const deleteThread = (threadId: string) => del<void>(`/threads/${threadId}`)
+/** Rename and/or pin. Never bumps `updated_at` — see the API contract. */
+export const updateThread = (threadId: string, input: UpdateThreadInput) => patch<Thread>(`/threads/${threadId}`, input)
+/** `GET /threads/search` — substring search across the caller's own transcripts. */
+export const searchMessages = (q: string, limit = 30, signal?: AbortSignal) =>
+  get<MessageSearchHit[]>("/threads/search", { q, limit }, signal)
+
+/**
+ * The bytes of one attachment, as a Blob. Not `request()`: that helper
+ * parses JSON, and this is an image or a text file. The same headers are
+ * sent, because the route is owner-gated like everything else.
+ */
+export async function fetchAttachment(threadId: string, messageId: string, index: number): Promise<Blob> {
+  const url = buildUrl(`/threads/${threadId}/messages/${messageId}/attachments/${index}`)
+  let res: Response
+  try {
+    res = await fetch(url, { headers: authHeaders() })
+  } catch (err) {
+    throw new ApiError({
+      status: 0,
+      code: "network_error",
+      detail: err instanceof Error ? err.message : "Network request failed",
+    })
+  }
+  if (!res.ok) {
+    throw new ApiError({
+      status: res.status,
+      code: `http_${res.status}`,
+      detail: `Attachment request failed (${res.status})`,
+    })
+  }
+  return res.blob()
+}
 /*
  * A thread's roster is the only thing that makes delegation possible: a bot can
  * only hand work to somebody in the room. This app used to create every thread
@@ -134,8 +174,7 @@ export const deleteThread = (threadId: string) => del<void>(`/threads/${threadId
  */
 export const addThreadBots = (threadId: string, botIds: string[]) =>
   post<Thread>(`/threads/${threadId}/bots`, { bot_ids: botIds })
-export const removeThreadBot = (threadId: string, botId: string) =>
-  del<Thread>(`/threads/${threadId}/bots/${botId}`)
+export const removeThreadBot = (threadId: string, botId: string) => del<Thread>(`/threads/${threadId}/bots/${botId}`)
 export const listMessages = (threadId: string, signal?: AbortSignal) =>
   get<Message[]>(`/threads/${threadId}/messages`, undefined, signal)
 export const sendMessage = (threadId: string, input: SendMessageInput, signal?: AbortSignal) =>
@@ -217,8 +256,7 @@ export const listWorkItems = (
   query?: { type?: string; status?: string; owner_bot_id?: string; limit?: number },
   signal?: AbortSignal,
 ) => get<WorkItem[]>("/work-items", query as Query | undefined, signal)
-export const getWorkItem = (id: string, signal?: AbortSignal) =>
-  get<WorkItem>(`/work-items/${id}`, undefined, signal)
+export const getWorkItem = (id: string, signal?: AbortSignal) => get<WorkItem>(`/work-items/${id}`, undefined, signal)
 /** The hand-off ledger: who moved this item, to whom, and why. */
 export const listWorkItemTransfers = (id: string, signal?: AbortSignal) =>
   get<WorkItemTransfer[]>(`/work-items/${id}/transfers`, undefined, signal)

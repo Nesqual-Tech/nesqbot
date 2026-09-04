@@ -227,3 +227,45 @@ async def test_dev_login_tokens_can_be_revoked(client, app):
         await bearer_client.post("/api/auth/logout")
         response = await bearer_client.get("/api/me")
     assert response.status_code == 401
+
+
+# ------------------------------------------------------------- refresh
+
+
+async def test_refresh_mints_a_new_token_and_revokes_the_old_one(client, app):
+    from tests.conftest import _client_for
+
+    first = (await client.post("/api/auth/dev-login")).json()["access_token"]
+    async with _client_for(app, {"Authorization": f"Bearer {first}"}) as bearer:
+        refreshed = await bearer.post("/api/auth/refresh")
+        assert refreshed.status_code == 200
+        second = refreshed.json()["access_token"]
+        assert second and second != first
+        assert refreshed.json()["user"]["email"] == "dev@nesqualtech.com"
+        # The old token died in the same call.
+        assert (await bearer.get("/api/me")).status_code == 401
+    async with _client_for(app, {"Authorization": f"Bearer {second}"}) as bearer:
+        assert (await bearer.get("/api/me")).status_code == 200
+
+
+async def test_refresh_needs_a_session_token(client):
+    """The dev bypass authenticates but has nothing to renew."""
+    response = await client.post("/api/auth/refresh")
+    assert response.status_code == 400
+    assert response.json()["code"] == "not_refreshable"
+
+
+async def test_refresh_with_garbage_is_401(anon):
+    assert (await anon.post("/api/auth/refresh")).status_code == 401
+
+
+def test_session_tokens_carry_iat_and_a_fourteen_day_exp():
+    from datetime import datetime, timezone
+
+    from jose import jwt
+
+    from app.auth import ALGORITHM, create_access_token
+
+    claims = jwt.decode(create_access_token("u", "u@x"), get_settings().jwt_secret, algorithms=[ALGORITHM])
+    assert claims["iat"] <= datetime.now(timezone.utc).timestamp()
+    assert 13.9 * 86400 < claims["exp"] - claims["iat"] <= 14 * 86400

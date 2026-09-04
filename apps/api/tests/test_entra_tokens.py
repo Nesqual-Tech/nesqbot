@@ -26,9 +26,9 @@ from jose import jwt
 
 from app.config import get_settings
 
-TENANT_ID = "10000000-0000-0000-0000-000000000001"
-API_APP_ID = "20000000-0000-0000-0000-000000000002"
-CLIENT_APP_ID = "30000000-0000-0000-0000-000000000003"
+TENANT_ID = "YOUR_TENANT_ID"
+API_APP_ID = "YOUR_API_APP_ID"
+CLIENT_APP_ID = "YOUR_CLIENT_APP_ID"
 SCOPE = "access_as_user"
 ISSUER = f"https://login.microsoftonline.com/{TENANT_ID}/v2.0"
 
@@ -97,7 +97,7 @@ def mint(
         "sub": "subject-pairwise-id",
         "azp": CLIENT_APP_ID,
         "name": "Ada Lovelace",
-        "preferred_username": "ada@example.com",
+        "preferred_username": "ada@nesqualtech.com",
         "ver": "2.0",
     }
     if scp is not None:
@@ -176,7 +176,7 @@ def test_the_minted_token_is_shaped_like_a_real_v2_access_token():
 async def test_a_valid_access_token_is_accepted(entra):
     claims = await verify(mint(oid="11111111-1111-1111-1111-111111111111"))
     assert claims["oid"] == "11111111-1111-1111-1111-111111111111"
-    assert claims["preferred_username"] == "ada@example.com"
+    assert claims["preferred_username"] == "ada@nesqualtech.com"
 
 
 async def test_the_app_id_uri_spelling_of_the_audience_is_accepted(entra):
@@ -362,10 +362,10 @@ async def test_the_endpoint_exchanges_a_bearer_access_token_for_a_session(client
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["access_token"]
-    assert body["user"]["email"] == "ada@example.com"
+    assert body["user"]["email"] == "ada@nesqualtech.com"
 
     stored = (await db.execute(select(User).where(User.entra_oid == oid))).scalar_one()
-    assert stored.email == "ada@example.com"
+    assert stored.email == "ada@nesqualtech.com"
 
 
 async def test_the_session_token_the_endpoint_returns_authenticates_requests(app, client, entra):
@@ -378,7 +378,7 @@ async def test_the_session_token_the_endpoint_returns_authenticates_requests(app
     async with _client_for(app, {"Authorization": f"Bearer {token}"}) as session:
         me = await session.get("/api/me")
     assert me.status_code == 200
-    assert me.json()["email"] == "ada@example.com"
+    assert me.json()["email"] == "ada@nesqualtech.com"
 
 
 async def test_the_endpoint_still_accepts_the_documented_body_field(client, entra):
@@ -430,22 +430,22 @@ async def test_a_changed_email_follows_the_oid_rather_than_forking_the_account(c
     """Email is mutable; `oid` is not. A rename must not create a second user."""
     oid = "44444444-4444-4444-4444-444444444444"
     first = await client.post("/api/auth/entra", json={"id_token": mint(oid=oid)})
-    renamed = mint(oid=oid, extra={"preferred_username": "ada.byron@example.com"})
+    renamed = mint(oid=oid, extra={"preferred_username": "ada.byron@nesqualtech.com"})
     second = await client.post("/api/auth/entra", json={"id_token": renamed})
 
     assert first.json()["user"]["id"] == second.json()["user"]["id"]
-    assert second.json()["user"]["email"] == "ada.byron@example.com"
+    assert second.json()["user"]["email"] == "ada.byron@nesqualtech.com"
 
 
 async def test_an_account_with_no_entra_identity_yet_is_adopted_by_email(
     client, entra, db, make_user
 ):
     """The migration path: a local row created before Entra keeps its data."""
-    legacy = await make_user(email="grace@example.com")
+    legacy = await make_user(email="grace@nesqualtech.com")
     assert legacy.entra_oid is None
 
     oid = "55555555-5555-5555-5555-555555555555"
-    token = mint(oid=oid, extra={"preferred_username": "grace@example.com"})
+    token = mint(oid=oid, extra={"preferred_username": "grace@nesqualtech.com"})
     response = await client.post("/api/auth/entra", json={"id_token": token})
 
     assert response.status_code == 200, response.text
@@ -462,13 +462,13 @@ async def test_a_recycled_address_cannot_take_over_an_account_bound_to_another_o
     Without this, anyone the directory issues a recycled `preferred_username` to
     inherits the previous holder's threads, bots and approvals.
     """
-    incumbent = await make_user(email="shared@example.com")
+    incumbent = await make_user(email="shared@nesqualtech.com")
     incumbent.entra_oid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
     await db.commit()
     incumbent_id = str(incumbent.id)
 
     intruder_oid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
-    token = mint(oid=intruder_oid, extra={"preferred_username": "shared@example.com"})
+    token = mint(oid=intruder_oid, extra={"preferred_username": "shared@nesqualtech.com"})
     response = await client.post("/api/auth/entra", json={"id_token": token})
 
     assert response.status_code == 200, response.text
@@ -478,4 +478,4 @@ async def test_a_recycled_address_cannot_take_over_an_account_bound_to_another_o
 
     await db.refresh(incumbent)
     assert incumbent.entra_oid == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
-    assert incumbent.email == "shared@example.com"
+    assert incumbent.email == "shared@nesqualtech.com"

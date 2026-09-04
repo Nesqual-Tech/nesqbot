@@ -29,11 +29,19 @@ import type {
  * Identity
  * ------------------------------------------------------------------ */
 
+export type UserRole = "admin" | "member"
+
 export interface User {
   id: string
   email: string
   display_name: string
   entra_oid?: string
+  /**
+   * `admin` may touch what ownership cannot gate: the shared connector
+   * catalog, the shared system bots, other people's roles. Absent on an API
+   * older than roles — treat as `member`.
+   */
+  role?: UserRole
 }
 
 /* ------------------------------------------------------------------ *
@@ -99,8 +107,33 @@ export interface Thread {
   id: string
   title: string
   bot_ids: string[]
+  /** Pinned conversations sort first. A preference; no bot reads it. */
+  pinned?: boolean
   created_at: string
   updated_at: string
+}
+
+/**
+ * One file on a message, as a client sees it: the bytes are not here. Fetch
+ * them from `GET /threads/{thread_id}/messages/{message_id}/attachments/{index}`
+ * where `index` is this entry's position in `meta.attachments`.
+ */
+export interface MessageAttachment {
+  name: string
+  media_type: string
+  size: number
+}
+
+/** One hit from `GET /threads/search`. */
+export interface MessageSearchHit {
+  thread_id: string
+  thread_title: string
+  message_id: string
+  role: MessageRole
+  bot_id: string | null
+  /** A window around the first match, never the whole message. */
+  snippet: string
+  created_at: string
 }
 
 export interface Message {
@@ -111,8 +144,26 @@ export interface Message {
   role: MessageRole
   content: string
   created_at: string
-  /** Free-form orchestrator annotations (tier, tool calls, handoff notes). */
+  /**
+   * Orchestrator annotations (`handoff_to`, `ledger_key`, tier) and
+   * `attachments: MessageAttachment[]`. Free-form on the wire; see
+   * `messageAttachments` for the typed read.
+   */
   meta?: Record<string, unknown>
+}
+
+/** The attachments on a message, or `[]`. Tolerates any shape of `meta`. */
+export function messageAttachments(message: Pick<Message, "meta">): MessageAttachment[] {
+  const raw = message.meta?.attachments
+  if (!Array.isArray(raw)) return []
+  const out: MessageAttachment[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue
+    const a = item as Record<string, unknown>
+    if (typeof a.name !== "string" || typeof a.media_type !== "string") continue
+    out.push({ name: a.name, media_type: a.media_type, size: typeof a.size === "number" ? a.size : 0 })
+  }
+  return out
 }
 
 /* ------------------------------------------------------------------ *

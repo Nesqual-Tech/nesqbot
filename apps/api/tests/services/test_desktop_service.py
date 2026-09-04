@@ -348,7 +348,7 @@ def test_the_simulation_chokepoint_uses_the_same_classifier():
 # What these guard, in order of what it would cost to get wrong:
 #
 # 1. One container group per bot, never shared. Per-bot isolation is the
-#    product claim (docs/architecture.md); a competing agent product's shared machine is
+#    product claim (docs/competitive-analysis.md); a competing agent product's shared machine is
 #    what we are not.
 # 2. No public IP, ever. A Bot Desktop is a real browser driven by an LLM over
 #    hostile content.
@@ -369,7 +369,7 @@ IDENTITY_ID = (
     f"/subscriptions/{SUBSCRIPTION}/resourceGroups/{RESOURCE_GROUP}/providers"
     "/Microsoft.ManagedIdentity/userAssignedIdentities/nesq-desktop-puller"
 )
-REGISTRY = "YOUR_ACR.azurecr.io"
+REGISTRY = "nesqacrprod.azurecr.io"
 IMAGE = f"{REGISTRY}/nesqbot/bot-desktop:v0.2.0"
 PRIVATE_IP = "10.40.2.7"
 

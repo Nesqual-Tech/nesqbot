@@ -2371,7 +2371,7 @@ dependencies = [
 
 [[package]]
 name = "nesqbot"
-version = "0.11.3"
+version = "0.12.0"
 dependencies = [
  "keyring",
  "reqwest 0.12.28",

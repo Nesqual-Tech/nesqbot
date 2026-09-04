@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import get_current_user
+from app.auth import get_current_user, require_admin
 from app.db import get_db
 from app.errors import AppError
 from app.models import AuditEvent, BotConnector, BotMcp, Connector, McpServer, User
@@ -66,8 +66,11 @@ async def integrations_connectors(
 async def register_custom_connector(
     body: RegisterConnectorIn,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ) -> Connector:
+    # The catalog is shared by every bot and every person on this
+    # deployment, so adding to it is an admin action — see `require_admin`
+    # for how that switches on.
     existing = await db.get(Connector, body.id)
     if existing:
         raise AppError(400, "connector_exists", "connector id already exists")
@@ -99,7 +102,7 @@ async def register_custom_connector(
 async def delete_connector(
     connector_id: str,
     db: AsyncSession = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_admin),
 ) -> OkOut:
     """Remove a custom connector. First-party connectors are permanent."""
     connector = await db.get(Connector, connector_id)

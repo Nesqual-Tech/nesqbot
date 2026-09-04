@@ -23,9 +23,9 @@ signed with a certificate that every Windows machine already trusts — no `.cer
 
 | | |
 | --- | --- |
-| Signing account | `nesqual-signing`, endpoint `https://neu.codesigning.azure.net/` |
-| Certificate profile | `nesqual-public` (Public Trust) |
-| Subject | `CN=Nesqual Tech SRL, O=Nesqual Tech SRL, L=Rovinari, S=Gorj, C=RO` |
+| Signing account | `YOUR_SIGNING_ACCOUNT`, endpoint `https://neu.codesigning.azure.net/` |
+| Certificate profile | `YOUR_CERT_PROFILE` (Public Trust) |
+| Subject | `CN=Nesqual Tech SRL, O=Nesqual Tech SRL, C=RO` |
 | Issuer | `CN=Microsoft ID Verified CS AOC CA 04, O=Microsoft Corporation, C=US` |
 | Wired in | `tauri.conf.json` → `bundle.windows.signCommand` → `scripts/sign-trusted.cmd` |
 
@@ -92,7 +92,7 @@ still `Microsoft.CodeSigning` and the CLI extension is `az artifact-signing`.
 | | |
 | --- | --- |
 | Provider `Microsoft.CodeSigning` | Registered |
-| Signing account | `nesqual-signing`, resource group `rg-nesqbot` |
+| Signing account | `YOUR_SIGNING_ACCOUNT`, resource group `rg-nesqbot` |
 | Region / endpoint | North Europe — `https://neu.codesigning.azure.net/` |
 | SKU | Basic (~$10/month) |
 | Roles on the account | `Artifact Signing Identity Verifier` and `Artifact Signing Certificate Profile Signer`, both assigned to `avery.v@nesqualtech.com` |
@@ -103,7 +103,7 @@ That is everything that can be automated. The next step cannot be.
 
 Identity validation **cannot be done from the CLI**; Microsoft supports it only in the portal, and
 part of it is a live identity check against a government ID. In the portal: *Artifact Signing
-accounts → `nesqual-signing` → Objects → Identity validations → Organization → New identity →
+accounts → `YOUR_SIGNING_ACCOUNT` → Objects → Identity validations → Organization → New identity →
 Public*.
 
 Have ready — and note these must match public records for the legal entity **exactly**, because a
@@ -145,11 +145,11 @@ Identity validation was submitted on 2026-08-22 and **passed**. The three-year r
 materialise. There is still no way to read validation status from outside the portal — the
 `artifact-signing` CLI extension exposes only account and certificate-profile commands, and
 identity validation is not an ARM resource type, so `az rest` cannot see it either. The indirect
-signal is what confirmed it: the Public Trust profile `nesqual-public` exists, and a Public Trust
+signal is what confirmed it: the Public Trust profile `YOUR_CERT_PROFILE` exists, and a Public Trust
 profile cannot be created before validation completes.
 
 ```powershell
-az artifact-signing certificate-profile list -g rg-nesqbot --account-name nesqual-signing
+az artifact-signing certificate-profile list -g rg-nesqbot --account-name YOUR_SIGNING_ACCOUNT
 ```
 
 If this ever has to be redone, watch for an "Action Required" state: the named representative has
@@ -161,7 +161,7 @@ the whole request has to be recreated.
 ```powershell
 az extension add --name artifact-signing
 az artifact-signing certificate-profile create -g rg-nesqbot `
-  --account-name nesqual-signing -n nesqual-public `
+  --account-name YOUR_SIGNING_ACCOUNT -n YOUR_CERT_PROFILE `
   --profile-type PublicTrust --identity-validation-id <id from the portal>
 ```
 

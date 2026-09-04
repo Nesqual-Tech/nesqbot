@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Author and validate Nesq Bot connector manifests",
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "UNLICENSED",
   "type": "module",
   "sideEffects": false,
   "//": [

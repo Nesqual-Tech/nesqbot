@@ -15,6 +15,7 @@ import type { SseHandle } from "../api/sse"
 import { uid, usd } from "../lib/format"
 import { isTakeoverRequested, parseTakeoverEvent, readDoneRun } from "../lib/takeover"
 import { useAsyncResource } from "./useAsync"
+import type { AttachmentUpload } from "@nesqbot/protocol"
 import type {
   ApprovalEventData,
   ChannelEvent,
@@ -126,6 +127,17 @@ export interface TurnState {
   remote: boolean
 }
 
+/**
+ * A file going out with a message, plus the preview the optimistic bubble
+ * shows until the transcript refetches and the real attachment metadata
+ * (with a server-side id to fetch bytes by) replaces it.
+ */
+export interface SendAttachment {
+  upload: AttachmentUpload
+  size: number
+  previewUrl: string | null
+}
+
 export interface SendOutcome {
   ok: boolean
   error?: string
@@ -175,7 +187,7 @@ export interface MessagesApi {
    */
   turn: TurnState | null
   clearActivity: () => void
-  send: (content: string, mentionBotIds?: string[]) => Promise<SendOutcome>
+  send: (content: string, mentionBotIds?: string[], attachments?: SendAttachment[]) => Promise<SendOutcome>
   stop: () => void
   /**
    * Feed an event from the passive `/threads/{id}/events` subscription.
@@ -561,13 +573,15 @@ export function useMessages(threadId: string | null, options: MessagesOptions = 
   }, [])
 
   const send = useCallback(
-    async (content: string, mentionBotIds?: string[]): Promise<SendOutcome> => {
+    async (content: string, mentionBotIds?: string[], attachments?: SendAttachment[]): Promise<SendOutcome> => {
       const trimmed = content.trim()
+      const files = attachments ?? []
       if (!threadId) return { ok: false, error: "Pick a teammate to start a thread." }
-      if (!trimmed) return { ok: false, error: "Nothing to send." }
+      if (!trimmed && files.length === 0) return { ok: false, error: "Nothing to send." }
       if (streaming) return { ok: false, error: "Still streaming — stop the current reply first." }
 
       const optimisticId = uid("local")
+      const uploads = files.map((f) => f.upload)
       setData((prev) => [
         ...prev,
         {
@@ -576,7 +590,15 @@ export function useMessages(threadId: string | null, options: MessagesOptions = 
           role: "user",
           content: trimmed,
           created_at: new Date().toISOString(),
-        },
+          // The same shape the API will list back, minus the bytes, so the
+          // bubble renders identically before and after the refetch.
+          meta: files.length
+            ? {
+                attachments: files.map((f) => ({ name: f.upload.name, media_type: f.upload.media_type, size: f.size })),
+              }
+            : undefined,
+          ...(files.length ? { _previews: files.map((f) => f.previewUrl) } : {}),
+        } as Message,
       ])
 
       stoppedRef.current = false
@@ -600,7 +622,7 @@ export function useMessages(threadId: string | null, options: MessagesOptions = 
       const closeReason = await new Promise<"done" | "aborted" | "error">((resolve) => {
         const handle = api.openMessageStream(
           threadId,
-          { content: trimmed, mention_bot_ids: mentionBotIds },
+          { content: trimmed, mention_bot_ids: mentionBotIds, attachments: uploads.length ? uploads : undefined },
           {
             onEvent: (event) => {
               // A close-out `done` is the endpoint saying the connection ended,
@@ -647,7 +669,11 @@ export function useMessages(threadId: string | null, options: MessagesOptions = 
       // started, so the plain turn is safe to run.
       if (!frames.received) {
         try {
-          await api.sendMessage(threadId, { content: trimmed, mention_bot_ids: mentionBotIds })
+          await api.sendMessage(threadId, {
+            content: trimmed,
+            mention_bot_ids: mentionBotIds,
+            attachments: uploads.length ? uploads : undefined,
+          })
           settleTurn("done")
           await refetch()
           optionsRef.current.onDone?.()

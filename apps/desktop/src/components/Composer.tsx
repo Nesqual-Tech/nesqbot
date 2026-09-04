@@ -1,11 +1,26 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react"
 import {
-  applyMention,
-  matchCandidates,
-  mentionQuery,
-  mentionedBotIds,
-  type MentionCandidate,
-} from "../lib/mentions"
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type DragEvent,
+  type KeyboardEvent,
+} from "react"
+import { applyMention, matchCandidates, mentionQuery, mentionedBotIds, type MentionCandidate } from "../lib/mentions"
+import {
+  ACCEPT,
+  AttachmentRejected,
+  MAX_ATTACHMENTS,
+  filesFrom,
+  releaseStaged,
+  stageFile,
+  type StagedAttachment,
+} from "../lib/attachments"
+import { useToast } from "../state/AppState"
+import { StagedAttachments } from "./Attachments"
 import { BotAvatar } from "./BotAvatar"
 import { Icon } from "./Icon"
 import { Spinner } from "./Spinner"
@@ -14,7 +29,11 @@ export interface ComposerProps {
   disabled?: boolean
   streaming?: boolean
   placeholder: string
-  /** Changing this refocuses the textarea (e.g. when the thread changes). */
+  /**
+   * Changing this refocuses the textarea (e.g. when the thread changes) and
+   * is the key the unsent draft is remembered under: switch away mid-sentence
+   * and the sentence is there when you come back.
+   */
   focusKey?: string | null
   /**
    * Text dropped into the box from outside — a suggested prompt on an empty
@@ -29,12 +48,42 @@ export interface ComposerProps {
    * parsing — see `lib/mentions`.
    */
   mentionCandidates?: MentionCandidate[]
-  onSend: (text: string, mentionBotIds: string[]) => Promise<{ ok: boolean; error?: string }>
+  /**
+   * What the person last sent on this thread. Arrow-up in an empty box puts it
+   * back — the fastest way to fix a typo or ask the same thing of somebody
+   * else, and a habit every terminal and every chat app has trained.
+   */
+  lastSent?: string | null
+  onSend: (
+    text: string,
+    mentionBotIds: string[],
+    attachments: StagedAttachment[],
+  ) => Promise<{ ok: boolean; error?: string }>
   onStop: () => void
   hint?: string
 }
 
 const MAX_HEIGHT = 220
+const DRAFT_PREFIX = "nesq.draft."
+
+function readDraft(key: string | null | undefined): string {
+  if (!key) return ""
+  try {
+    return localStorage.getItem(DRAFT_PREFIX + key) ?? ""
+  } catch {
+    return ""
+  }
+}
+
+function writeDraft(key: string | null | undefined, text: string): void {
+  if (!key) return
+  try {
+    if (text.trim()) localStorage.setItem(DRAFT_PREFIX + key, text)
+    else localStorage.removeItem(DRAFT_PREFIX + key)
+  } catch {
+    // Storage full or blocked: the draft lives in memory until the switch.
+  }
+}
 
 export function Composer({
   disabled = false,
@@ -43,18 +92,24 @@ export function Composer({
   focusKey,
   prefill,
   mentionCandidates = [],
+  lastSent,
   onSend,
   onStop,
   hint,
 }: ComposerProps) {
-  const [draft, setDraft] = useState("")
+  const toast = useToast()
+  const [draft, setDraft] = useState(() => readDraft(focusKey))
   const [sending, setSending] = useState(false)
   const [caret, setCaret] = useState(0)
   // Dismissing is per-mention, not global: closing the list on `@sal` must not
   // keep it shut for the next `@` in the same message.
   const [dismissedAt, setDismissedAt] = useState<number | null>(null)
   const [highlight, setHighlight] = useState(0)
+  const [staged, setStaged] = useState<StagedAttachment[]>([])
+  const [dragging, setDragging] = useState(false)
   const ref = useRef<HTMLTextAreaElement | null>(null)
+  const fileInput = useRef<HTMLInputElement | null>(null)
+  const draftKey = useRef(focusKey)
 
   // Auto-grow without a layout dependency.
   useLayoutEffect(() => {
@@ -62,6 +117,29 @@ export function Composer({
     if (!node) return
     node.style.height = "auto"
     node.style.height = `${Math.min(node.scrollHeight, MAX_HEIGHT)}px`
+  }, [draft])
+
+  /*
+   * Drafts follow the thread. On a switch the outgoing thread's text is put
+   * away under its own key and the incoming one's is taken out; the staged
+   * files are dropped, because a screenshot meant for one conversation is
+   * rarely meant for the next and the object URLs must be released anyway.
+   */
+  useEffect(() => {
+    if (draftKey.current === focusKey) return
+    writeDraft(draftKey.current, draft)
+    draftKey.current = focusKey
+    setDraft(readDraft(focusKey))
+    setStaged((prev) => {
+      prev.forEach(releaseStaged)
+      return []
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusKey])
+
+  useEffect(() => {
+    const timer = setTimeout(() => writeDraft(draftKey.current, draft), 300)
+    return () => clearTimeout(timer)
   }, [draft])
 
   useEffect(() => {
@@ -113,14 +191,84 @@ export function Composer({
     setDismissedAt(query.start)
   }
 
+  /* ------------------------------------------------------------ files */
+
+  const addFiles = useCallback(
+    async (files: File[]) => {
+      if (!files.length || disabled) return
+      const room = MAX_ATTACHMENTS - staged.length
+      if (room <= 0) {
+        toast.warning("Attachment limit", `At most ${MAX_ATTACHMENTS} files per message.`)
+        return
+      }
+      const accepted: StagedAttachment[] = []
+      for (const file of files.slice(0, room)) {
+        try {
+          accepted.push(await stageFile(file))
+        } catch (err) {
+          toast.error("Not attached", err instanceof AttachmentRejected ? err.message : String(err))
+        }
+      }
+      if (files.length > room) {
+        toast.warning("Attachment limit", `Only the first ${room} of ${files.length} files were added.`)
+      }
+      if (accepted.length) setStaged((prev) => [...prev, ...accepted])
+      ref.current?.focus()
+    },
+    [disabled, staged.length, toast],
+  )
+
+  const removeStaged = (uid: string) => {
+    setStaged((prev) => {
+      const gone = prev.find((item) => item.uid === uid)
+      if (gone) releaseStaged(gone)
+      return prev.filter((item) => item.uid !== uid)
+    })
+  }
+
+  const onPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = filesFrom(event.clipboardData)
+    if (!files.length) return
+    // A pasted screenshot is a file with no text alongside it; a pasted
+    // spreadsheet cell range is text *and* a file — keep the text, add the file.
+    if (!event.clipboardData.getData("text/plain")) event.preventDefault()
+    void addFiles(files)
+  }
+
+  const onDrop = (event: DragEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    setDragging(false)
+    void addFiles(filesFrom(event.dataTransfer))
+  }
+
+  const onDragOver = (event: DragEvent<HTMLFormElement>) => {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return
+    event.preventDefault()
+    if (!dragging) setDragging(true)
+  }
+
+  /* ------------------------------------------------------------- send */
+
   const submit = async () => {
     const text = draft.trim()
-    if (!text || disabled || sending) return
+    if ((!text && staged.length === 0) || disabled || sending) return
+    const files = staged
     setDraft("")
+    setStaged([])
+    writeDraft(draftKey.current, "")
     setSending(true)
     try {
-      const result = await onSend(text, mentionedBotIds(text, mentionCandidates))
-      if (!result.ok) setDraft(text) // give the user their words back
+      const result = await onSend(text, mentionedBotIds(text, mentionCandidates), files)
+      if (!result.ok) {
+        // give the user their words — and their files — back
+        setDraft(text)
+        setStaged(files)
+      } else {
+        // Previews outlive the send only as long as the optimistic bubble;
+        // by the time the transcript refetches, the real bytes are fetched
+        // through the API. Releasing here would break that bubble, so the
+        // URLs are left to the page — a handful of object URLs is nothing.
+      }
     } finally {
       setSending(false)
       ref.current?.focus()
@@ -155,6 +303,12 @@ export function Composer({
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault()
       void submit()
+      return
+    }
+    if (event.key === "ArrowUp" && !draft && lastSent) {
+      event.preventDefault()
+      setText(lastSent, lastSent.length)
+      return
     }
     if (event.key === "Escape" && streaming) {
       event.preventDefault()
@@ -163,14 +317,18 @@ export function Composer({
   }
 
   const syncCaret = (node: HTMLTextAreaElement) => setCaret(node.selectionStart ?? node.value.length)
+  const canSend = !disabled && !sending && (Boolean(draft.trim()) || staged.length > 0)
 
   return (
     <form
-      className="composer"
+      className={`composer${dragging ? " composer--dragging" : ""}`}
       onSubmit={(event) => {
         event.preventDefault()
         void submit()
       }}
+      onDragOver={onDragOver}
+      onDragLeave={() => setDragging(false)}
+      onDrop={onDrop}
     >
       {menuOpen ? (
         <ul className="composer__mentions" role="listbox" aria-label="Mention a teammate">
@@ -197,6 +355,7 @@ export function Composer({
           ))}
         </ul>
       ) : null}
+      <StagedAttachments items={staged} onRemove={removeStaged} />
       <label className="sr-only" htmlFor="composer-input">
         Message your teammate
       </label>
@@ -218,26 +377,42 @@ export function Composer({
         onKeyUp={(event) => syncCaret(event.currentTarget)}
         onClick={(event) => syncCaret(event.currentTarget)}
         onKeyDown={onKeyDown}
+        onPaste={onPaste}
       />
       <div className="composer__actions">
+        <input
+          ref={fileInput}
+          type="file"
+          accept={ACCEPT}
+          multiple
+          hidden
+          onChange={(event) => {
+            void addFiles(Array.from(event.target.files ?? []))
+            event.target.value = ""
+          }}
+        />
+        <button
+          type="button"
+          className="composer__attach"
+          onClick={() => fileInput.current?.click()}
+          disabled={disabled || staged.length >= MAX_ATTACHMENTS}
+          aria-label="Attach a file"
+          title="Attach an image or a text file — or paste, or drop one here"
+        >
+          <Icon name="paperclip" size={16} />
+        </button>
         {streaming ? (
           <button type="button" className="btn btn--danger" onClick={onStop} aria-label="Stop generating">
             Stop
           </button>
         ) : (
-          <button
-            type="submit"
-            className="composer__send"
-            disabled={disabled || sending || !draft.trim()}
-            aria-label="Send"
-            title="Send (Enter)"
-          >
+          <button type="submit" className="composer__send" disabled={!canSend} aria-label="Send" title="Send (Enter)">
             {sending ? <Spinner size="sm" label="Sending" inline /> : <Icon name="send" size={16} />}
           </button>
         )}
       </div>
       <p className="composer__hint" id="composer-hint">
-        {hint ?? "Enter to send. Shift+Enter for a new line. Esc stops a stream."}
+        {dragging ? "Drop to attach" : (hint ?? "Enter to send. Shift+Enter for a new line. Esc stops a stream.")}
       </p>
     </form>
   )
