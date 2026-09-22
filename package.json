@@ -41,7 +41,7 @@
     "install:mobile": "npm --prefix apps/mobile install"
   },
   "devDependencies": {
-    "prettier": "^3.5.3",
+    "prettier": "^3.9.8",
     "typescript": "^5.8.2"
   },
   "//prettier": [
